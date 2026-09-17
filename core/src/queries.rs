@@ -387,6 +387,7 @@ pub struct AddressBalance {
     pub confirmed_balance_micronoid: String,
     pub confirmed_utxos: i64,
     pub total_received_micronoid: String,
+    pub total_sent_micronoid: String,
 }
 
 /// Confirmed balance and UTXO count for `address`, computed from indexed
@@ -431,10 +432,23 @@ pub fn address_balance(conn: &Connection, address: &str) -> Result<AddressBalanc
         |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?.to_string())),
     )?;
 
+    let total_sent_micronoid: String = conn.query_row(
+        &format!(
+            "SELECT COALESCE(SUM(CAST(t.input_sum_micronoid AS INTEGER)), 0)
+             FROM transactions t
+             JOIN blocks b ON b.id = t.block_id
+             WHERE t.input_owner = ?1 AND {canonical_on_b}"
+        ),
+        params![address],
+        |row| row.get::<_, i64>(0),
+    )?
+    .to_string();
+
     Ok(AddressBalance {
         confirmed_balance_micronoid,
         confirmed_utxos,
         total_received_micronoid,
+        total_sent_micronoid,
     })
 }
 

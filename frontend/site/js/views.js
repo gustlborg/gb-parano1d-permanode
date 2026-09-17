@@ -305,6 +305,7 @@ export async function addressView(address, page = 1) {
         <div class="stat"><div class="v">${noid(b.confirmed_balance_micronoid)}</div><div class="k">Confirmed balance</div></div>
         <div class="stat"><div class="v">${b.confirmed_utxos}</div><div class="k">Confirmed UTXOs</div></div>
         <div class="stat"><div class="v">${noid(b.total_received_micronoid)}</div><div class="k">Total received</div></div>
+        <div class="stat"><div class="v">${noid(b.total_sent_micronoid)}</div><div class="k">Total sent</div></div>
       </div>
       <p>${result.total} transaction(s) recorded involving this address.</p>
     </div>
