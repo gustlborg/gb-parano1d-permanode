@@ -86,6 +86,7 @@ async fn main() -> Result<()> {
         .route("/api/v1/address/{address}", get(get_address))
         .route("/api/v1/address/{address}/utxos", get(get_address_utxos))
         .route("/api/v1/gaps", get(get_gaps))
+        .route("/api/v1/richlist", get(get_richlist))
         .route("/api/v1/mempool", get(get_mempool))
         .fallback_service(static_service)
         .layer(CorsLayer::permissive())
@@ -306,6 +307,11 @@ struct AddressUtxosPage {
 async fn get_gaps(State(state): State<Arc<AppState>>) -> ApiResult<Vec<queries::GapEntry>> {
     let conn = state.conn.lock().unwrap();
     Ok(Json(queries::recent_gaps(&conn, 100)?))
+}
+
+async fn get_richlist(State(state): State<Arc<AppState>>) -> ApiResult<Vec<queries::RichListEntry>> {
+    let conn = state.conn.lock().unwrap();
+    Ok(Json(queries::richlist(&conn, 100)?))
 }
 
 async fn get_mempool(State(state): State<Arc<AppState>>) -> ApiResult<live_rpc::MempoolInfo> {

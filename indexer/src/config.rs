@@ -48,6 +48,13 @@ pub struct Config {
     /// been quiet for a while.
     #[serde(default = "default_true")]
     pub decoder_selfcheck: bool,
+
+    /// How often to refresh the live-balance cache for every address this
+    /// permanode has ever recorded, in poll cycles. One paranoid_getSlotsByOwner
+    /// call per known address, so this scales with the address count -
+    /// keep it infrequent as that list grows.
+    #[serde(default = "default_refresh_addresses_every_cycles")]
+    pub refresh_addresses_every_cycles: u64,
 }
 
 fn default_rpc_url() -> String {
@@ -71,6 +78,9 @@ fn default_prune_every_cycles() -> u64 {
 fn default_true() -> bool {
     true
 }
+fn default_refresh_addresses_every_cycles() -> u64 {
+    120 // ~10min at the default 5s poll interval
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -83,6 +93,7 @@ impl Default for Config {
             prune_every_cycles: default_prune_every_cycles(),
             getblock_fallback: default_true(),
             decoder_selfcheck: default_true(),
+            refresh_addresses_every_cycles: default_refresh_addresses_every_cycles(),
         }
     }
 }
@@ -104,7 +115,8 @@ impl Config {
                  retention_days = {}\n\
                  prune_every_cycles = {}\n\
                  getblock_fallback = {}\n\
-                 decoder_selfcheck = {}\n",
+                 decoder_selfcheck = {}\n\
+                 refresh_addresses_every_cycles = {}\n",
                 cfg.rpc_url,
                 cfg.db_path,
                 cfg.poll_interval_seconds,
@@ -113,6 +125,7 @@ impl Config {
                 cfg.prune_every_cycles,
                 cfg.getblock_fallback,
                 cfg.decoder_selfcheck,
+                cfg.refresh_addresses_every_cycles,
             );
             std::fs::write(path, toml_str)?;
             return Ok(cfg);

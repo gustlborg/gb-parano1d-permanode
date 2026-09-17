@@ -150,6 +150,19 @@ fn init_schema(conn: &Connection) -> Result<()> {
             key    TEXT PRIMARY KEY,
             value  TEXT NOT NULL
         );
+
+        -- Live balance (paranoid_getSlotsByOwner), periodically refreshed
+        -- by the indexer for every address this permanode has ever seen -
+        -- not reconstructed from historical transactions (nothing here
+        -- overlaps with the pruning-window problem), just a cache of what
+        -- the node's current state already says, saving a live RPC round
+        -- trip for things like a rich list.
+        CREATE TABLE IF NOT EXISTS address_balance_cache (
+            address                 TEXT PRIMARY KEY,
+            live_balance_micronoid  TEXT NOT NULL,
+            live_utxo_count         INTEGER NOT NULL,
+            fetched_at              TEXT NOT NULL
+        );
         "#,
     )?;
     Ok(())
@@ -293,4 +306,38 @@ pub fn prune_older_than(conn: &Connection, cutoff_unix: i64) -> Result<usize> {
         )?;
     }
     Ok(block_ids.len())
+}
+
+/// Every distinct address this permanode has ever recorded, as a sender,
+/// a receiver, or a block's miner. The set the live-balance cache refresh
+/// works through.
+pub fn known_addresses(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT input_owner FROM transactions WHERE input_owner IS NOT NULL
+         UNION
+         SELECT owner FROM tx_outputs
+         UNION
+         SELECT miner FROM blocks",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub fn upsert_address_balance_cache(
+    conn: &Connection,
+    address: &str,
+    live_balance_micronoid: &str,
+    live_utxo_count: i64,
+    fetched_at: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO address_balance_cache (address, live_balance_micronoid, live_utxo_count, fetched_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(address) DO UPDATE SET
+           live_balance_micronoid = excluded.live_balance_micronoid,
+           live_utxo_count = excluded.live_utxo_count,
+           fetched_at = excluded.fetched_at",
+        params![address, live_balance_micronoid, live_utxo_count, fetched_at],
+    )?;
+    Ok(())
 }

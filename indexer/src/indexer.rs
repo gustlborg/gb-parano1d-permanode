@@ -33,6 +33,13 @@ pub fn run(conn: &Connection, rpc: &RpcClient, cfg: &Config) -> Result<()> {
             }
         }
 
+        if cycles % cfg.refresh_addresses_every_cycles == 0 {
+            match refresh_known_address_balances(conn, rpc) {
+                Ok(n) => info!("refreshed live balance cache for {n} known address(es)"),
+                Err(e) => warn!("address balance refresh pass failed: {e:#}"),
+            }
+        }
+
         thread::sleep(Duration::from_secs(cfg.poll_interval_seconds));
     }
 }
@@ -434,4 +441,30 @@ fn insert_transactions(conn: &Connection, block_id: i64, retained: &RetainedBloc
     }
 
     Ok(())
+}
+
+/// Refreshes core::db::address_balance_cache for every address this
+/// permanode has ever recorded, straight from the node's Live State
+/// (paranoid_getSlotsByOwner) - same mechanism as the address page's live
+/// figures, just done proactively for the whole known-address set instead
+/// of on demand for one address. One node RPC call per address; a single
+/// failure just gets skipped, not fatal to the pass.
+fn refresh_known_address_balances(conn: &Connection, rpc: &RpcClient) -> Result<usize> {
+    let addresses = db::known_addresses(conn)?;
+    let now = Utc::now().to_rfc3339();
+    let mut refreshed = 0;
+    for address in &addresses {
+        let slots = match rpc.get_slots_by_owner(address) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("address balance refresh: {address}: {e:#}");
+                continue;
+            }
+        };
+        let live: Vec<_> = slots.into_iter().filter(|s| !s.empty).collect();
+        let balance: u64 = live.iter().map(|s| s.value).sum();
+        db::upsert_address_balance_cache(conn, address, &balance.to_string(), live.len() as i64, &now)?;
+        refreshed += 1;
+    }
+    Ok(refreshed)
 }
