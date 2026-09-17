@@ -161,6 +161,7 @@ struct AddressPage {
     page_size: i64,
     total: i64,
     transactions: Vec<queries::TxSummary>,
+    balance: queries::AddressBalance,
 }
 
 async fn get_address(
@@ -172,12 +173,14 @@ async fn get_address(
     let page = q.page.unwrap_or(1).max(1);
     let page_size = q.page_size.unwrap_or(25).clamp(1, 100);
     let (transactions, total) = queries::txs_by_address(&conn, &address, page, page_size)?;
+    let balance = queries::address_balance(&conn, &address)?;
     Ok(Json(AddressPage {
         address,
         page,
         page_size,
         total,
         transactions,
+        balance,
     }))
 }
 

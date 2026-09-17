@@ -382,6 +382,62 @@ fn canonical_filter_on(block_alias: &str) -> String {
     )
 }
 
+#[derive(Debug, Serialize)]
+pub struct AddressBalance {
+    pub confirmed_balance_micronoid: String,
+    pub confirmed_utxos: i64,
+    pub total_received_micronoid: String,
+}
+
+/// Confirmed balance and UTXO count for `address`, computed from indexed
+/// history only. An output counts as unspent if no recorded input anywhere
+/// (any address, any block) spends the same `creation_id` - slot_index
+/// alone isn't a stable identifier since slots get recycled once spent, but
+/// creation_id is unique per creation event. This can only see spends and
+/// receipts that happened after this permanode started recording: a
+/// balance that already existed before that is not reflected here.
+pub fn address_balance(conn: &Connection, address: &str) -> Result<AddressBalance> {
+    let canonical_on_b = canonical_filter_on("b");
+    let canonical_on_b2 = canonical_filter_on("b2");
+
+    let total_received_micronoid: String = conn.query_row(
+        &format!(
+            "SELECT COALESCE(SUM(CAST(o.amount_micronoid AS INTEGER)), 0)
+             FROM tx_outputs o
+             JOIN transactions t ON t.id = o.tx_id
+             JOIN blocks b ON b.id = t.block_id
+             WHERE o.owner = ?1 AND {canonical_on_b}"
+        ),
+        params![address],
+        |row| row.get::<_, i64>(0),
+    )?
+    .to_string();
+
+    let (confirmed_utxos, confirmed_balance_micronoid): (i64, String) = conn.query_row(
+        &format!(
+            "SELECT COUNT(*), COALESCE(SUM(CAST(o.amount_micronoid AS INTEGER)), 0)
+             FROM tx_outputs o
+             JOIN transactions t ON t.id = o.tx_id
+             JOIN blocks b ON b.id = t.block_id
+             WHERE o.owner = ?1 AND {canonical_on_b}
+               AND NOT EXISTS (
+                 SELECT 1 FROM tx_inputs i
+                 JOIN transactions t2 ON t2.id = i.tx_id
+                 JOIN blocks b2 ON b2.id = t2.block_id
+                 WHERE i.creation_id = o.creation_id AND {canonical_on_b2}
+               )"
+        ),
+        params![address],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?.to_string())),
+    )?;
+
+    Ok(AddressBalance {
+        confirmed_balance_micronoid,
+        confirmed_utxos,
+        total_received_micronoid,
+    })
+}
+
 pub fn chain_stats(conn: &Connection) -> Result<ChainStats> {
     let last_processed_height: Option<i64> = conn
         .query_row(
