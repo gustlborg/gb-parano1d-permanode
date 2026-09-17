@@ -1,0 +1,9 @@
+[Unit]
+Description=Run the permanode watchdog every 2 minutes
+
+[Timer]
+OnCalendar=*:0/2
+AccuracySec=20s
+
+[Install]
+WantedBy=timers.target

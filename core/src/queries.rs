@@ -41,6 +41,10 @@ pub struct BlockDetail {
     pub reward_micronoid: Option<i64>,
     pub total_fees_micronoid: Option<String>,
     pub body_captured: bool,
+    /// Blocks on top of this one including itself, from the indexer's own
+    /// tip; `None` if that isn't known yet. 18 and up is final on this
+    /// chain (the protocol's maximum reorg depth is 17).
+    pub confirmations: Option<i64>,
     pub transactions: Vec<TxSummary>,
 }
 
@@ -81,6 +85,9 @@ pub struct TxDetail {
     pub inputs: Vec<TxInput>,
     pub outputs: Vec<TxOutput>,
     pub block: TxBlockRef,
+    /// See `BlockDetail::confirmations`; `Some(0)` if the block was
+    /// orphaned.
+    pub confirmations: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -203,6 +210,7 @@ fn block_id_and_row(
                     reward_micronoid: row.get(11)?,
                     total_fees_micronoid: row.get(12)?,
                     body_captured: row.get::<_, i64>(13)? != 0,
+                    confirmations: None,
                     transactions: vec![],
                 },
             ))
@@ -256,20 +264,36 @@ fn tx_summaries_for_block(conn: &Connection, block_id: i64) -> Result<Vec<TxSumm
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// The indexer's own tip, if it has recorded one.
+pub fn indexed_tip(conn: &Connection) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row("SELECT value FROM indexer_state WHERE key = 'last_processed_height'", [], |r| r.get::<_, String>(0))
+        .optional()?
+        .and_then(|s| s.parse().ok()))
+}
+
+fn confirmations_for(tip: Option<i64>, height: i64) -> Option<i64> {
+    tip.map(|t| (t - height + 1).max(0))
+}
+
+fn finish_block(conn: &Connection, block_id: i64, mut detail: BlockDetail) -> Result<BlockDetail> {
+    detail.transactions = tx_summaries_for_block(conn, block_id)?;
+    detail.confirmations = confirmations_for(indexed_tip(conn)?, detail.height);
+    Ok(detail)
+}
+
 pub fn block_by_height(conn: &Connection, height: i64) -> Result<Option<BlockDetail>> {
-    let Some((block_id, mut detail)) = block_id_and_row(conn, "blocks.height = ?1", &height.to_string())? else {
+    let Some((block_id, detail)) = block_id_and_row(conn, "blocks.height = ?1", &height.to_string())? else {
         return Ok(None);
     };
-    detail.transactions = tx_summaries_for_block(conn, block_id)?;
-    Ok(Some(detail))
+    Ok(Some(finish_block(conn, block_id, detail)?))
 }
 
 pub fn block_by_hash(conn: &Connection, hash: &str) -> Result<Option<BlockDetail>> {
-    let Some((block_id, mut detail)) = block_id_and_row(conn, "blocks.hash = ?1", hash)? else {
+    let Some((block_id, detail)) = block_id_and_row(conn, "blocks.hash = ?1", hash)? else {
         return Ok(None);
     };
-    detail.transactions = tx_summaries_for_block(conn, block_id)?;
-    Ok(Some(detail))
+    Ok(Some(finish_block(conn, block_id, detail)?))
 }
 
 pub fn tx_by_txid(conn: &Connection, txid: &str) -> Result<Option<TxDetail>> {
@@ -310,12 +334,18 @@ pub fn tx_by_txid(conn: &Connection, txid: &str) -> Result<Option<TxDetail>> {
                         timestamp: row.get(12)?,
                         canonical: row.get::<_, i64>(13)? != 0,
                     },
+                    confirmations: None,
                 },
             ))
         })
         .optional()?;
     let Some((tx_id, mut detail)) = row else {
         return Ok(None);
+    };
+    detail.confirmations = if detail.block.canonical {
+        confirmations_for(indexed_tip(conn)?, detail.block.height)
+    } else {
+        Some(0)
     };
 
     let mut ph_stmt = conn.prepare(
@@ -364,8 +394,25 @@ pub fn txs_by_address(
     page: i64,
     page_size: i64,
 ) -> Result<(Vec<TxSummary>, i64)> {
-    let offset = (page.max(1) - 1) * page_size;
+    let offset = (page.max(1) - 1).saturating_mul(page_size);
     let canonical_on_b = canonical_filter_on("b");
+
+    let count_sql = format!(
+        "SELECT COUNT(*)
+         FROM transactions t
+         JOIN blocks b ON b.id = t.block_id
+         WHERE {canonical_on_b}
+           AND (t.input_owner = ?1 OR EXISTS (
+                 SELECT 1 FROM tx_outputs o WHERE o.tx_id = t.id AND o.owner = ?1))"
+    );
+    let total: i64 = conn.query_row(&count_sql, params![address], |row| row.get(0))?;
+    // A page past the end is answered without touching the table again:
+    // SQLite would otherwise walk every matching row up to the offset,
+    // which makes `?page=999999999` a cheap way to burn CPU.
+    if offset >= total {
+        return Ok((Vec::new(), total));
+    }
+
     let sql = format!(
         "SELECT {TX_SUMMARY_COLUMNS}
          FROM transactions t
@@ -379,17 +426,6 @@ pub fn txs_by_address(
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params![address, page_size, offset], tx_summary_from_row)?;
     let items: Vec<TxSummary> = rows.collect::<rusqlite::Result<_>>()?;
-
-    let count_sql = format!(
-        "SELECT COUNT(*)
-         FROM transactions t
-         JOIN blocks b ON b.id = t.block_id
-         WHERE {}
-           AND (t.input_owner = ?1 OR EXISTS (
-                 SELECT 1 FROM tx_outputs o WHERE o.tx_id = t.id AND o.owner = ?1))",
-        canonical_filter_on("b")
-    );
-    let total: i64 = conn.query_row(&count_sql, params![address], |row| row.get(0))?;
 
     Ok((items, total))
 }
