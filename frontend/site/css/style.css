@@ -65,15 +65,16 @@ a:hover { text-decoration: underline; }
   font-family: var(--mono);
   font-size: 0.9rem;
 }
-.search button {
+.btn, .search button {
   padding: 8px 16px;
   border-radius: 6px;
   border: 1px solid var(--accent-dim);
   background: var(--accent-dim);
   color: #eafffb;
   cursor: pointer;
+  font-size: 0.9rem;
 }
-.search button:hover { background: var(--accent); color: #06110f; }
+.btn:hover, .search button:hover { background: var(--accent); color: #06110f; }
 
 .ticker {
   display: flex;

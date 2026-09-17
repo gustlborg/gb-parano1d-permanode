@@ -369,7 +369,16 @@ export async function txView(txid) {
     </div>`;
 }
 
-function liveUtxosPanel(utxos) {
+function liveUtxosPlaceholder() {
+  return `
+    <h2>Live UTXOs</h2>
+    <p>Not loaded by default to keep this page light. The individual unspent
+      outputs behind the "Current UTXOs (live)" figure above, straight from
+      the node.</p>
+    <button id="load-live-utxos" type="button" class="btn">Load live UTXOs</button>`;
+}
+
+function liveUtxosPanelBody(utxos) {
   const rows = utxos
     .map(
       (u) => `<tr>
@@ -380,13 +389,11 @@ function liveUtxosPanel(utxos) {
     )
     .join("");
   return `
-    <div class="panel">
-      <h2>Live UTXOs (${utxos.length})</h2>
-      <div class="table-scroll"><table>
-        <thead><tr><th>Slot</th><th>Amount</th><th>Creation ID</th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="3">No unspent outputs.</td></tr>'}</tbody>
-      </table></div>
-    </div>`;
+    <h2>Live UTXOs (${utxos.length})</h2>
+    <div class="table-scroll"><table>
+      <thead><tr><th>Slot</th><th>Amount</th><th>Creation ID</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="3">No unspent outputs.</td></tr>'}</tbody>
+    </table></div>`;
 }
 
 function addressTxRow(tx, viewedAddress) {
@@ -448,7 +455,6 @@ itself seen since it started running.">${noid(b.confirmed_balance_micronoid)}</d
           : ""
       }
     </div>
-    ${liveKnown ? liveUtxosPanel(result.live_utxos) : ""}
     <div class="panel">
       <div class="table-scroll"><table>
         <thead><tr><th>Txid</th><th class="time-toggle" title="Click to toggle relative/absolute time">Time</th><th>Block</th><th>Sender</th><th>In → Out</th><th>Receiver</th><th>Amount</th><th>Fee</th></tr></thead>
@@ -459,12 +465,36 @@ itself seen since it started running.">${noid(b.confirmed_balance_micronoid)}</d
         <span>page ${page} / ${totalPages}</span>
         ${page < totalPages ? link(`/address/${address}?page=${page + 1}`, "older →") : ""}
       </div>
-    </div>`;
+    </div>
+    <div class="panel" id="live-utxos-panel">${liveUtxosPlaceholder()}</div>`;
 
   function mount(root) {
     let absoluteTime = false;
     applyTimeFormat(root, absoluteTime);
-    return wireTimeToggle(root, () => absoluteTime, (v) => (absoluteTime = v));
+    const disposeToggle = wireTimeToggle(root, () => absoluteTime, (v) => (absoluteTime = v));
+
+    const loadBtn = root.querySelector("#load-live-utxos");
+    const onLoad = async () => {
+      const panel = root.querySelector("#live-utxos-panel");
+      if (panel) panel.innerHTML = '<h2>Live UTXOs</h2><p class="loading">Loading…</p>';
+      try {
+        const utxoResult = await api.addressUtxos(address);
+        if (panel) {
+          panel.innerHTML =
+            utxoResult.live_utxos !== null
+              ? liveUtxosPanelBody(utxoResult.live_utxos)
+              : '<h2>Live UTXOs</h2><p class="error">Could not reach the node.</p>';
+        }
+      } catch (e) {
+        if (panel) panel.innerHTML = `<h2>Live UTXOs</h2><p class="error">Failed to load: ${e.message}</p>`;
+      }
+    };
+    if (loadBtn) loadBtn.addEventListener("click", onLoad);
+
+    return () => {
+      disposeToggle();
+      if (loadBtn) loadBtn.removeEventListener("click", onLoad);
+    };
   }
 
   return { html, mount };
