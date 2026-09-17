@@ -67,6 +67,17 @@ pub struct TxSummary {
     pub timestamp: i64,
     pub n_inputs: i64,
     pub n_outputs: i64,
+    /// Only on address pages: what this transaction did to the viewed
+    /// address's balance - outputs it received minus inputs it spent
+    /// (change back to itself therefore cancels out, the fee shows as a
+    /// small negative). `output_sum_micronoid` is the transaction's total
+    /// and says nothing about one participant's share.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address_delta_micronoid: Option<String>,
+    /// Only on address pages: the first output owner that is not the
+    /// viewed address (`receiver` may be its own change output).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub counterparty: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -248,6 +259,8 @@ fn tx_summary_from_row(row: &rusqlite::Row) -> rusqlite::Result<TxSummary> {
         timestamp: row.get("timestamp")?,
         n_inputs: row.get("n_inputs")?,
         n_outputs: row.get("n_outputs")?,
+        address_delta_micronoid: row.get::<_, Option<i64>>("address_delta").ok().flatten().map(|d| d.to_string()),
+        counterparty: row.get::<_, Option<String>>("counterparty").ok().flatten(),
     })
 }
 
@@ -414,7 +427,10 @@ pub fn txs_by_address(
     }
 
     let sql = format!(
-        "SELECT {TX_SUMMARY_COLUMNS}
+        "SELECT {TX_SUMMARY_COLUMNS},
+                (SELECT COALESCE(SUM(o.amount_micronoid), 0) FROM tx_outputs o WHERE o.tx_id = t.id AND o.owner = ?1)
+                  - (CASE WHEN t.input_owner = ?1 THEN CAST(t.input_sum_micronoid AS INTEGER) ELSE 0 END) AS address_delta,
+                (SELECT o.owner FROM tx_outputs o WHERE o.tx_id = t.id AND o.owner != ?1 ORDER BY o.idx ASC LIMIT 1) AS counterparty
          FROM transactions t
          JOIN blocks b ON b.id = t.block_id
          WHERE {canonical_on_b}

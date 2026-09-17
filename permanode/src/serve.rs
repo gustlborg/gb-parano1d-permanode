@@ -22,6 +22,17 @@ use tower_http::services::{ServeDir, ServeFile};
 
 static SITE: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../frontend/site");
 
+/// FNV-1a over the file contents, used as a strong ETag so browsers can
+/// revalidate cheaply (304) and still pick up a new build immediately.
+fn etag_of(bytes: &[u8]) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("\"{h:016x}\"")
+}
+
 struct AppState {
     conn: Mutex<Connection>,
     rpc: live_rpc::RpcClient,
@@ -98,7 +109,7 @@ pub async fn run(cfg: &Config) -> Result<()> {
 /// index.html so the client-side router can take over (block/tx/address
 /// URLs are all handled there), the same fallback ServeDir does in
 /// `site_dir` mode.
-async fn embedded_site(uri: Uri) -> Response {
+async fn embedded_site(uri: Uri, headers: axum::http::HeaderMap) -> Response {
     let path = uri.path().trim_start_matches('/');
     let (file, spa) = match SITE.get_file(path) {
         Some(f) => (f, false),
@@ -112,15 +123,26 @@ async fn embedded_site(uri: Uri) -> Response {
     } else {
         mime_guess::from_path(file.path()).first_or_octet_stream()
     };
-    // HTML is always re-validated (it is what changes on an update);
-    // scripts, styles and fonts may be cached for a while.
-    let cache = if mime.type_() == mime_guess::mime::TEXT && mime.subtype() == mime_guess::mime::HTML {
-        "no-cache"
-    } else {
-        "public, max-age=3600"
-    };
+    // Fonts and icons practically never change and may sit in caches for
+    // a day. Everything else (HTML, scripts, styles) is revalidated on
+    // every load via the ETag, so a new build shows up immediately at the
+    // cost of a 304 round trip.
+    let long_lived = matches!(mime.type_().as_str(), "font" | "image");
+    let cache = if long_lived { "public, max-age=86400" } else { "no-cache" };
+    let etag = etag_of(file.contents());
+    if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|t| t.trim() == etag))
+    {
+        return (StatusCode::NOT_MODIFIED, [(header::ETAG, etag), (header::CACHE_CONTROL, cache.to_string())]).into_response();
+    }
     (
-        [(header::CONTENT_TYPE, mime.as_ref().to_string()), (header::CACHE_CONTROL, cache.to_string())],
+        [
+            (header::CONTENT_TYPE, mime.as_ref().to_string()),
+            (header::CACHE_CONTROL, cache.to_string()),
+            (header::ETAG, etag),
+        ],
         file.contents(),
     )
         .into_response()
