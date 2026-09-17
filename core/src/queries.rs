@@ -59,6 +59,8 @@ pub struct TxSummary {
     pub receiver: Option<String>,
     pub input_sum_micronoid: String,
     pub output_sum_micronoid: String,
+    pub height: i64,
+    pub timestamp: i64,
     pub n_inputs: i64,
     pub n_outputs: i64,
 }
@@ -197,6 +199,7 @@ fn block_id_and_row(
 const TX_SUMMARY_COLUMNS: &str = "
     t.position, t.txid, t.page_count, t.fee_micronoid, t.coinbase, t.development_payout,
     t.input_owner, t.input_sum_micronoid, t.output_sum_micronoid,
+    b.height, b.timestamp,
     (SELECT COUNT(*) FROM tx_inputs i WHERE i.tx_id = t.id) AS n_inputs,
     (SELECT COUNT(*) FROM tx_outputs o WHERE o.tx_id = t.id) AS n_outputs,
     (SELECT o.owner FROM tx_outputs o WHERE o.tx_id = t.id ORDER BY o.idx ASC LIMIT 1) AS receiver
@@ -214,6 +217,8 @@ fn tx_summary_from_row(row: &rusqlite::Row) -> rusqlite::Result<TxSummary> {
         receiver: row.get("receiver")?,
         input_sum_micronoid: row.get("input_sum_micronoid")?,
         output_sum_micronoid: row.get("output_sum_micronoid")?,
+        height: row.get("height")?,
+        timestamp: row.get("timestamp")?,
         n_inputs: row.get("n_inputs")?,
         n_outputs: row.get("n_outputs")?,
     })
@@ -223,6 +228,7 @@ fn tx_summaries_for_block(conn: &Connection, block_id: i64) -> Result<Vec<TxSumm
     let sql = format!(
         "SELECT {TX_SUMMARY_COLUMNS}
          FROM transactions t
+         JOIN blocks b ON b.id = t.block_id
          WHERE t.block_id = ?1
          ORDER BY t.position ASC"
     );
@@ -342,7 +348,7 @@ pub fn txs_by_address(
     let offset = (page.max(1) - 1) * page_size;
     let canonical_on_b = canonical_filter_on("b");
     let sql = format!(
-        "SELECT {TX_SUMMARY_COLUMNS}, b.height
+        "SELECT {TX_SUMMARY_COLUMNS}
          FROM transactions t
          JOIN blocks b ON b.id = t.block_id
          WHERE {canonical_on_b}
