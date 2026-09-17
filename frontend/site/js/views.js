@@ -364,7 +364,7 @@ export async function txView(txid) {
     </div>`;
 }
 
-function addressTxRow(tx) {
+function addressTxRow(tx, viewedAddress) {
   const kind = tx.coinbase
     ? '<span class="badge coinbase">coinbase</span>'
     : tx.development_payout
@@ -373,6 +373,10 @@ function addressTxRow(tx) {
   const sender = tx.input_owner ? link(`/address/${tx.input_owner}`, shortHash(tx.input_owner)) : "-";
   const receiver = tx.receiver ? link(`/address/${tx.receiver}`, shortHash(tx.receiver)) : "-";
   const extra = tx.n_outputs > 1 ? ` <span class="hint" title="${receiverHint(tx.n_outputs)}">+${tx.n_outputs - 1} more</span>` : "";
+  // The address page only lists transactions where the viewed address is
+  // either the sender or (at least) one of the receivers, so "not the
+  // sender" reliably means "incoming" here.
+  const incoming = tx.input_owner !== viewedAddress;
   return `<tr>
       <td class="mono">${link(`/tx/${tx.txid}`, shortHash(tx.txid))} ${kind}</td>
       ${timeCell(tx.timestamp)}
@@ -380,14 +384,14 @@ function addressTxRow(tx) {
       <td class="mono">${sender}</td>
       <td>${tx.n_inputs} → ${tx.n_outputs}</td>
       <td class="mono">${receiver}${extra}</td>
-      <td>${noid(tx.output_sum_micronoid)}</td>
+      <td class="${incoming ? "amount-in" : ""}">${noid(tx.output_sum_micronoid)}</td>
       <td>${noid(tx.fee_micronoid)}</td>
     </tr>`;
 }
 
 export async function addressView(address, page = 1) {
   const result = await api.address(address, page, 25);
-  const rows = result.transactions.map(addressTxRow).join("");
+  const rows = result.transactions.map((tx) => addressTxRow(tx, address)).join("");
   const totalPages = Math.max(1, Math.ceil(result.total / result.page_size));
   const b = result.balance;
   const html = `

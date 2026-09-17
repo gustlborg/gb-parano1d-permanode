@@ -9,6 +9,7 @@
   --accent-dim: #1f7a70;
   --warn: #e0a63c;
   --bad: #e0563c;
+  --good: #6fce7d;
   --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
 }
 
@@ -164,6 +165,7 @@ th { color: var(--text-dim); font-weight: 500; font-size: 0.78rem; text-transfor
 tr:hover td { background: var(--bg-panel-hover); }
 td.mono, .mono { font-family: var(--mono); }
 .hint { color: var(--text-dim); font-size: 0.78rem; border-bottom: 1px dotted var(--text-dim); cursor: help; }
+.amount-in { color: var(--good); }
 .time-cell { font-family: var(--mono); text-align: right; font-variant-numeric: tabular-nums; }
 .time-toggle { cursor: pointer; border-bottom: 1px dotted var(--text-dim); }
 .time-toggle:hover { color: var(--accent); }
