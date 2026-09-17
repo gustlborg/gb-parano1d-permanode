@@ -27,6 +27,12 @@ body {
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
+.site-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
 .topbar {
   display: flex;
   align-items: center;
@@ -46,13 +52,6 @@ a:hover { text-decoration: underline; }
 }
 .brand:hover { text-decoration: none; color: var(--accent); }
 .brand-mark { color: var(--accent); }
-
-.nav-link {
-  color: var(--text-dim);
-  font-size: 0.9rem;
-  white-space: nowrap;
-}
-.nav-link:hover { color: var(--accent); text-decoration: none; }
 
 .search { display: flex; gap: 8px; flex: 1; max-width: 560px; }
 .search input {
@@ -81,6 +80,7 @@ a:hover { text-decoration: underline; }
   padding: 8px 20px;
   font-size: 0.85rem;
   color: var(--text-dim);
+  background: var(--bg);
   border-bottom: 1px solid var(--border);
   flex-wrap: wrap;
 }
