@@ -410,6 +410,14 @@ export async function addressView(address, page = 1) {
         <div class="stat"><div class="v">${noid(b.total_sent_micronoid)}</div><div class="k">Total sent</div></div>
       </div>
       <p>${result.total} transaction(s) recorded involving this address.</p>
+      ${
+        result.total === 0
+          ? `<p class="hint-block">This permanode has recorded no activity at all for this address -
+             the figures above are not necessarily its real balance, only what we've
+             seen since we started recording. If it already held funds before that,
+             this page has no way to know.</p>`
+          : ""
+      }
     </div>
     <div class="panel">
       <div class="table-scroll"><table>

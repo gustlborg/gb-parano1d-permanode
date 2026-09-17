@@ -165,6 +165,15 @@ th { color: var(--text-dim); font-weight: 500; font-size: 0.78rem; text-transfor
 tr:hover td { background: var(--bg-panel-hover); }
 td.mono, .mono { font-family: var(--mono); }
 .hint { color: var(--text-dim); font-size: 0.78rem; border-bottom: 1px dotted var(--text-dim); cursor: help; }
+.hint-block {
+  margin-top: 12px;
+  padding: 10px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--warn);
+  background: rgba(224, 166, 60, 0.08);
+  color: var(--warn);
+  font-size: 0.85rem;
+}
 .amount-in { color: var(--good); }
 .time-cell { font-family: var(--mono); text-align: right; font-variant-numeric: tabular-nums; }
 .time-toggle { cursor: pointer; border-bottom: 1px dotted var(--text-dim); }
