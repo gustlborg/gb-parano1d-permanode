@@ -237,6 +237,9 @@ struct AddressPage {
     /// reached for this.
     live_balance_micronoid: Option<String>,
     live_utxo_count: Option<u64>,
+    /// The individual unspent slots behind live_balance_micronoid, largest
+    /// first. Same source and same "always current" caveat.
+    live_utxos: Option<Vec<live_rpc::SlotInfo>>,
 }
 
 async fn get_address(
@@ -263,14 +266,16 @@ async fn get_address(
         .await
         .ok()
         .and_then(|r| r.ok());
-    let (live_balance_micronoid, live_utxo_count) = match live_slots {
+    let (live_balance_micronoid, live_utxos) = match live_slots {
         Some(slots) => {
-            let live: Vec<_> = slots.into_iter().filter(|s| !s.empty).collect();
+            let mut live: Vec<_> = slots.into_iter().filter(|s| !s.empty).collect();
+            live.sort_by(|a, b| b.value.cmp(&a.value));
             let sum: u64 = live.iter().map(|s| s.value).sum();
-            (Some(sum.to_string()), Some(live.len() as u64))
+            (Some(sum.to_string()), Some(live))
         }
         None => (None, None),
     };
+    let live_utxo_count = live_utxos.as_ref().map(|v| v.len() as u64);
 
     Ok(Json(AddressPage {
         address,
@@ -281,6 +286,7 @@ async fn get_address(
         balance,
         live_balance_micronoid,
         live_utxo_count,
+        live_utxos,
     }))
 }
 
