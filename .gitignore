@@ -5,3 +5,7 @@ nohup.out
 run/permanode.sqlite3
 run/permanode.sqlite3-*
 run/permanode.toml
+# Raw design handoff downloads (extracted copies live in docs/design/)
+/design/
+# Local screenshots (design form captures etc.)
+frontend/screenshots/

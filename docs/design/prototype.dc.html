@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="" />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<style>
+  html, body { margin:0; padding:0; background:#050908; }
+  body { font-family:'Space Grotesk', Helvetica, Arial, sans-serif; }
+  a { color:#3ee6b8; text-decoration:none; }
+  a:hover { color:#7ff5d6; }
+  ::selection { background:#3ee6b8; color:#050908; }
+  @keyframes noidPulse { 0%,100% { opacity:.55 } 50% { opacity:1 } }
+  @keyframes noidScan { 0% { transform:translateY(-100%) } 100% { transform:translateY(400%) } }
+</style>
+</helmet>
+
+<div style="min-height:100vh;background:#050908;color:#dfe7e4;font-family:'Space Grotesk',Helvetica,Arial,sans-serif;display:flex;flex-direction:column">
+
+  <header style="display:flex;align-items:center;gap:24px;padding:18px 28px;border-bottom:1px solid #16211f;background:#070d0c;position:sticky;top:0;z-index:20;flex-wrap:wrap">
+    <div onClick="{{ goHome }}" style="display:flex;align-items:center;gap:10px;flex:0 0 auto;cursor:pointer">
+      <div style="width:11px;height:11px;background:#3ee6b8;transform:rotate(45deg);border-radius:2px"></div>
+      <span style="font-size:19px;font-weight:700;letter-spacing:-0.01em;white-space:nowrap">Parano1d <span style="color:#3ee6b8">Explorer</span></span>
+    </div>
+    <nav style="display:flex;gap:22px;flex:0 0 auto;font-size:13px;color:#7d8f8a;letter-spacing:.02em">
+      <sc-for list="{{ navItems }}" as="n" hint-placeholder-count="5">
+        <span onClick="{{ n.go }}" style="{{ n.style }}">{{ n.label }}</span>
+      </sc-for>
+    </nav>
+    <div style="flex:1 1 320px;display:flex;gap:10px;min-width:260px;max-width:620px;margin-left:auto">
+      <input placeholder="Block height, hash, txid or address" style="flex:1;background:#0b1413;border:1px solid #1d2b28;border-radius:8px;padding:11px 14px;color:#dfe7e4;font-family:'JetBrains Mono',monospace;font-size:12.5px;outline:none" style-focus="border-color:#3ee6b8" />
+      <button style="background:#3ee6b8;color:#05201a;border:none;border-radius:8px;padding:0 20px;font-family:'Space Grotesk',sans-serif;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap" style-hover="background:#7ff5d6">Search</button>
+    </div>
+  </header>
+
+  <div style="display:flex;gap:26px;flex-wrap:wrap;padding:10px 28px;border-bottom:1px solid #111b19;background:#070d0c;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#7d8f8a">
+    <span>Tip <span style="color:#dfe7e4">{{ tipLabel }}</span></span>
+    <span>Blocks <span style="color:#dfe7e4">{{ blocksRecorded }}</span></span>
+    <span>Transactions <span style="color:#dfe7e4">{{ txCount }}</span></span>
+    <span>Live UTXOs <span style="color:#dfe7e4">{{ utxoCount }}</span></span>
+    <span>Gaps <span style="color:#dfe7e4">48</span></span>
+    <span>Avg block time <span style="color:#dfe7e4">20.5s</span></span>
+    <span style="color:#3ee6b8;display:flex;align-items:center;gap:7px"><span style="width:6px;height:6px;border-radius:50%;background:#3ee6b8;animation:noidPulse 1.6s infinite"></span>live</span>
+  </div>
+
+  <sc-if value="{{ isHome }}" hint-placeholder-val="{{ true }}">
+  <div>
+    <section style="padding:34px 0 10px;overflow:hidden;position:relative">
+      <div style="display:flex;align-items:baseline;gap:14px;padding:0 28px 18px">
+        <h2 style="margin:0;font-size:13px;letter-spacing:.16em;text-transform:uppercase;color:#7d8f8a;font-weight:500">Chain</h2>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#4d5f5a">next block in ~{{ nextIn }}s</span>
+        <button onClick="{{ mine }}" style="margin-left:auto;margin-right:28px;background:transparent;border:1px solid #1d2b28;color:#7d8f8a;border-radius:7px;padding:6px 14px;font-size:11.5px;font-family:'JetBrains Mono',monospace;cursor:pointer;white-space:nowrap;flex:0 0 auto" style-hover="border-color:#3ee6b8;color:#3ee6b8">mine now →</button>
+      </div>
+
+      <div style="position:relative;padding:0 28px 6px">
+        <div data-chain-track="1" ref="{{ trackRef }}" style="display:flex;align-items:flex-start;gap:0;will-change:transform">
+
+          <sc-for list="{{ mempoolBlocks }}" as="mb" hint-placeholder-count="1">
+            <div style="display:flex;align-items:center;flex:0 0 auto">
+              <div onClick="{{ goMempool }}" style="display:flex;flex-direction:column;gap:11px;width:148px;cursor:pointer">
+                <div style="position:relative;width:148px;height:148px;border-radius:12px;overflow:hidden;background:#081312;border:1px solid #2b6f60;box-shadow:0 0 0 1px rgba(62,230,184,.08), 0 14px 40px -22px rgba(62,230,184,.7)">
+                  <div style="position:absolute;inset:0;display:grid;grid-template-columns:repeat(4,1fr);grid-template-rows:repeat(4,1fr);gap:2px;padding:2px">
+                    <sc-for list="{{ mb.cells }}" as="c" hint-placeholder-count="16">
+                      <div style="{{ c.s }}"></div>
+                    </sc-for>
+                  </div>
+                  <div style="position:absolute;left:0;right:0;height:22px;background:linear-gradient(180deg,rgba(62,230,184,0),rgba(62,230,184,.22),rgba(62,230,184,0));animation:noidScan 2.6s linear infinite;pointer-events:none"></div>
+                </div>
+                <div style="display:flex;flex-direction:column;gap:3px;font-family:'JetBrains Mono',monospace">
+                  <span style="font-size:12.5px;color:#3ee6b8;font-weight:500">{{ mb.title }}</span>
+                  <span style="font-size:11px;color:#5d706b">{{ mb.sub }}</span>
+                </div>
+              </div>
+              <div style="width:44px;display:flex;align-items:center;justify-content:center;height:148px;color:#24423b;font-size:14px">←</div>
+            </div>
+          </sc-for>
+
+          <sc-for list="{{ blocks }}" as="b" hint-placeholder-count="10">
+            <div style="display:flex;align-items:center;flex:0 0 auto">
+              <div onClick="{{ b.open }}" style="display:flex;flex-direction:column;gap:11px;width:148px;cursor:pointer">
+                <div style="{{ b.faceStyle }}">
+                  <div style="position:absolute;inset:0;display:grid;grid-template-columns:repeat(4,1fr);grid-template-rows:repeat(4,1fr);gap:2px;padding:2px">
+                    <sc-for list="{{ b.cells }}" as="c" hint-placeholder-count="16">
+                      <div style="{{ c.s }}"></div>
+                    </sc-for>
+                  </div>
+                </div>
+                <div style="display:flex;flex-direction:column;gap:3px;font-family:'JetBrains Mono',monospace">
+                  <span style="font-size:12.5px;color:#dfe7e4;font-weight:500">{{ b.label }}</span>
+                  <span style="font-size:11px;color:#5d706b">{{ b.sub }}</span>
+                </div>
+              </div>
+              <div style="width:44px;display:flex;align-items:center;justify-content:center;height:148px;color:#24423b;font-size:14px">←</div>
+            </div>
+          </sc-for>
+
+        </div>
+        <div style="position:absolute;top:0;right:0;width:130px;height:180px;background:linear-gradient(90deg,rgba(5,9,8,0),#050908);pointer-events:none"></div>
+      </div>
+    </section>
+
+    <section style="padding:30px 28px 0;width:100%;max-width:1180px;margin:0 auto;box-sizing:border-box;display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px">
+      <sc-for list="{{ stats }}" as="s" hint-placeholder-count="6">
+        <div style="background:#0a1211;border:1px solid #16211f;border-radius:12px;padding:18px 18px 15px;display:flex;flex-direction:column;gap:7px">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:19px;color:#dfe7e4;letter-spacing:-0.01em">{{ s.v }}</span>
+          <span style="font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:#6a7c77">{{ s.k }}</span>
+        </div>
+      </sc-for>
+    </section>
+
+    <section style="padding:26px 28px 60px;width:100%;max-width:1180px;margin:0 auto;box-sizing:border-box">
+      <div style="background:#0a1211;border:1px solid #16211f;border-radius:14px;overflow:hidden">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:18px 22px;border-bottom:1px solid #141f1d">
+          <h2 style="margin:0;font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:#7d8f8a;font-weight:500">Recent blocks</h2>
+          <span onClick="{{ goBlocks }}" style="font-size:12px;font-family:'JetBrains Mono',monospace;color:#3ee6b8;cursor:pointer">all blocks →</span>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 2fr 0.7fr 1.1fr 1fr;gap:12px;padding:12px 22px;font-size:10.5px;letter-spacing:.13em;text-transform:uppercase;color:#5d706b;border-bottom:1px solid #141f1d">
+          <span>Height</span><span>Time</span><span>Miner</span><span>Txs</span><span>Reward</span><span>Fees</span>
+        </div>
+        <sc-for list="{{ blocks }}" as="b" hint-placeholder-count="10">
+          <div style="display:grid;grid-template-columns:1fr 1fr 2fr 0.7fr 1.1fr 1fr;gap:12px;padding:13px 22px;font-family:'JetBrains Mono',monospace;font-size:12.5px;border-bottom:1px solid #101917;color:#b8c6c2" style-hover="background:#0d1716">
+            <span onClick="{{ b.open }}" style="color:#3ee6b8;cursor:pointer">{{ b.label }}</span>
+            <span style="color:#7d8f8a">{{ b.ago }}</span>
+            <span onClick="{{ goAddress }}" style="color:#3ee6b8;cursor:pointer">{{ b.miner }}</span>
+            <span>{{ b.txs }}</span>
+            <span>{{ b.reward }}</span>
+            <span style="color:#7d8f8a">{{ b.fees }}</span>
+          </div>
+        </sc-for>
+      </div>
+    </section>
+  </div>
+  </sc-if>
+
+  <sc-if value="{{ isBlock }}" hint-placeholder-val="{{ false }}">
+  <div style="width:100%;max-width:1180px;margin:0 auto;box-sizing:border-box;padding:28px 28px 60px;display:flex;flex-direction:column;gap:20px">
+    <span onClick="{{ goHome }}" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#7d8f8a;cursor:pointer" style-hover="color:#3ee6b8">← back to chain</span>
+
+    <div style="background:#0a1211;border:1px solid #16211f;border-radius:14px;padding:24px;display:flex;gap:34px;flex-wrap:wrap">
+      <div style="display:flex;flex-direction:column;gap:14px;flex:0 0 auto">
+        <div style="position:relative;width:240px;height:240px;border-radius:14px;overflow:hidden;background:#081211;border:1px solid #1b2a27">
+          <div style="position:absolute;inset:0;display:grid;grid-template-columns:repeat(4,1fr);grid-template-rows:repeat(4,1fr);gap:3px;padding:3px">
+            <sc-for list="{{ blockDetail.cells }}" as="c" hint-placeholder-count="16">
+              <div style="{{ c.s }}"></div>
+            </sc-for>
+          </div>
+        </div>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#5d706b;max-width:240px">packed by size, shaded by fee rate</span>
+      </div>
+
+      <div style="flex:1 1 420px;min-width:300px;display:flex;flex-direction:column;gap:14px">
+        <h1 style="margin:0;font-size:26px;font-weight:700;letter-spacing:-0.02em">Block <span style="color:#3ee6b8">{{ blockDetail.label }}</span></h1>
+        <div style="display:flex;flex-direction:column;gap:0">
+          <sc-for list="{{ blockDetail.rows }}" as="r" hint-placeholder-count="12">
+            <div style="display:grid;grid-template-columns:160px 1fr;gap:16px;padding:9px 0;border-bottom:1px solid #111b19">
+              <span style="font-size:12.5px;color:#6a7c77">{{ r.k }}</span>
+              <span style="{{ r.vs }}">{{ r.v }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+    </div>
+
+    <div style="background:#0a1211;border:1px solid #16211f;border-radius:14px;overflow:hidden">
+      <div style="padding:18px 22px;border-bottom:1px solid #141f1d;font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:#7d8f8a">Transactions ({{ blockDetail.txCount }})</div>
+      <div style="display:grid;grid-template-columns:1.6fr 1.6fr 0.7fr 1.6fr 1.1fr 1fr;gap:12px;padding:12px 22px;font-size:10.5px;letter-spacing:.13em;text-transform:uppercase;color:#5d706b;border-bottom:1px solid #141f1d">
+        <span>Txid</span><span>Sender</span><span>In → out</span><span>Receiver</span><span>Amount</span><span>Fee</span>
+      </div>
+      <sc-for list="{{ blockDetail.txs }}" as="t" hint-placeholder-count="3">
+        <div style="display:grid;grid-template-columns:1.6fr 1.6fr 0.7fr 1.6fr 1.1fr 1fr;gap:12px;padding:13px 22px;font-family:'JetBrains Mono',monospace;font-size:12.5px;border-bottom:1px solid #101917;color:#b8c6c2;align-items:center" style-hover="background:#0d1716">
+          <span style="display:flex;align-items:center;gap:8px">
+            <span onClick="{{ goTx }}" style="color:#3ee6b8;cursor:pointer">{{ t.id }}</span>
+            <sc-if value="{{ t.coinbase }}" hint-placeholder-val="{{ false }}">
+              <span style="font-size:10px;background:#12291f;color:#7be38b;border-radius:4px;padding:2px 6px">coinbase</span>
+            </sc-if>
+          </span>
+          <span style="color:#7d8f8a">{{ t.sender }}</span>
+          <span>{{ t.io }}</span>
+          <span onClick="{{ goAddress }}" style="color:#3ee6b8;cursor:pointer">{{ t.receiver }}</span>
+          <span>{{ t.amount }}</span>
+          <span style="color:#7d8f8a">{{ t.fee }}</span>
+        </div>
+      </sc-for>
+    </div>
+  </div>
+  </sc-if>
+
+  <sc-if value="{{ isTx }}" hint-placeholder-val="{{ false }}">
+  <div style="width:100%;max-width:1180px;margin:0 auto;box-sizing:border-box;padding:28px 28px 60px;display:flex;flex-direction:column;gap:20px">
+    <span onClick="{{ goHome }}" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#7d8f8a;cursor:pointer" style-hover="color:#3ee6b8">← back to chain</span>
+
+    <div style="background:#0a1211;border:1px solid #16211f;border-radius:14px;padding:24px;display:flex;flex-direction:column;gap:16px">
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <h1 style="margin:0;font-size:22px;font-weight:700;letter-spacing:-0.02em">Transaction</h1>
+        <span style="font-size:10.5px;background:#12291f;color:#7be38b;border-radius:5px;padding:4px 9px;letter-spacing:.1em;text-transform:uppercase">confirmed</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:0">
+        <sc-for list="{{ txDetail.rows }}" as="r" hint-placeholder-count="10">
+          <div style="display:grid;grid-template-columns:160px 1fr;gap:16px;padding:9px 0;border-bottom:1px solid #111b19">
+            <span style="font-size:12.5px;color:#6a7c77">{{ r.k }}</span>
+            <span style="{{ r.vs }}">{{ r.v }}</span>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px">
+      <div style="background:#0a1211;border:1px solid #16211f;border-radius:14px;overflow:hidden">
+        <div style="padding:16px 20px;border-bottom:1px solid #141f1d;font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;color:#7d8f8a">Inputs ({{ txDetail.inCount }})</div>
+        <sc-for list="{{ txDetail.inputs }}" as="i" hint-placeholder-count="8">
+          <div style="display:flex;justify-content:space-between;gap:14px;padding:11px 20px;font-family:'JetBrains Mono',monospace;font-size:12.5px;border-bottom:1px solid #101917">
+            <span style="color:#7d8f8a">{{ i.k }}</span>
+            <span style="color:#b8c6c2">{{ i.v }}</span>
+          </div>
+        </sc-for>
+      </div>
+      <div style="background:#0a1211;border:1px solid #16211f;border-radius:14px;overflow:hidden">
+        <div style="padding:16px 20px;border-bottom:1px solid #141f1d;font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;color:#7d8f8a">Outputs ({{ txDetail.outCount }})</div>
+        <sc-for list="{{ txDetail.outputs }}" as="o" hint-placeholder-count="2">
+          <div style="display:flex;justify-content:space-between;gap:14px;padding:11px 20px;font-family:'JetBrains Mono',monospace;font-size:12.5px;border-bottom:1px solid #101917">
+            <span onClick="{{ goAddress }}" style="color:#3ee6b8;cursor:pointer">{{ o.k }}</span>
+            <span style="color:#b8c6c2">{{ o.v }}</span>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </div>
+  </sc-if>
+
+  <sc-if value="{{ isAddress }}" hint-placeholder-val="{{ false }}">
+  <div style="width:100%;max-width:1180px;margin:0 auto;box-sizing:border-box;padding:28px 28px 60px;display:flex;flex-direction:column;gap:20px">
+    <span onClick="{{ goHome }}" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#7d8f8a;cursor:pointer" style-hover="color:#3ee6b8">← back to chain</span>
+
+    <div style="background:#0a1211;border:1px solid #16211f;border-radius:14px;padding:24px;display:flex;flex-direction:column;gap:20px">
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <span style="font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;color:#7d8f8a">Address</span>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:15px;color:#dfe7e4;word-break:break-all">{{ addressDetail.addr }}</span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:12px">
+        <sc-for list="{{ addressDetail.stats }}" as="s" hint-placeholder-count="6">
+          <div style="background:#0c1514;border:1px solid #16211f;border-radius:11px;padding:16px;display:flex;flex-direction:column;gap:6px">
+            <span style="{{ s.vs }}">{{ s.v }}</span>
+            <span style="font-size:10px;letter-spacing:.13em;text-transform:uppercase;color:#6a7c77">{{ s.k }}</span>
+          </div>
+        </sc-for>
+      </div>
+      <span style="font-size:13px;color:#7d8f8a">{{ addressDetail.note }}</span>
+    </div>
+
+    <div style="background:#0a1211;border:1px solid #16211f;border-radius:14px;overflow:hidden">
+      <div style="display:grid;grid-template-columns:1.5fr 1fr 0.9fr 1.5fr 0.7fr 1.1fr 0.9fr;gap:12px;padding:12px 22px;font-size:10.5px;letter-spacing:.13em;text-transform:uppercase;color:#5d706b;border-bottom:1px solid #141f1d">
+        <span>Txid</span><span>Time</span><span>Block</span><span>Counterparty</span><span>In → out</span><span>Amount</span><span>Fee</span>
+      </div>
+      <sc-for list="{{ addressDetail.txs }}" as="t" hint-placeholder-count="12">
+        <div style="display:grid;grid-template-columns:1.5fr 1fr 0.9fr 1.5fr 0.7fr 1.1fr 0.9fr;gap:12px;padding:13px 22px;font-family:'JetBrains Mono',monospace;font-size:12.5px;border-bottom:1px solid #101917;color:#b8c6c2;align-items:center" style-hover="background:#0d1716">
+          <span style="display:flex;align-items:center;gap:8px">
+            <span onClick="{{ goTx }}" style="color:#3ee6b8;cursor:pointer">{{ t.id }}</span>
+            <sc-if value="{{ t.coinbase }}" hint-placeholder-val="{{ false }}">
+              <span style="font-size:10px;background:#12291f;color:#7be38b;border-radius:4px;padding:2px 6px">coinbase</span>
+            </sc-if>
+          </span>
+          <span style="color:#7d8f8a">{{ t.time }}</span>
+          <span onClick="{{ t.open }}" style="color:#3ee6b8;cursor:pointer">{{ t.block }}</span>
+          <span style="color:#7d8f8a">{{ t.party }}</span>
+          <span>{{ t.io }}</span>
+          <span style="{{ t.amountStyle }}">{{ t.amount }}</span>
+          <span style="color:#7d8f8a">{{ t.fee }}</span>
+        </div>
+      </sc-for>
+    </div>
+  </div>
+  </sc-if>
+
+  <sc-if value="{{ isMempool }}" hint-placeholder-val="{{ false }}">
+  <div style="width:100%;max-width:1180px;margin:0 auto;box-sizing:border-box;padding:28px 28px 60px;display:flex;flex-direction:column;gap:20px">
+    <span onClick="{{ goHome }}" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#7d8f8a;cursor:pointer" style-hover="color:#3ee6b8">← back to chain</span>
+
+    <div style="background:#0a1211;border:1px solid #16211f;border-radius:14px;padding:24px;display:flex;gap:34px;flex-wrap:wrap;align-items:flex-start">
+      <div style="position:relative;width:240px;height:240px;border-radius:14px;overflow:hidden;background:#081211;border:1px solid #2b6f60;flex:0 0 auto">
+        <div style="position:absolute;inset:0;display:grid;grid-template-columns:repeat(4,1fr);grid-template-rows:repeat(4,1fr);gap:3px;padding:3px">
+          <sc-for list="{{ mempoolView.cells }}" as="c" hint-placeholder-count="16">
+            <div style="{{ c.s }}"></div>
+          </sc-for>
+        </div>
+        <div style="position:absolute;left:0;right:0;height:30px;background:linear-gradient(180deg,rgba(62,230,184,0),rgba(62,230,184,.2),rgba(62,230,184,0));animation:noidScan 2.6s linear infinite;pointer-events:none"></div>
+      </div>
+      <div style="flex:1 1 380px;min-width:280px;display:flex;flex-direction:column;gap:18px">
+        <div style="display:flex;align-items:baseline;gap:12px">
+          <h1 style="margin:0;font-size:22px;font-weight:700;letter-spacing:-0.02em">Live mempool</h1>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#4d5f5a">next block in ~{{ nextIn }}s</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px">
+          <sc-for list="{{ mempoolView.stats }}" as="s" hint-placeholder-count="3">
+            <div style="background:#0c1514;border:1px solid #16211f;border-radius:11px;padding:16px;display:flex;flex-direction:column;gap:6px">
+              <span style="font-family:'JetBrains Mono',monospace;font-size:18px;color:#dfe7e4">{{ s.v }}</span>
+              <span style="font-size:10px;letter-spacing:.13em;text-transform:uppercase;color:#6a7c77">{{ s.k }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+    </div>
+
+    <div style="background:#0a1211;border:1px solid #16211f;border-radius:14px;overflow:hidden">
+      <div style="padding:18px 22px;border-bottom:1px solid #141f1d;font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:#7d8f8a">Pending transactions</div>
+      <div style="display:grid;grid-template-columns:1.6fr 0.8fr 1.1fr 1fr 1fr;gap:12px;padding:12px 22px;font-size:10.5px;letter-spacing:.13em;text-transform:uppercase;color:#5d706b;border-bottom:1px solid #141f1d">
+        <span>Txid</span><span>In → out</span><span>Fee</span><span>Fee rate</span><span>Seen</span>
+      </div>
+      <sc-for list="{{ mempoolView.txs }}" as="t" hint-placeholder-count="6">
+        <div style="display:grid;grid-template-columns:1.6fr 0.8fr 1.1fr 1fr 1fr;gap:12px;padding:13px 22px;font-family:'JetBrains Mono',monospace;font-size:12.5px;border-bottom:1px solid #101917;color:#b8c6c2" style-hover="background:#0d1716">
+          <span onClick="{{ goTx }}" style="color:#3ee6b8;cursor:pointer">{{ t.id }}</span>
+          <span>{{ t.io }}</span>
+          <span>{{ t.fee }}</span>
+          <span style="{{ t.rateStyle }}">{{ t.rate }}</span>
+          <span style="color:#7d8f8a">{{ t.seen }}</span>
+        </div>
+      </sc-for>
+    </div>
+  </div>
+  </sc-if>
+
+  <sc-if value="{{ isRich }}" hint-placeholder-val="{{ false }}">
+  <div style="width:100%;max-width:1180px;margin:0 auto;box-sizing:border-box;padding:28px 28px 60px;display:flex;flex-direction:column;gap:20px">
+    <span onClick="{{ goHome }}" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#7d8f8a;cursor:pointer" style-hover="color:#3ee6b8">← back to chain</span>
+
+    <div style="background:#0a1211;border:1px solid #16211f;border-radius:14px;overflow:hidden">
+      <div style="padding:24px 22px 18px;border-bottom:1px solid #141f1d;display:flex;flex-direction:column;gap:9px">
+        <h1 style="margin:0;font-size:22px;font-weight:700;letter-spacing:-0.02em">Rich list</h1>
+        <p style="margin:0;font-size:13px;line-height:1.55;color:#7d8f8a;max-width:720px;text-wrap:pretty">Jede von dieser Permanode je erfasste Adresse, sortiert nach aktuellem Live-Guthaben. Im Hintergrund periodisch aktualisiert — nicht bei jedem Seitenaufruf.</p>
+      </div>
+      <div style="display:grid;grid-template-columns:0.35fr 2.2fr 1.2fr 0.7fr 0.9fr;gap:12px;padding:12px 22px;font-size:10.5px;letter-spacing:.13em;text-transform:uppercase;color:#5d706b;border-bottom:1px solid #141f1d">
+        <span>#</span><span>Address</span><span>Balance</span><span>UTXOs</span><span>Updated</span>
+      </div>
+      <sc-for list="{{ richList }}" as="r" hint-placeholder-count="20">
+        <div style="display:grid;grid-template-columns:0.35fr 2.2fr 1.2fr 0.7fr 0.9fr;gap:12px;padding:12px 22px;font-family:'JetBrains Mono',monospace;font-size:12.5px;border-bottom:1px solid #101917;color:#b8c6c2;align-items:center" style-hover="background:#0d1716">
+          <span style="color:#5d706b">{{ r.n }}</span>
+          <span onClick="{{ goAddress }}" style="color:#3ee6b8;cursor:pointer">{{ r.addr }}</span>
+          <span style="display:flex;align-items:center;gap:10px">
+            <span>{{ r.bal }}</span>
+            <span style="{{ r.barStyle }}"></span>
+          </span>
+          <span>{{ r.utxos }}</span>
+          <span style="color:#7d8f8a">{{ r.updated }}</span>
+        </div>
+      </sc-for>
+    </div>
+  </div>
+  </sc-if>
+
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;accent&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#3ee6b8&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;options&quot;:[&quot;#3ee6b8&quot;,&quot;#5eead4&quot;,&quot;#7be38b&quot;,&quot;#4fc3f7&quot;],&quot;section&quot;:&quot;Look&quot;},&quot;blockSeconds&quot;:{&quot;editor&quot;:&quot;range&quot;,&quot;default&quot;:20,&quot;min&quot;:6,&quot;max&quot;:45,&quot;step&quot;:1,&quot;unit&quot;:&quot;s&quot;,&quot;tsType&quot;:&quot;number&quot;,&quot;section&quot;:&quot;Chain&quot;},&quot;slideSeconds&quot;:{&quot;editor&quot;:&quot;range&quot;,&quot;default&quot;:3.4,&quot;min&quot;:1,&quot;max&quot;:6,&quot;step&quot;:0.2,&quot;unit&quot;:&quot;s&quot;,&quot;tsType&quot;:&quot;number&quot;,&quot;section&quot;:&quot;Chain&quot;},&quot;mempoolLoad&quot;:{&quot;editor&quot;:&quot;range&quot;,&quot;default&quot;:1,&quot;min&quot;:0.3,&quot;max&quot;:3,&quot;step&quot;:0.1,&quot;tsType&quot;:&quot;number&quot;,&quot;section&quot;:&quot;Chain&quot;}}">
+class Component extends DCLogic {
+  state = { blocks: this.seed(), mempool: 0.18, tick: 0, nextIn: 20, flash: null, view: 'home', sel: 109030 };
+
+  rnd(seed) { const x = Math.sin(seed * 12.9898) * 43758.5453; return x - Math.floor(x); }
+  hex(seed, len) { let s = ''; const c = '0123456789abcdef'; for (let i = 0; i < len; i++) s += c[Math.floor(this.rnd(seed + i * 1.7) * 16)]; return s; }
+  addr(seed) { let s = 'o1'; const c = 'abcdefghijklmnopqrstuvwxyz0123456789'; for (let i = 0; i < 46; i++) s += c[Math.floor(this.rnd(seed + i * 2.3) * 36)]; return s; }
+  short(a) { return a.slice(0, 10) + '…' + a.slice(-6); }
+
+  mk(h, agoSec) {
+    const r = (n) => this.rnd(h * 7 + n);
+    const txs = 1 + Math.floor(r(1) * 4);
+    const fill = 0.3 + r(2) * 0.7;
+    const miners = ['o1mlk6ul…uzyr4r','o12e9eyj…sns0z4','o1v3v7wc…pypkeg','o1wptjrg…64x9r0','o1w6az7p…029wf8'];
+    return {
+      h, t: Date.now() - agoSec * 1000, txs, fill,
+      miner: miners[Math.floor(r(3) * miners.length)],
+      reward: (45 + r(4) * 0.03).toFixed(4) + ' NOID',
+      fees: (r(5) * 0.027).toFixed(4) + ' NOID'
+    };
+  }
+
+  seed() { const top = 109030; const out = []; for (let i = 0; i < 12; i++) out.push(this.mk(top - i, 14 + i * 21)); return out; }
+
+  componentDidMount() {
+    this.timer = setInterval(() => {
+      this.setState(s => {
+        const next = s.nextIn - 1;
+        if (next <= 0) { this.mine(); return { tick: s.tick + 1, nextIn: this.interval() }; }
+        return { tick: s.tick + 1, nextIn: next, mempool: Math.min(1.6, s.mempool + 0.055 * (this.props.mempoolLoad ?? 1)) };
+      });
+    }, 1000);
+  }
+  componentWillUnmount() { clearInterval(this.timer); }
+
+  interval() { return Math.round(this.props.blockSeconds ?? 20); }
+
+  mine = () => {
+    this.setState(s => {
+      const nb = this.mk(s.blocks[0].h + 1, 0);
+      nb.fill = Math.min(1, 0.35 + s.mempool * 0.6);
+      return { blocks: [nb, ...s.blocks].slice(0, 14), mempool: Math.max(0.05, s.mempool - 1), nextIn: this.interval(), flash: nb.h };
+    }, () => this.slide());
+  };
+
+  slide() {
+    if (this.state.view !== 'home') return;
+    requestAnimationFrame(() => {
+      const el = this.track || document.querySelector('[data-chain-track]');
+      if (!el || !el.animate) return;
+      el.animate(
+        [{ transform: 'translateX(-192px)' }, { transform: 'translateX(0)' }],
+        { duration: (this.props.slideSeconds ?? 3.4) * 1000, easing: 'cubic-bezier(.16,.86,.28,1)' }
+      );
+    });
+  }
+
+  go = (view, sel) => { this.setState({ view, sel: sel ?? this.state.sel }); if (typeof window !== 'undefined') window.scrollTo(0, 0); };
+
+  cells(fill, hot, seedBase) {
+    const accent = this.props.accent ?? '#3ee6b8';
+    const out = [];
+    const filled = Math.round(Math.max(0, Math.min(1, fill)) * 16);
+    for (let i = 0; i < 16; i++) {
+      const on = i < filled;
+      const shade = 0.42 + this.rnd(i * 3.7 + filled + (seedBase || 0)) * 0.58;
+      out.push({ s: {
+        borderRadius: '2px',
+        background: on ? accent : '#0f1a18',
+        opacity: on ? (hot ? shade : shade * 0.85) : 1,
+        transition: 'opacity .8s ease, background .8s ease'
+      } });
+    }
+    return out;
+  }
+
+  ago(t) {
+    const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+    if (s < 60) return s + 's ago';
+    return Math.floor(s / 60) + 'm ' + String(s % 60).padStart(2, '0') + 's ago';
+  }
+
+  mono(color) { return { fontFamily: "'JetBrains Mono', monospace", fontSize: '12.5px', color: color || '#dfe7e4', wordBreak: 'break-all' }; }
+
+  buildBlockDetail(h) {
+    const b = this.state.blocks.find(x => x.h === h) || this.mk(h, 120);
+    const txs = [];
+    for (let i = 0; i < b.txs; i++) {
+      const s = h * 13 + i * 5;
+      txs.push({
+        id: this.hex(s, 8) + '…' + this.hex(s + 9, 6),
+        coinbase: i === 0,
+        sender: i === 0 ? '—' : this.short(this.addr(s + 30)),
+        io: i === 0 ? '0 → 1' : '1 → 2',
+        receiver: this.short(this.addr(s + 60)),
+        amount: i === 0 ? b.reward : (this.rnd(s + 4) * 2800).toFixed(4) + ' NOID',
+        fee: i === 0 ? '0 NOID' : '0.0099 NOID'
+      });
+    }
+    return {
+      label: '#' + b.h,
+      txCount: b.txs,
+      cells: this.cells(b.fill, false, h),
+      txs,
+      rows: [
+        { k: 'Hash', v: this.hex(h, 64), vs: this.mono() },
+        { k: 'Parent', v: this.hex(h - 1, 64), vs: this.mono('#3ee6b8') },
+        { k: 'Timestamp', v: new Date(b.t).toISOString().replace('T', ' ').slice(0, 19) + ' UTC (' + this.ago(b.t) + ')', vs: this.mono('#b8c6c2') },
+        { k: 'Miner', v: b.miner, vs: this.mono('#3ee6b8') },
+        { k: 'Proof class', v: 'B25 / m22', vs: this.mono('#b8c6c2') },
+        { k: 'Reward', v: b.reward, vs: this.mono('#b8c6c2') },
+        { k: 'Total fees', v: b.fees, vs: this.mono('#b8c6c2') },
+        { k: 'Body captured', v: 'yes', vs: this.mono('#7be38b') },
+        { k: 'State root', v: this.hex(h + 101, 64), vs: this.mono('#8b9d98') },
+        { k: 'Tx root', v: this.hex(h + 202, 64), vs: this.mono('#8b9d98') },
+        { k: 'Nonce', v: this.hex(h + 303, 32), vs: this.mono('#8b9d98') },
+        { k: 'Difficulty target', v: this.hex(h + 404, 56), vs: this.mono('#8b9d98') }
+      ]
+    };
+  }
+
+  buildTxDetail() {
+    const s = 5150;
+    const sender = this.addr(s);
+    const r1 = this.addr(s + 40), r2 = sender;
+    const inputs = [];
+    for (let i = 0; i < 14; i++) inputs.push({ k: 'slot ' + (9700000 + Math.floor(this.rnd(s + i) * 90000)), v: (18 + this.rnd(s + i * 3) * 28).toFixed(6) + ' NOID' });
+    return {
+      inCount: inputs.length, outCount: 2, inputs,
+      outputs: [
+        { k: this.short(r1), v: '496.518984 NOID' },
+        { k: this.short(r2), v: '16.356487 NOID' }
+      ],
+      rows: [
+        { k: 'Txid', v: this.hex(s, 64), vs: this.mono() },
+        { k: 'Block', v: '#' + this.state.blocks[5].h, vs: this.mono('#3ee6b8') },
+        { k: 'Time', v: new Date(this.state.blocks[5].t).toISOString().replace('T', ' ').slice(0, 19) + ' UTC', vs: this.mono('#b8c6c2') },
+        { k: 'Type', v: 'transfer', vs: this.mono('#b8c6c2') },
+        { k: 'Sender', v: sender, vs: this.mono('#3ee6b8') },
+        { k: 'Receivers', v: this.short(r1) + ' (496.518984) · ' + this.short(r2) + ' (16.356487)', vs: this.mono('#3ee6b8') },
+        { k: 'Fee', v: '0.0084 NOID', vs: this.mono('#b8c6c2') },
+        { k: 'Input sum', v: '512.883871 NOID', vs: this.mono('#b8c6c2') },
+        { k: 'Output sum', v: '512.875471 NOID', vs: this.mono('#b8c6c2') },
+        { k: 'Epoch anchor', v: this.hex(s + 900, 64), vs: this.mono('#8b9d98') }
+      ]
+    };
+  }
+
+  buildAddress() {
+    const a = this.addr(777);
+    const big = { fontFamily: "'JetBrains Mono', monospace", fontSize: '17px', color: '#dfe7e4' };
+    const txs = [];
+    for (let i = 0; i < 14; i++) {
+      const s = 777 + i * 11;
+      const cb = this.rnd(s) > 0.45;
+      const b = this.state.blocks[Math.min(this.state.blocks.length - 1, i)];
+      txs.push({
+        id: this.hex(s, 8) + '…' + this.hex(s + 3, 6),
+        coinbase: cb,
+        time: this.ago(b.t),
+        block: '#' + b.h,
+        open: () => this.go('block', b.h),
+        party: cb ? '—' : this.short(this.addr(s + 300)),
+        io: cb ? '0 → 1' : '1 → 2',
+        amount: cb ? '+45.0155 NOID' : '−' + (45 + this.rnd(s + 2) * 90).toFixed(4) + ' NOID',
+        amountStyle: { color: cb ? '#7be38b' : '#b8c6c2' },
+        fee: cb ? '0 NOID' : '0.0099 NOID'
+      });
+    }
+    return {
+      addr: a,
+      note: '302 Transaktionen mit dieser Adresse erfasst.',
+      txs,
+      stats: [
+        { v: '14 587.635744', k: 'Current balance (live)', vs: { fontFamily: "'JetBrains Mono', monospace", fontSize: '17px', color: '#3ee6b8' } },
+        { v: '264', k: 'Current UTXOs (live)', vs: big },
+        { v: '14 301.843668', k: 'Recorded balance', vs: big },
+        { v: '146', k: 'Recorded UTXOs', vs: big },
+        { v: '66 910.879654', k: 'Total received', vs: big },
+        { v: '65 872.473643', k: 'Total sent', vs: big }
+      ]
+    };
+  }
+
+  buildMempool() {
+    const load = this.state.mempool;
+    const n = Math.max(1, Math.round(load * 46));
+    const txs = [];
+    for (let i = 0; i < Math.min(n, 9); i++) {
+      const s = 3000 + i * 7 + this.state.tick * 0;
+      const rate = [4500, 2025, 1414, 1414, 1414, 1414, 980, 860, 720][i];
+      txs.push({
+        id: this.hex(s, 8) + '…' + this.hex(s + 4, 6),
+        io: i % 3 === 1 ? '2 → 2' : '1 → 2',
+        fee: (0.0081 + this.rnd(s) * 0.002).toFixed(4) + ' NOID',
+        rate: rate + ' sat/vB',
+        rateStyle: { color: rate > 2000 ? '#7be38b' : rate > 1200 ? '#3ee6b8' : '#8b9d98' },
+        seen: Math.max(1, Math.round(this.rnd(s + 1) * 120)) + 's ago'
+      });
+    }
+    return {
+      cells: this.cells(Math.min(1, load), true, 42),
+      txs,
+      stats: [
+        { v: n + ' tx', k: 'Pending txs' },
+        { v: '0.005 NOID', k: 'Fee floor' },
+        { v: '720 – 4500', k: 'Fee rate range' }
+      ]
+    };
+  }
+
+  buildRich() {
+    const accent = this.props.accent ?? '#3ee6b8';
+    const out = [];
+    const top = 2780094.407451;
+    for (let i = 0; i < 20; i++) {
+      const bal = i === 0 ? top : top / Math.pow(1.55, i + 1) * (0.7 + this.rnd(i * 4) * 0.6);
+      out.push({
+        n: i + 1,
+        addr: this.short(this.addr(1000 + i * 17)),
+        bal: bal.toFixed(6) + ' NOID',
+        utxos: Math.max(3, Math.round(this.rnd(i * 9) * 14000 / (i + 1))),
+        updated: '1m ' + String(20 + i % 30).padStart(2, '0') + 's ago',
+        barStyle: { display: 'inline-block', height: '4px', borderRadius: '2px', background: accent, opacity: 0.55, width: Math.max(4, Math.round((bal / top) * 90)) + 'px' }
+      });
+    }
+    return out;
+  }
+
+  renderVals() {
+    const accent = this.props.accent ?? '#3ee6b8';
+    const view = this.state.view;
+    const load = this.state.mempool;
+    const count = Math.max(1, Math.ceil(load));
+    const mempoolBlocks = [];
+    for (let i = 0; i < count; i++) {
+      const f = Math.max(0, Math.min(1, load - i));
+      mempoolBlocks.push({
+        cells: this.cells(f, true, i * 31),
+        title: i === 0 ? 'Mempool' : 'Queued +' + i,
+        sub: Math.round(f * 46) + ' pending · ' + (0.005 + f * 0.01).toFixed(4) + ' NOID'
+      });
+    }
+    const blocks = this.state.blocks.map(b => ({
+      label: '#' + b.h,
+      ago: this.ago(b.t),
+      sub: this.ago(b.t) + ' · ' + b.txs + ' tx',
+      txs: b.txs, miner: b.miner, reward: b.reward, fees: b.fees,
+      open: () => this.go('block', b.h),
+      cells: this.cells(b.fill, false, b.h),
+      faceStyle: {
+        position: 'relative', width: '148px', height: '148px', borderRadius: '12px', overflow: 'hidden',
+        background: '#081211',
+        border: '1px solid ' + (this.state.flash === b.h ? accent : '#1b2a27'),
+        boxShadow: this.state.flash === b.h ? '0 0 0 1px rgba(62,230,184,.2), 0 16px 44px -26px ' + accent : 'none',
+        transition: 'border-color 2.4s ease, box-shadow 2.4s ease'
+      }
+    }));
+    const top = this.state.blocks[0].h;
+    const navDef = [
+      { label: 'Dashboard', v: 'home' },
+      { label: 'Block', v: 'block' },
+      { label: 'Transaction', v: 'tx' },
+      { label: 'Address', v: 'address' },
+      { label: 'Mempool', v: 'mempool' },
+      { label: 'Rich list', v: 'rich' }
+    ];
+    return {
+      blocks, mempoolBlocks, mine: this.mine,
+      trackRef: el => { this.track = el; },
+      nextIn: this.state.nextIn,
+      tipLabel: '#' + top,
+      blocksRecorded: (top - 107821).toLocaleString('de-DE'),
+      txCount: (2079 + (top - 109030) * 2).toLocaleString('de-DE'),
+      utxoCount: (971 + (top - 109030)).toLocaleString('de-DE'),
+      isHome: view === 'home', isBlock: view === 'block', isTx: view === 'tx',
+      isAddress: view === 'address', isMempool: view === 'mempool', isRich: view === 'rich',
+      goHome: () => this.go('home'),
+      goBlocks: () => this.go('block', top),
+      goTx: () => this.go('tx'),
+      goAddress: () => this.go('address'),
+      goMempool: () => this.go('mempool'),
+      navItems: navDef.map(n => ({
+        label: n.label,
+        go: () => this.go(n.v, n.v === 'block' ? top : undefined),
+        style: { cursor: 'pointer', color: view === n.v ? '#dfe7e4' : '#7d8f8a', borderBottom: view === n.v ? '1px solid ' + accent : '1px solid transparent', paddingBottom: '2px' }
+      })),
+      blockDetail: this.buildBlockDetail(this.state.sel),
+      txDetail: this.buildTxDetail(),
+      addressDetail: this.buildAddress(),
+      mempoolView: this.buildMempool(),
+      richList: this.buildRich(),
+      stats: [
+        { v: '5 446 238.83', k: 'Circulating supply' },
+        { v: '50 NOID', k: 'Block reward' },
+        { v: '9.68 GH/s', k: 'Network hashrate' },
+        { v: '20.5 s', k: 'Avg block time (1h)' },
+        { v: Math.round(this.state.mempool * 46) + ' tx', k: 'Mempool pending' },
+        { v: '0.005 NOID', k: 'Fee floor' }
+      ]
+    };
+  }
+}
+
+</script>
+</body>
+</html>

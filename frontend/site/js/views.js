@@ -1,9 +1,35 @@
 import { api } from "./api.js";
-import { noid, shortHash, timeAgo, fullTime, escapeHtml, hashrate, seconds } from "./format.js";
-import { renderBlockSquare, pickTx } from "./blocksquare.js";
+import { noid, int, shortHash, timeAgo, fullTime, escapeHtml, hashrate, seconds, isoToUnix, feeRateOf } from "./format.js";
+import { pagesOf, cellShades, cellsHtml, applyCells } from "./cells.js";
+import {
+  CHAIN_BLOCKS,
+  blockTileHtml,
+  mempoolTilesHtml,
+  updateMempoolTiles,
+  slideTrack,
+  scheduleFlashEnd,
+  etaText,
+} from "./chain.js";
+import * as health from "./health.js";
 
-function link(href, text) {
-  return `<a href="${href}" data-link>${escapeHtml(text)}</a>`;
+const LIVE_REFRESH_MS = 1000;
+const STATS_REFRESH_MS = 20_000;
+const ALL_BLOCKS_LIMIT = 200;
+
+function link(href, text, cls = "") {
+  return `<a href="${href}" data-link${cls ? ` class="${cls}"` : ""}>${escapeHtml(text)}</a>`;
+}
+function addrLink(address, full = false) {
+  return link(`/address/${address}`, full ? address : shortHash(address));
+}
+function page(inner) {
+  return `<div class="wrap"><div class="page">${inner}</div></div>`;
+}
+function back() {
+  return `<a class="back" href="/" data-link>← back to chain</a>`;
+}
+function hint(text, title) {
+  return `<span class="hint" title="${escapeHtml(title)}">${text}</span>`;
 }
 
 // Browsers wrap a native title tooltip at literal newlines, so this stays
@@ -15,228 +41,258 @@ to the sender, but the protocol
 doesn't guarantee that.`;
 }
 
-// A <td class="time-cell" data-ts="..."> whose text is filled in by
-// applyTimeFormat() right after insertion, so it always matches whatever
-// mode the table's "Time" header is currently toggled to.
-function timeCell(ts) {
-  return `<td class="time-cell" data-ts="${ts}"></td>`;
+function kindTag(tx) {
+  if (tx.coinbase) return '<span class="tag">coinbase</span>';
+  if (tx.development_payout) return '<span class="tag">dev payout</span>';
+  return "";
 }
 
-// Applies the current relative/absolute mode to every .time-cell under
-// `root`. Call this after inserting or replacing any HTML that contains
-// timeCell() output, including after a live-refresh rebuild.
+// ---- time labels ----------------------------------------------------
+// <span class="time-cell" data-ts> follows the table's relative/absolute
+// toggle; <span class="ago" data-ts> is always relative (chain tiles,
+// timestamps in detail rows). Both are re-rendered every second by the
+// view's tick so the wait between blocks visibly grows instead of sitting
+// frozen until the next rebuild.
+function timeCell(ts) {
+  return `<span class="time-cell time-col" data-ts="${ts}"></span>`;
+}
 function applyTimeFormat(root, absolute) {
-  root.querySelectorAll(".time-cell").forEach((td) => {
-    const ts = Number(td.dataset.ts);
-    td.textContent = absolute ? fullTime(ts) : timeAgo(ts);
+  root.querySelectorAll(".time-cell").forEach((el) => {
+    const ts = Number(el.dataset.ts);
+    el.textContent = absolute ? fullTime(ts) : timeAgo(ts);
+  });
+  root.querySelectorAll(".ago").forEach((el) => {
+    el.textContent = timeAgo(Number(el.dataset.ts));
   });
 }
-
-// Wires every "Time" column header under `root` to toggle all .time-cell
-// text between relative and absolute on click. Returns a dispose function.
-// State lives in the closure so it survives table rebuilds as long as the
-// caller re-applies it (see applyTimeFormat) and re-wires after replacing
-// a header element.
 function wireTimeToggle(root, getAbsolute, setAbsolute) {
   const disposers = [];
-  root.querySelectorAll(".time-toggle").forEach((th) => {
+  root.querySelectorAll(".time-toggle").forEach((el) => {
     const onClick = () => {
       setAbsolute(!getAbsolute());
       applyTimeFormat(root, getAbsolute());
     };
-    th.addEventListener("click", onClick);
-    disposers.push(() => th.removeEventListener("click", onClick));
+    el.addEventListener("click", onClick);
+    disposers.push(() => el.removeEventListener("click", onClick));
   });
   return () => disposers.forEach((d) => d());
 }
+function timeHeader() {
+  return `<span class="time-col"><span class="time-toggle" title="Click to switch between relative and absolute time">Time</span></span>`;
+}
+// Minimal mount for views whose only live element is the clock.
+function tickingMount(root) {
+  let absoluteTime = false;
+  applyTimeFormat(root, absoluteTime);
+  const disposeToggle = wireTimeToggle(root, () => absoluteTime, (v) => (absoluteTime = v));
+  const timer = setInterval(() => applyTimeFormat(root, absoluteTime), LIVE_REFRESH_MS);
+  return () => {
+    clearInterval(timer);
+    disposeToggle();
+  };
+}
 
-function blocksTable(blocks) {
-  const rows = blocks
+// ---- shared tables ----------------------------------------------------
+function blocksHead() {
+  return `<div class="thead cols-blocks"><span>Height</span>${timeHeader()}<span>Miner</span><span>Txs</span><span>Reward</span><span>Fees</span></div>`;
+}
+function blocksRows(blocks) {
+  if (!blocks.length) return `<div class="trow cols-blocks"><span class="empty">No blocks recorded yet.</span></div>`;
+  return blocks
     .map(
-      (b) => `<tr>
-        <td>${link(`/block/${b.height}`, "#" + b.height)}</td>
+      (b) => `<div class="trow cols-blocks">
+        <span>${link(`/block/${b.height}`, "#" + b.height)}${b.body_captured ? "" : ' <span class="tag warn" title="Body pruned by the node before this permanode could capture it">no body</span>'}</span>
         ${timeCell(b.timestamp)}
-        <td class="mono">${link(`/address/${b.miner}`, shortHash(b.miner))}</td>
-        <td>${b.tx_count}</td>
-        <td>${noid(b.reward_micronoid)}</td>
-        <td>${b.total_fees_micronoid !== null ? noid(b.total_fees_micronoid) : "-"}</td>
-        <td>${b.body_captured ? "" : '<span class="badge gap">no body</span>'}</td>
-      </tr>`
+        <span>${addrLink(b.miner)}</span>
+        <span>${b.tx_count}</span>
+        <span>${noid(b.reward_micronoid)}</span>
+        <span class="dim">${b.total_fees_micronoid !== null ? noid(b.total_fees_micronoid) : "-"}</span>
+      </div>`
     )
     .join("");
-  return `<div class="table-scroll"><table>
-      <thead><tr><th>Height</th><th class="time-toggle" title="Click to toggle relative/absolute time">Time</th><th>Miner</th><th>Txs</th><th>Reward</th><th>Fees</th><th></th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table></div>`;
 }
 
-function navigateToTx(txid) {
-  history.pushState(null, "", `/tx/${txid}`);
-  window.dispatchEvent(new PopStateEvent("popstate"));
-}
-
-// Wires a canvas to draw `txs` (a fixed snapshot or a live-refreshed
-// getter) and click-navigate to the tx under the pointer. Returns
-// {draw, dispose} - callers must call dispose() when the view unmounts, or
-// the resize listener piles up against a detached canvas forever.
-function wireSquare(canvas, getTxs, opts = {}) {
-  const draw = () => renderBlockSquare(canvas, getTxs(), opts);
-  draw();
-  const onClick = (e) => {
-    const tx = pickTx(canvas, getTxs(), e.clientX, e.clientY);
-    const id = tx && (tx.txid || tx.tx_hash);
-    if (id) navigateToTx(id);
-  };
-  canvas.addEventListener("click", onClick);
-  window.addEventListener("resize", draw);
-  const dispose = () => {
-    canvas.removeEventListener("click", onClick);
-    window.removeEventListener("resize", draw);
-  };
-  return { draw, dispose };
-}
-
-const STRIP_BLOCK_COUNT = 8;
-const LIVE_REFRESH_MS = 1000;
-
-function networkMetricsHtml(stats) {
-  const n = stats?.network;
-  if (!n) return "";
-  return `
-    <div class="panel">
-      <h2>Network</h2>
-      <div class="mempool-stats">
-        <div class="stat"><div class="v">${noid(n.circulating_supply_micronoid)}</div><div class="k">Circulating supply</div></div>
-        <div class="stat"><div class="v">${noid(n.block_reward_micronoid)}</div><div class="k">Block reward</div></div>
-        <div class="stat"><div class="v hint" title="Rough estimate derived from the
-current PoW target, not a
-measured network figure.">${hashrate(n.estimated_hashrate_hs)}</div><div class="k">Network hashrate (est.)</div></div>
-        <div class="stat"><div class="v hint" title="From this permanode's own recorded
-blocks, not the node - a fresh
-install won't have a 24h figure
-yet.">${seconds(n.avg_block_time_10m_seconds)}</div><div class="k">Avg block time (10m)</div></div>
-        <div class="stat"><div class="v">${seconds(n.avg_block_time_1h_seconds)}</div><div class="k">Avg block time (1h)</div></div>
-        <div class="stat"><div class="v">${seconds(n.avg_block_time_24h_seconds)}</div><div class="k">Avg block time (24h)</div></div>
-      </div>
+function txRow(tx) {
+  const sender = tx.input_owner ? addrLink(tx.input_owner) : "—";
+  const receiver = tx.receiver ? addrLink(tx.receiver) : "—";
+  const extra = tx.n_outputs > 1 ? ` ${hint(`+${tx.n_outputs - 1}`, receiverHint(tx.n_outputs))}` : "";
+  return `<div class="trow cols-btx">
+      <span class="with-tag">${link(`/tx/${tx.txid}`, shortHash(tx.txid))}${kindTag(tx)}</span>
+      <span class="dim">${sender}</span>
+      <span>${tx.n_inputs} → ${tx.n_outputs}</span>
+      <span>${receiver}${extra}</span>
+      <span>${noid(tx.output_sum_micronoid)}</span>
+      <span class="dim">${noid(tx.fee_micronoid)}</span>
     </div>`;
 }
 
-function stripTilesHtml(mempoolInfo, stripBlocks, stripSummaries) {
-  return [
-    `<div class="block-tile mempool" id="mempool-tile">
-       <a class="square" href="/mempool" data-link><canvas id="mempool-canvas"></canvas></a>
-       <div class="label"><strong>Mempool</strong><br>${mempoolInfo ? mempoolInfo.size : "-"} pending</div>
-     </div>`,
-    ...stripBlocks.map((b, i) => {
-      const summary = stripSummaries[i];
-      if (!b) return "";
-      const cls = b.body_captured ? "block-tile" : "block-tile gap";
-      return `<div class="${cls}">
-          <a class="square" href="/block/${b.height}" data-link><canvas id="block-canvas-${b.height}"></canvas></a>
-          <div class="label"><strong>#${b.height}</strong><br><span class="time-cell" data-ts="${summary.timestamp}"></span></div>
-        </div>`;
-    }),
-  ].join('<span class="chain-arrow">←</span>');
+// ---- dashboard --------------------------------------------------------
+function avgBlockTime(stats) {
+  const n = stats?.network;
+  return n?.avg_block_time_10m_seconds ?? n?.avg_block_time_1h_seconds ?? null;
 }
 
-async function fetchStrip(summaries) {
-  const stripSummaries = summaries.slice(0, STRIP_BLOCK_COUNT);
-  const stripBlocks = await Promise.all(
-    stripSummaries.map((b) => api.blockByHeight(b.height).catch(() => null))
-  );
-  return { stripSummaries, stripBlocks };
+// Whole-supply figures don't fit a stat card at full µNOID precision, so
+// this rounds to two decimals; every other amount keeps full precision.
+function supply(micronoid) {
+  if (micronoid === null || micronoid === undefined) return "-";
+  const full = noid(micronoid, false);
+  const [whole, frac = ""] = full.split(".");
+  return frac ? `${whole}.${frac.slice(0, 2).padEnd(2, "0")}` : full;
+}
+
+function statCard(v, k, opts = {}) {
+  const title = opts.hint ? ` title="${escapeHtml(opts.hint)}"` : "";
+  const cls = opts.hint ? "v hint" : "v";
+  return `<div class="stat"${opts.id ? ` id="${opts.id}"` : ""}><span class="${cls}"${title}>${v}</span><span class="k">${k}</span></div>`;
+}
+
+function dashboardStatsHtml(stats, mempool) {
+  const n = stats?.network || {};
+  const blockTimes = `10 min: ${seconds(n.avg_block_time_10m_seconds)} · 24 h: ${seconds(n.avg_block_time_24h_seconds)}
+From this permanode's own recorded
+blocks, not the node - a fresh install
+won't have a 24h figure yet.`;
+  return [
+    statCard(supply(n.circulating_supply_micronoid), "Circulating supply", { hint: "in NOID" }),
+    statCard(noid(n.block_reward_micronoid), "Block reward"),
+    statCard(hashrate(n.estimated_hashrate_hs), "Network hashrate", {
+      hint: "Rough estimate derived from the\ncurrent PoW target, not a\nmeasured network figure.",
+    }),
+    statCard(seconds(n.avg_block_time_1h_seconds), "Avg block time (1h)", { hint: blockTimes }),
+    statCard(mempool ? int(mempool.size) : "-", "Mempool pending", { id: "stat-mempool" }),
+    statCard(mempool ? noid(mempool.fee_floor) : "-", "Fee floor", { id: "stat-floor" }),
+  ].join("");
+}
+
+function detailKey(summary) {
+  return `${summary.height}:${summary.hash}`;
 }
 
 export async function homeView() {
   let summaries = await api.blocks(25);
-  let mempoolInfo = await api.mempool().catch(() => null);
+  let mempool = await api.mempool().catch(() => null);
   let stats = await api.stats().catch(() => null);
-  let { stripSummaries, stripBlocks } = await fetchStrip(summaries);
+  const details = new Map();
+
+  const chainSummaries = () => summaries.slice(0, CHAIN_BLOCKS);
+  async function loadDetails() {
+    const wanted = chainSummaries();
+    await Promise.all(
+      wanted.map(async (s) => {
+        const k = detailKey(s);
+        if (!details.has(k)) details.set(k, await api.blockByHeight(s.height).catch(() => null));
+      })
+    );
+    const keep = new Set(wanted.map(detailKey));
+    for (const k of details.keys()) if (!keep.has(k)) details.delete(k);
+  }
+  await loadDetails();
+
+  const trackHtml = (flashHeight) =>
+    mempoolTilesHtml(mempool) +
+    chainSummaries()
+      .map((s) => blockTileHtml(s, details.get(detailKey(s)), s.height === flashHeight))
+      .join("");
 
   const html = `
-    <div class="chain-strip" id="chain-strip">${stripTilesHtml(mempoolInfo, stripBlocks, stripSummaries)}</div>
-    <div id="network-metrics">${networkMetricsHtml(stats)}</div>
-    <div class="panel">
-      <h2>Recent blocks</h2>
-      <div id="recent-blocks-table">${blocksTable(summaries)}</div>
+    <section class="chain">
+      <div class="chain-head">
+        <h2>Chain</h2>
+        <span class="eta" id="eta">${etaText(summaries[0]?.timestamp, avgBlockTime(stats))}</span>
+      </div>
+      <div class="chain-viewport">
+        <div class="chain-scroll"><div class="chain-track" id="chain-track">${trackHtml(null)}</div></div>
+        <div class="chain-fade"></div>
+      </div>
+    </section>
+    <div class="wrap">
+      <section class="stats" id="stats">${dashboardStatsHtml(stats, mempool)}</section>
+      <section class="page">
+        <div class="card">
+          <div class="card-head"><h2>Recent blocks</h2>${link("/blocks", "all blocks →")}</div>
+          <div class="tbl-scroll">${blocksHead()}<div id="recent-blocks">${blocksRows(summaries)}</div></div>
+        </div>
+      </section>
     </div>`;
 
   function mount(root) {
-    let blockDisposers = [];
+    const track = root.querySelector("#chain-track");
+    const eta = root.querySelector("#eta");
+    let tip = summaries[0]?.height ?? null;
+    let tipHash = summaries[0]?.hash ?? null;
     let absoluteTime = false;
     let timeToggleDisposer = () => {};
+    let inflight = false;
 
     function refreshTimeToggle() {
       timeToggleDisposer();
       applyTimeFormat(root, absoluteTime);
       timeToggleDisposer = wireTimeToggle(root, () => absoluteTime, (v) => (absoluteTime = v));
     }
-
-    function wireMempoolTile() {
-      const c = root.querySelector("#mempool-canvas");
-      return c ? wireSquare(c, () => mempoolInfo?.txs || [], { emptyLabel: "empty" }).dispose : () => {};
+    function renderEta() {
+      eta.textContent = etaText(summaries[0]?.timestamp, avgBlockTime(stats));
     }
-    function wireBlockTiles() {
-      blockDisposers.forEach((d) => d());
-      blockDisposers = stripBlocks
-        .filter(Boolean)
-        .map((b) => {
-          const c = root.querySelector(`#block-canvas-${b.height}`);
-          return c ? wireSquare(c, () => b.transactions).dispose : null;
-        })
-        .filter(Boolean);
+    function renderStats() {
+      const el = root.querySelector("#stats");
+      if (el) el.innerHTML = dashboardStatsHtml(stats, mempool);
     }
-
-    let mempoolDisposer = wireMempoolTile();
-    wireBlockTiles();
     refreshTimeToggle();
 
     const timer = setInterval(async () => {
-      // Tick relative-time labels forward every second regardless of
-      // whether new block data arrived, so a long gap between blocks
-      // shows the wait growing live instead of sitting frozen until the
-      // next block finally triggers a rebuild.
       applyTimeFormat(root, absoluteTime);
+      renderEta();
+      if (inflight) return;
+      inflight = true;
       try {
-        const [newSummaries, newMempool, newStats] = await Promise.all([
-          api.blocks(25),
-          api.mempool(),
-          api.stats().catch(() => null),
-        ]);
-        const tipChanged = newSummaries[0]?.height !== summaries[0]?.height;
-        mempoolInfo = newMempool;
-        stats = newStats;
-        const metrics = root.querySelector("#network-metrics");
-        if (metrics) metrics.innerHTML = networkMetricsHtml(stats);
-
-        if (tipChanged) {
-          summaries = newSummaries;
-          ({ stripSummaries, stripBlocks } = await fetchStrip(summaries));
-
-          mempoolDisposer();
-          const strip = root.querySelector("#chain-strip");
-          if (strip) strip.innerHTML = stripTilesHtml(mempoolInfo, stripBlocks, stripSummaries);
-          mempoolDisposer = wireMempoolTile();
-          wireBlockTiles();
-
-          const table = root.querySelector("#recent-blocks-table");
-          if (table) table.innerHTML = blocksTable(summaries);
+        const [newSummaries, newMempool] = await Promise.all([api.blocks(25), api.mempool()]);
+        health.reportOk();
+        mempool = newMempool;
+        summaries = newSummaries;
+        const newTip = summaries[0]?.height ?? null;
+        const newTipHash = summaries[0]?.hash ?? null;
+        // A reorg swaps the tip hash without raising the height - rebuild
+        // the chain then too, just without the "new block" slide.
+        if (newTip !== tip || newTipHash !== tipHash) {
+          const advanced = newTip !== null && (tip === null || newTip > tip);
+          tip = newTip;
+          tipHash = newTipHash;
+          await loadDetails();
+          track.innerHTML = trackHtml(advanced ? newTip : null);
+          if (advanced) {
+            slideTrack(track);
+            scheduleFlashEnd(track);
+          }
+          const table = root.querySelector("#recent-blocks");
+          if (table) table.innerHTML = blocksRows(summaries);
           refreshTimeToggle();
-        } else {
-          const c = root.querySelector("#mempool-canvas");
-          if (c) renderBlockSquare(c, mempoolInfo.txs, { emptyLabel: "empty" });
-          const label = root.querySelector("#mempool-tile .label");
-          if (label) label.innerHTML = `<strong>Mempool</strong><br>${mempoolInfo.size} pending`;
+        } else if (!updateMempoolTiles(track, mempool)) {
+          track.innerHTML = trackHtml(null);
+          applyTimeFormat(root, absoluteTime);
         }
+        const pending = root.querySelector("#stat-mempool .v");
+        if (pending) pending.textContent = int(mempool.size);
+        const floor = root.querySelector("#stat-floor .v");
+        if (floor) floor.textContent = noid(mempool.fee_floor);
       } catch {
-        /* node/API momentarily unreachable - keep last known view, try again next tick */
+        health.reportFail();
+      } finally {
+        inflight = false;
       }
     }, LIVE_REFRESH_MS);
 
+    const statsTimer = setInterval(async () => {
+      try {
+        stats = await api.stats();
+        renderStats();
+      } catch {
+        /* the 1s poll already tracks reachability */
+      }
+    }, STATS_REFRESH_MS);
+
     return () => {
       clearInterval(timer);
-      mempoolDisposer();
-      blockDisposers.forEach((d) => d());
+      clearInterval(statsTimer);
       timeToggleDisposer();
     };
   }
@@ -244,43 +300,45 @@ export async function homeView() {
   return { html, mount };
 }
 
-export function tickerHtml(stats) {
-  if (!stats) return "";
-  const oldest = stats.oldest_retained_timestamp ? fullTime(stats.oldest_retained_timestamp) : "-";
-  return `
-    <span>Indexed tip: <strong>#${stats.last_processed_height ?? "-"}</strong></span>
-    <span>Blocks recorded: <strong>${stats.indexed_blocks}</strong></span>
-    <span>Transactions: <strong>${stats.indexed_transactions}</strong></span>
-    <span class="hint" title="Only what this permanode has itself recorded
-as created and still unspent since it started
-indexing - not the network-wide total.">Live UTXOs (recorded): <strong>${stats.live_utxos}</strong></span>
-    ${stats.network_active_slots != null ? `<span class="hint" title="The node's own count across its entire
-history since genesis, for comparison.">Live UTXOs (network): <strong>${stats.network_active_slots}</strong></span>` : ""}
-    <span>History since: <strong>${oldest}</strong></span>
-    ${stats.gaps > 0 ? `<span class="hint" title="Body still missing outside the node's getBlock serving window - permanently gone.">Gaps: <strong class="mono">${stats.gaps}</strong></span>` : ""}
-    ${stats.gaps_resolved > 0 ? `<span class="hint" title="Blocks the getBlock fallback decoder recovered after an initial gap - see project docs on the node RPC bug this works around.">Gaps recovered: <strong class="mono">${stats.gaps_resolved}</strong></span>` : ""}
-    ${stats.decoder_mismatches > 0 ? `<span class="hint" title="Times the fallback decoder's output disagreed with the node's own getBlockDetails for a block both could decode - should be 0.">Decoder mismatches: <strong class="mono">${stats.decoder_mismatches}</strong></span>` : ""}
-    <span>${link("/mempool", "Live mempool →")}</span>
-    <span>${link("/richlist", "Rich list →")}</span>`;
+export async function blocksView() {
+  const blocks = await api.blocks(ALL_BLOCKS_LIMIT);
+  const html = page(`
+    ${back()}
+    <div class="card">
+      <div class="card-head"><h2>Latest ${blocks.length} blocks</h2></div>
+      <div class="tbl-scroll">${blocksHead()}${blocksRows(blocks)}</div>
+    </div>`);
+  return { html, mount: tickingMount };
 }
 
-function txRow(tx) {
-  const kind = tx.coinbase
-    ? '<span class="badge coinbase">coinbase</span>'
-    : tx.development_payout
-    ? '<span class="badge dev">dev payout</span>'
-    : "";
-  const sender = tx.input_owner ? link(`/address/${tx.input_owner}`, shortHash(tx.input_owner)) : "-";
-  const receiver = tx.receiver ? link(`/address/${tx.receiver}`, shortHash(tx.receiver)) : "-";
-  const extra = tx.n_outputs > 1 ? ` <span class="hint" title="${receiverHint(tx.n_outputs)}">+${tx.n_outputs - 1} more</span>` : "";
-  return `<tr>
-      <td class="mono">${link(`/tx/${tx.txid}`, shortHash(tx.txid))} ${kind}</td>
-      <td class="mono">${sender}</td>
-      <td>${tx.n_inputs} → ${tx.n_outputs}</td>
-      <td class="mono">${receiver}${extra}</td>
-      <td>${noid(tx.output_sum_micronoid)}</td>
-      <td>${noid(tx.fee_micronoid)}</td>
-    </tr>`;
+// ---- status bar -------------------------------------------------------
+export function tickerHtml(stats) {
+  const live = `<span class="live" id="live"><span class="dot"></span>live</span><span class="conn-lost" id="conn-lost"></span>`;
+  if (!stats) return live;
+  const n = stats.network || {};
+  const gaps =
+    stats.gaps > 0 || stats.gaps_resolved > 0
+      ? hint(
+          `Gaps <b>${int(stats.gaps)}</b>${stats.gaps_resolved > 0 ? ` <span class="dim">+${int(stats.gaps_resolved)} recovered</span>` : ""}`,
+          "Blocks whose body the node pruned before this permanode could capture it - permanently gone.\nRecovered: gaps the getBlock fallback decoder filled in afterwards."
+        )
+      : "";
+  return `
+    <span>Tip <b>#${stats.last_processed_height ?? "-"}</b></span>
+    <span>Blocks <b>${int(stats.indexed_blocks)}</b></span>
+    <span>Transactions <b>${int(stats.indexed_transactions)}</b></span>
+    ${hint(`Live UTXOs <b>${int(stats.live_utxos)}</b>`, "Only what this permanode has itself recorded\nas created and still unspent since it started\nindexing - not the network-wide total.")}
+    ${n.active_slots != null ? hint(`Network UTXOs <b>${int(n.active_slots)}</b>`, "The node's own count across its entire\nhistory since genesis, for comparison.") : ""}
+    <span>History since <b>${stats.oldest_retained_timestamp ? fullTime(stats.oldest_retained_timestamp) : "-"}</b></span>
+    ${gaps}
+    <span>Avg block time <b>${seconds(n.avg_block_time_1h_seconds)}</b></span>
+    ${stats.decoder_mismatches > 0 ? hint(`Decoder mismatches <b>${stats.decoder_mismatches}</b>`, "Times the fallback decoder's output disagreed with the node's own getBlockDetails for a block both could decode - should be 0.") : ""}
+    ${live}`;
+}
+
+// ---- block ------------------------------------------------------------
+function kvRow(k, v, cls = "") {
+  return `<div><span class="k">${k}</span><span class="v${cls ? " " + cls : ""}">${v}</span></div>`;
 }
 
 export async function blockView(idParam) {
@@ -288,311 +346,359 @@ export async function blockView(idParam) {
   const block = isHeight ? await api.blockByHeight(idParam) : await api.blockByHash(idParam);
   if (!block) return notFoundHtml(`Block ${idParam} not found (or not canonical).`);
 
+  const shades = cellShades(pagesOf(block.transactions), false);
+  const rows = [
+    kvRow("Hash", block.hash),
+    kvRow("Parent", link(`/block/${block.prev_hash}`, block.prev_hash), "hi"),
+    kvRow("Timestamp", `${fullTime(block.timestamp)} (<span class="ago" data-ts="${block.timestamp}"></span>)`, "t2"),
+    kvRow("Miner", addrLink(block.miner, true)),
+    kvRow("Proof class", block.proof_class ?? "-", "t2"),
+    kvRow("Reward", noid(block.reward_micronoid), "t2"),
+    kvRow("Total fees", block.total_fees_micronoid !== null ? noid(block.total_fees_micronoid) : "-", "t2"),
+    block.body_captured
+      ? kvRow("Body captured", "yes", "pos")
+      : kvRow("Body captured", '<span class="tag warn">no — pruned by the node before capture</span>'),
+    kvRow("State root", block.state_root, "t3"),
+    kvRow("Tx root", block.tx_root, "t3"),
+    kvRow("Nonce", block.nonce_hex, "t3"),
+    kvRow("Difficulty target", block.difficulty_target, "t3"),
+  ].join("");
   const txRows = block.transactions.map(txRow).join("");
-  const html = `
-    <div class="panel">
-      <h2>Block #${block.height}</h2>
-      <div class="tx-square-large"><canvas id="block-square"></canvas></div>
-      <dl class="kv">
-        <dt>Hash</dt><dd class="mono">${block.hash}</dd>
-        <dt>Parent</dt><dd class="mono">${link(`/block/${block.prev_hash}`, block.prev_hash)}</dd>
-        <dt>Timestamp</dt><dd>${fullTime(block.timestamp)} (${timeAgo(block.timestamp)})</dd>
-        <dt>Miner</dt><dd class="mono">${link(`/address/${block.miner}`, block.miner)}</dd>
-        <dt>Proof class</dt><dd>${block.proof_class ?? "-"}</dd>
-        <dt>Reward</dt><dd>${noid(block.reward_micronoid)}</dd>
-        <dt>Total fees</dt><dd>${block.total_fees_micronoid !== null ? noid(block.total_fees_micronoid) : "-"}</dd>
-        <dt>Body captured</dt><dd>${block.body_captured ? "yes" : '<span class="badge gap">no — pruned before capture</span>'}</dd>
-        <dt>State root</dt><dd class="mono">${block.state_root}</dd>
-        <dt>Tx root</dt><dd class="mono">${block.tx_root}</dd>
-        <dt>Nonce</dt><dd class="mono">${block.nonce_hex}</dd>
-        <dt>Difficulty target</dt><dd class="mono">${block.difficulty_target}</dd>
-      </dl>
+
+  const html = page(`
+    ${back()}
+    <div class="card pad split">
+      <div class="visual">
+        <div class="face big">${cellsHtml(shades)}</div>
+        <span class="face-caption" title="Each lit cell is one page of block space. Cells are ordered with the highest fee rate first; brighter = higher fee rate.">packed by size, shaded by fee rate</span>
+      </div>
+      <div class="grow">
+        <h1 class="title block">Block <em>#${block.height}</em></h1>
+        <div class="kv">${rows}</div>
+      </div>
     </div>
-    <div class="panel">
-      <h2>Transactions (${block.transactions.length}), packed by size, shaded by fee rate</h2>
-      <div class="table-scroll"><table>
-        <thead><tr><th>Txid</th><th>Sender</th><th>In → Out</th><th>Receiver</th><th>Amount</th><th>Fee</th></tr></thead>
-        <tbody>${txRows || '<tr><td colspan="6">No transactions recorded for this block.</td></tr>'}</tbody>
-      </table></div>
-    </div>`;
-
-  function mount(root) {
-    const c = root.querySelector("#block-square");
-    if (!c) return undefined;
-    return wireSquare(c, () => block.transactions, { emptyLabel: "no transactions" }).dispose;
-  }
-
-  return { html, mount };
+    <div class="card">
+      <div class="card-head"><h2>Transactions (${block.transactions.length})</h2></div>
+      <div class="tbl-scroll">
+        <div class="thead cols-btx"><span>Txid</span><span>Sender</span><span>In → out</span><span>Receiver</span><span>Amount</span><span>Fee</span></div>
+        ${txRows || '<div class="trow cols-btx"><span class="empty">No transactions recorded for this block.</span></div>'}
+      </div>
+    </div>`);
+  return { html, mount: tickingMount };
 }
 
+// ---- transaction ------------------------------------------------------
 export async function txView(txid) {
   const tx = await api.tx(txid);
   if (!tx) return notFoundHtml(`Transaction ${txid} not found.`);
 
-  const inputs = tx.inputs
-    .map((i) => `<li><span>slot ${i.slot_index}</span><span>${noid(i.amount_micronoid)}</span></li>`)
-    .join("") || "<li>none (coinbase)</li>";
+  const inputs =
+    tx.inputs
+      .map((i) => `<div class="io-row"><span class="dim">slot ${i.slot_index}</span><span>${noid(i.amount_micronoid)}</span></div>`)
+      .join("") || '<div class="io-row"><span class="dim">none (coinbase)</span><span></span></div>';
   const outputs = tx.outputs
-    .map(
-      (o) => `<li><span>${link(`/address/${o.owner}`, shortHash(o.owner))}</span><span>${noid(o.amount_micronoid)}</span></li>`
-    )
+    .map((o) => `<div class="io-row"><span>${addrLink(o.owner)}</span><span>${noid(o.amount_micronoid)}</span></div>`)
     .join("");
-  const receiverSummary = tx.outputs
-    .map((o) => `${link(`/address/${o.owner}`, o.owner)} (${noid(o.amount_micronoid)})`)
-    .join("<br>") || "-";
-
-  return `
-    <div class="panel">
-      <h2>Transaction</h2>
-      <dl class="kv">
-        <dt>Txid</dt><dd class="mono">${tx.txid}</dd>
-        <dt>Block</dt><dd>${link(`/block/${tx.block.height}`, "#" + tx.block.height)}
-          ${tx.block.canonical ? "" : '<span class="badge orphaned">block later orphaned</span>'}</dd>
-        <dt>Time</dt><dd>${fullTime(tx.block.timestamp)}</dd>
-        <dt>Type</dt><dd>${
-          tx.coinbase ? '<span class="badge coinbase">coinbase (block reward)</span>' : tx.development_payout ? '<span class="badge dev">development payout</span>' : "transfer"
-        }</dd>
-        <dt>Sender</dt><dd class="mono">${tx.input_owner ? link(`/address/${tx.input_owner}`, tx.input_owner) : "-"}</dd>
-        <dt>Receiver${tx.outputs.length > 1 ? "s" : ""}</dt><dd class="mono">${receiverSummary}</dd>
-        <dt>Fee</dt><dd>${noid(tx.fee_micronoid)}</dd>
-        <dt>Input sum</dt><dd>${noid(tx.input_sum_micronoid)}</dd>
-        <dt>Output sum</dt><dd>${noid(tx.output_sum_micronoid)}</dd>
-        <dt>Epoch anchor</dt><dd class="mono">${tx.epoch_anchor}</dd>
-      </dl>
-    </div>
-    <div class="panel io-cols">
-      <div><h3>Inputs</h3><ul class="io-list">${inputs}</ul></div>
-      <div><h3>Outputs</h3><ul class="io-list">${outputs}</ul></div>
-    </div>
-    <div class="panel">
-      <h2>Merkle path (receipt data)</h2>
-      <ul class="io-list mono">${tx.page_hashes.map((h) => `<li>${h}</li>`).join("")}</ul>
-    </div>`;
-}
-
-function liveUtxosPlaceholder() {
-  return `
-    <h2>Live UTXOs</h2>
-    <p>Not loaded by default to keep this page light. The individual unspent
-      outputs behind the "Current UTXOs (live)" figure above, straight from
-      the node.</p>
-    <button id="load-live-utxos" type="button" class="btn">Load live UTXOs</button>`;
-}
-
-function liveUtxosPanelBody(utxos) {
-  const rows = utxos
-    .map(
-      (u) => `<tr>
-        <td class="mono">${u.slot_index}</td>
-        <td>${noid(u.value)}</td>
-        <td class="mono">${u.creation_id}</td>
-      </tr>`
-    )
-    .join("");
-  return `
-    <h2>Live UTXOs (${utxos.length})</h2>
-    <div class="table-scroll"><table>
-      <thead><tr><th>Slot</th><th>Amount</th><th>Creation ID</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="3">No unspent outputs.</td></tr>'}</tbody>
-    </table></div>`;
-}
-
-function addressTxRow(tx, viewedAddress) {
-  const kind = tx.coinbase
-    ? '<span class="badge coinbase">coinbase</span>'
+  const receivers =
+    tx.outputs.map((o) => `${addrLink(o.owner, true)} (${noid(o.amount_micronoid, false)})`).join("<br>") || "—";
+  const type = tx.coinbase
+    ? '<span class="tag">coinbase</span> block reward'
     : tx.development_payout
-    ? '<span class="badge dev">dev payout</span>'
-    : "";
-  const sender = tx.input_owner ? link(`/address/${tx.input_owner}`, shortHash(tx.input_owner)) : "-";
-  const receiver = tx.receiver ? link(`/address/${tx.receiver}`, shortHash(tx.receiver)) : "-";
-  const extra = tx.n_outputs > 1 ? ` <span class="hint" title="${receiverHint(tx.n_outputs)}">+${tx.n_outputs - 1} more</span>` : "";
+    ? '<span class="tag">dev payout</span> development payout'
+    : "transfer";
+  const status = tx.block.canonical
+    ? '<span class="status">confirmed</span>'
+    : '<span class="status bad" title="The block containing this transaction was later replaced by a reorg">orphaned</span>';
+
+  const rows = [
+    kvRow("Txid", tx.txid),
+    kvRow("Block", link(`/block/${tx.block.height}`, "#" + tx.block.height), "hi"),
+    kvRow("Time", `${fullTime(tx.block.timestamp)} (<span class="ago" data-ts="${tx.block.timestamp}"></span>)`, "t2"),
+    kvRow("Type", type, "t2"),
+    kvRow("Sender", tx.input_owner ? addrLink(tx.input_owner, true) : "—"),
+    kvRow(`Receiver${tx.outputs.length > 1 ? "s" : ""}`, receivers),
+    kvRow("Fee", noid(tx.fee_micronoid), "t2"),
+    kvRow("Fee rate", `${int(feeRateOf({ ...tx, n_inputs: tx.inputs.length, n_outputs: tx.outputs.length }))} µNOID/wu`, "t2"),
+    kvRow("Input sum", noid(tx.input_sum_micronoid), "t2"),
+    kvRow("Output sum", noid(tx.output_sum_micronoid), "t2"),
+    kvRow("Pages", tx.page_count, "t2"),
+    kvRow("Epoch anchor", tx.epoch_anchor, "t3"),
+  ].join("");
+
+  const html = page(`
+    ${back()}
+    <div class="card pad stack">
+      <div class="title-row"><h1 class="title">Transaction</h1>${status}</div>
+      <div class="kv">${rows}</div>
+    </div>
+    <div class="io">
+      <div class="card"><div class="card-head"><h2>Inputs (${tx.inputs.length})</h2></div>${inputs}</div>
+      <div class="card"><div class="card-head"><h2>Outputs (${tx.outputs.length})</h2></div>${outputs}</div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>Merkle path (receipt data)</h2></div>
+      <div class="hash-list">${tx.page_hashes.map((h) => `<div class="io-row"><span>${h}</span></div>`).join("") || '<div class="io-row"><span class="dim">none</span></div>'}</div>
+    </div>`);
+  return { html, mount: tickingMount };
+}
+
+// ---- address ----------------------------------------------------------
+function addressTxRow(tx, viewedAddress) {
   // The address page only lists transactions where the viewed address is
   // either the sender or (at least) one of the receivers, so "not the
   // sender" reliably means "incoming" here.
   const incoming = tx.input_owner !== viewedAddress;
-  return `<tr>
-      <td class="mono">${link(`/tx/${tx.txid}`, shortHash(tx.txid))} ${kind}</td>
+  let party;
+  if (tx.coinbase || tx.development_payout) {
+    party = "—";
+  } else if (incoming) {
+    party = tx.input_owner ? addrLink(tx.input_owner) : "—";
+  } else {
+    const extra = tx.n_outputs > 1 ? ` ${hint(`+${tx.n_outputs - 1}`, receiverHint(tx.n_outputs))}` : "";
+    party = (tx.receiver ? addrLink(tx.receiver) : "—") + extra;
+  }
+  const amount = incoming ? `+${noid(tx.output_sum_micronoid)}` : `−${noid(tx.output_sum_micronoid)}`;
+  return `<div class="trow cols-atx">
+      <span class="with-tag">${link(`/tx/${tx.txid}`, shortHash(tx.txid))}${kindTag(tx)}</span>
       ${timeCell(tx.timestamp)}
-      <td>${link(`/block/${tx.height}`, "#" + tx.height)}</td>
-      <td class="mono">${sender}</td>
-      <td>${tx.n_inputs} → ${tx.n_outputs}</td>
-      <td class="mono">${receiver}${extra}</td>
-      <td class="${incoming ? "amount-in" : ""}">${noid(tx.output_sum_micronoid)}</td>
-      <td>${noid(tx.fee_micronoid)}</td>
-    </tr>`;
+      <span>${link(`/block/${tx.height}`, "#" + tx.height)}</span>
+      <span class="dim">${party}</span>
+      <span>${tx.n_inputs} → ${tx.n_outputs}</span>
+      <span class="${incoming ? "pos" : ""}">${amount}</span>
+      <span class="dim">${noid(tx.fee_micronoid)}</span>
+    </div>`;
 }
 
-export async function addressView(address, page = 1) {
-  const result = await api.address(address, page, 25);
+function liveUtxosBody(utxos) {
+  const rows = utxos
+    .map(
+      (u) => `<div class="trow cols-utxo"><span>${u.slot_index}</span><span>${noid(u.value)}</span><span class="dim">${u.creation_id}</span></div>`
+    )
+    .join("");
+  return `<div class="tbl-scroll">
+      <div class="thead cols-utxo"><span>Slot</span><span>Amount</span><span>Creation ID</span></div>
+      ${rows || '<div class="trow cols-utxo"><span class="empty">No unspent outputs.</span></div>'}
+    </div>`;
+}
+
+export async function addressView(address, pageNo = 1) {
+  const result = await api.address(address, pageNo, 25);
   const rows = result.transactions.map((tx) => addressTxRow(tx, address)).join("");
   const totalPages = Math.max(1, Math.ceil(result.total / result.page_size));
   const b = result.balance;
   const liveKnown = result.live_balance_micronoid !== null && result.live_balance_micronoid !== undefined;
-  const html = `
-    <div class="panel">
-      <h2>Address</h2>
-      <p class="mono">${address}</p>
-      <div class="mempool-stats">
-        <div class="stat"><div class="v hint" title="Read live from the node's current
-state, independent of anything this
-permanode has recorded - the true
-balance right now.">${liveKnown ? noid(result.live_balance_micronoid) : "?"}</div><div class="k">Current balance (live)</div></div>
-        <div class="stat"><div class="v">${liveKnown ? result.live_utxo_count : "?"}</div><div class="k">Current UTXOs (live)</div></div>
-        <div class="stat"><div class="v hint" title="From this permanode's own recorded
-history only - transactions it has
-itself seen since it started running.">${noid(b.confirmed_balance_micronoid)}</div><div class="k">Recorded balance</div></div>
-        <div class="stat"><div class="v">${b.confirmed_utxos}</div><div class="k">Recorded UTXOs</div></div>
-        <div class="stat"><div class="v">${noid(b.total_received_micronoid)}</div><div class="k">Total received (recorded)</div></div>
-        <div class="stat"><div class="v">${noid(b.total_sent_micronoid)}</div><div class="k">Total sent (recorded)</div></div>
+  const liveHint = "Read live from the node's current\nstate, independent of anything this\npermanode has recorded - the true\nbalance right now.";
+  const recHint = "From this permanode's own recorded\nhistory only - transactions it has\nitself seen since it started running.";
+
+  const note =
+    result.total === 0
+      ? `<p class="note warn">This permanode has recorded no transaction activity for this address since it
+         started running - the "recorded" figures are genuinely zero, not missing data. The live balance
+         comes straight from the node's current state, so it is accurate even without a history to show.</p>`
+      : `<p class="note">${int(result.total)} transaction${result.total === 1 ? "" : "s"} recorded involving this address.</p>`;
+
+  const html = page(`
+    ${back()}
+    <div class="card pad stack wide">
+      <div class="stack tight">
+        <span class="label">Address</span>
+        <span class="addr-full">${escapeHtml(address)}</span>
       </div>
-      <p>${result.total} transaction(s) recorded involving this address.</p>
+      <div class="stats inner">
+        <div class="stat"><span class="v pos hint" title="${escapeHtml(liveHint)}">${liveKnown ? noid(result.live_balance_micronoid, false) : "?"}</span><span class="k">Current balance (live)</span></div>
+        <div class="stat"><span class="v">${liveKnown ? int(result.live_utxo_count) : "?"}</span><span class="k">Current UTXOs (live)</span></div>
+        <div class="stat"><span class="v hint" title="${escapeHtml(recHint)}">${noid(b.confirmed_balance_micronoid, false)}</span><span class="k">Recorded balance</span></div>
+        <div class="stat"><span class="v">${int(b.confirmed_utxos)}</span><span class="k">Recorded UTXOs</span></div>
+        <div class="stat"><span class="v">${noid(b.total_received_micronoid, false)}</span><span class="k">Total received</span></div>
+        <div class="stat"><span class="v">${noid(b.total_sent_micronoid, false)}</span><span class="k">Total sent</span></div>
+      </div>
+      ${note}
+    </div>
+    <div class="card">
+      <div class="tbl-scroll">
+        <div class="thead cols-atx"><span>Txid</span>${timeHeader()}<span>Block</span><span>Counterparty</span><span>In → out</span><span>Amount</span><span>Fee</span></div>
+        ${rows || '<div class="trow cols-atx"><span class="empty">No transactions recorded.</span></div>'}
+      </div>
       ${
-        result.total === 0
-          ? `<p class="hint-block">This permanode has recorded no transaction activity for this
-             address since it started running - the "recorded" figures above are
-             genuinely zero, not missing data. The "live" balance above comes
-             straight from the node's current state instead, so it's accurate
-             even though we have no transaction history to show for it.</p>`
+        totalPages > 1
+          ? `<div class="pager">
+              ${pageNo > 1 ? link(`/address/${address}?page=${pageNo - 1}`, "← newer") : ""}
+              <span>page ${pageNo} / ${totalPages}</span>
+              ${pageNo < totalPages ? link(`/address/${address}?page=${pageNo + 1}`, "older →") : ""}
+            </div>`
           : ""
       }
     </div>
-    <div class="panel">
-      <div class="table-scroll"><table>
-        <thead><tr><th>Txid</th><th class="time-toggle" title="Click to toggle relative/absolute time">Time</th><th>Block</th><th>Sender</th><th>In → Out</th><th>Receiver</th><th>Amount</th><th>Fee</th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="8">No transactions found.</td></tr>'}</tbody>
-      </table></div>
-      <div class="pager">
-        ${page > 1 ? link(`/address/${address}?page=${page - 1}`, "← newer") : ""}
-        <span>page ${page} / ${totalPages}</span>
-        ${page < totalPages ? link(`/address/${address}?page=${page + 1}`, "older →") : ""}
-      </div>
-    </div>
-    <div class="panel" id="live-utxos-panel">${liveUtxosPlaceholder()}</div>`;
+    <div class="card" id="live-utxos">
+      <div class="card-head"><h2>Live UTXOs</h2><button type="button" class="ghost" id="load-live-utxos">load from node →</button></div>
+      <div id="live-utxos-body"><p class="note" style="padding:18px 22px">Not loaded by default to keep this page light. The individual unspent outputs behind the live balance above, straight from the node.</p></div>
+    </div>`);
 
   function mount(root) {
-    let absoluteTime = false;
-    applyTimeFormat(root, absoluteTime);
-    const disposeToggle = wireTimeToggle(root, () => absoluteTime, (v) => (absoluteTime = v));
-
+    const disposeTick = tickingMount(root);
     const loadBtn = root.querySelector("#load-live-utxos");
+    const body = root.querySelector("#live-utxos-body");
+    const head = root.querySelector("#live-utxos .card-head h2");
     const onLoad = async () => {
-      const panel = root.querySelector("#live-utxos-panel");
-      if (panel) panel.innerHTML = '<h2>Live UTXOs</h2><p class="loading">Loading…</p>';
+      loadBtn.disabled = true;
+      body.innerHTML = '<p class="loading">Loading…</p>';
       try {
         const utxoResult = await api.addressUtxos(address);
-        if (panel) {
-          panel.innerHTML =
-            utxoResult.live_utxos !== null
-              ? liveUtxosPanelBody(utxoResult.live_utxos)
-              : '<h2>Live UTXOs</h2><p class="error">Could not reach the node.</p>';
+        if (utxoResult.live_utxos !== null) {
+          body.innerHTML = liveUtxosBody(utxoResult.live_utxos);
+          head.textContent = `Live UTXOs (${utxoResult.live_utxos.length})`;
+          loadBtn.textContent = "reload →";
+        } else {
+          body.innerHTML = '<p class="error">Could not reach the node.</p>';
         }
       } catch (e) {
-        if (panel) panel.innerHTML = `<h2>Live UTXOs</h2><p class="error">Failed to load: ${e.message}</p>`;
+        body.innerHTML = `<p class="error">Failed to load: ${escapeHtml(e.message)}</p>`;
+      } finally {
+        loadBtn.disabled = false;
       }
     };
-    if (loadBtn) loadBtn.addEventListener("click", onLoad);
-
+    loadBtn.addEventListener("click", onLoad);
     return () => {
-      disposeToggle();
-      if (loadBtn) loadBtn.removeEventListener("click", onLoad);
+      disposeTick();
+      loadBtn.removeEventListener("click", onLoad);
     };
   }
 
   return { html, mount };
+}
+
+// ---- mempool ----------------------------------------------------------
+function mempoolStatsHtml(info) {
+  const rates = info.txs.map((t) => t.fee_rate);
+  const lo = rates.length ? Math.min(...rates) : 0;
+  const hi = rates.length ? Math.max(...rates) : 0;
+  const range = !rates.length ? "—" : lo === hi ? int(lo) : `${int(lo)} – ${int(hi)}`;
+  return `
+    <div class="stat"><span class="v">${int(info.size)} tx</span><span class="k">Pending txs</span></div>
+    <div class="stat"><span class="v">${noid(info.fee_floor)}</span><span class="k">Fee floor</span></div>
+    <div class="stat"><span class="v hint" title="µNOID per weight unit (inputs + outputs + 4 per net new slot) - the node's own mempool priority key">${range}</span><span class="k">Fee rate range</span></div>`;
+}
+
+function seenText(admittedHeight, tip) {
+  if (!tip || !admittedHeight) return "—";
+  const n = Math.max(0, tip - admittedHeight);
+  return n === 0 ? "this block" : `${n} block${n === 1 ? "" : "s"} ago`;
+}
+
+function mempoolRows(info, tip) {
+  const rates = info.txs.map((t) => t.fee_rate);
+  const max = rates.length ? Math.max(...rates) : 0;
+  const rows = info.txs
+    .slice()
+    .sort((a, b) => b.fee_rate - a.fee_rate)
+    .map((t) => {
+      const rel = max > 0 ? t.fee_rate / max : 0;
+      const cls = rel >= 0.8 ? "pos" : rel >= 0.4 ? "hi" : "t3";
+      return `<div class="trow cols-mem">
+        <span>${link(`/tx/${t.tx_hash}`, shortHash(t.tx_hash))}</span>
+        <span>${t.n_inputs} → ${t.n_outputs}</span>
+        <span>${noid(t.fee_micronoid)}</span>
+        <span class="${cls}">${int(t.fee_rate)} µNOID/wu</span>
+        <span class="dim" title="admitted at #${t.admitted_height}">${seenText(t.admitted_height, tip)}</span>
+      </div>`;
+    })
+    .join("");
+  return rows || '<div class="trow cols-mem"><span class="empty">Mempool is empty.</span></div>';
 }
 
 export async function mempoolView() {
   let info = await api.mempool();
-  const html = `
-    <div class="panel">
-      <h2>Live mempool</h2>
-      <div class="tx-square-large"><canvas id="mempool-square-large"></canvas></div>
-      <div class="mempool-stats" id="mempool-stats">${mempoolStatsHtml(info)}</div>
+  let tipSummary = (await api.blocks(1).catch(() => []))[0] || null;
+  let stats = await api.stats().catch(() => null);
+
+  const html = page(`
+    ${back()}
+    <div class="card pad split">
+      <div class="face big hot" id="mempool-face">${cellsHtml(cellShades(pagesOf(info.txs), true))}<div class="scan"></div></div>
+      <div class="grow mem">
+        <div class="title-row base"><h1 class="title">Live mempool</h1><span class="eta" id="eta">${etaText(tipSummary?.timestamp, avgBlockTime(stats))}</span></div>
+        <div class="stats inner three" id="mempool-stats">${mempoolStatsHtml(info)}</div>
+      </div>
     </div>
-    <div class="panel">
-      <h2>Pending transactions</h2>
-      <div class="table-scroll"><table id="mempool-table">${mempoolTableHtml(info)}</table></div>
-    </div>`;
+    <div class="card">
+      <div class="card-head"><h2>Pending transactions</h2></div>
+      <div class="tbl-scroll">
+        <div class="thead cols-mem"><span>Txid</span><span>In → out</span><span>Fee</span><span>Fee rate</span><span>Seen</span></div>
+        <div id="mempool-rows">${mempoolRows(info, tipSummary?.height)}</div>
+      </div>
+    </div>`);
 
   function mount(root) {
-    const c = root.querySelector("#mempool-square-large");
-    const wired = c ? wireSquare(c, () => info.txs, { emptyLabel: "mempool is empty" }) : null;
+    const face = root.querySelector("#mempool-face .cells");
+    const eta = root.querySelector("#eta");
+    let inflight = false;
     const timer = setInterval(async () => {
+      eta.textContent = etaText(tipSummary?.timestamp, avgBlockTime(stats));
+      if (inflight) return;
+      inflight = true;
       try {
-        info = await api.mempool();
-        if (wired) wired.draw();
-        const stats = root.querySelector("#mempool-stats");
-        if (stats) stats.innerHTML = mempoolStatsHtml(info);
-        const table = root.querySelector("#mempool-table");
-        if (table) table.innerHTML = mempoolTableHtml(info);
+        const [newInfo, blocks] = await Promise.all([api.mempool(), api.blocks(1)]);
+        health.reportOk();
+        info = newInfo;
+        tipSummary = blocks[0] || tipSummary;
+        applyCells(face, cellShades(pagesOf(info.txs), true));
+        root.querySelector("#mempool-stats").innerHTML = mempoolStatsHtml(info);
+        root.querySelector("#mempool-rows").innerHTML = mempoolRows(info, tipSummary?.height);
       } catch {
-        /* keep last known view */
+        health.reportFail();
+      } finally {
+        inflight = false;
       }
     }, LIVE_REFRESH_MS);
+    const statsTimer = setInterval(async () => {
+      try {
+        stats = await api.stats();
+      } catch {
+        /* the 1s poll already tracks reachability */
+      }
+    }, STATS_REFRESH_MS);
     return () => {
       clearInterval(timer);
-      if (wired) wired.dispose();
+      clearInterval(statsTimer);
     };
   }
 
   return { html, mount };
 }
 
-function mempoolStatsHtml(info) {
-  const rates = info.txs.map((t) => t.fee_rate);
-  const min = rates.length ? Math.min(...rates) : 0;
-  const max = rates.length ? Math.max(...rates) : 0;
-  return `
-    <div class="stat"><div class="v">${info.size}</div><div class="k">Pending txs</div></div>
-    <div class="stat"><div class="v">${noid(info.fee_floor)}</div><div class="k">Fee floor</div></div>
-    <div class="stat"><div class="v">${min} – ${max}</div><div class="k">Fee rate range</div></div>`;
-}
-
-function mempoolTableHtml(info) {
-  const rows = info.txs
-    .slice()
-    .sort((a, b) => b.fee_rate - a.fee_rate)
-    .map(
-      (t) => `<tr>
-        <td class="mono">${link(`/tx/${t.tx_hash}`, shortHash(t.tx_hash))}</td>
-        <td>${t.n_inputs} → ${t.n_outputs}</td>
-        <td>${noid(t.fee_micronoid)}</td>
-        <td>${t.fee_rate}</td>
-      </tr>`
-    )
-    .join("");
-  return `<thead><tr><th>Txid</th><th>In → Out</th><th>Fee</th><th>Fee rate</th></tr></thead>
-    <tbody>${rows || '<tr><td colspan="4">Mempool is empty.</td></tr>'}</tbody>`;
-}
-
+// ---- rich list --------------------------------------------------------
 export async function richlistView() {
   const entries = await api.richlist();
+  const top = entries.length ? Number(entries[0].live_balance_micronoid) : 0;
   const rows = entries
-    .map(
-      (e, i) => `<tr>
-        <td>${i + 1}</td>
-        <td class="mono">${link(`/address/${e.address}`, shortHash(e.address, 12, 8))}</td>
-        <td>${noid(e.live_balance_micronoid)}</td>
-        <td>${e.live_utxo_count}</td>
-        <td class="hint" title="When the indexer last refreshed this figure - it updates
-periodically for every address it has ever seen, not on every request.">${timeAgo(Math.floor(new Date(e.fetched_at).getTime() / 1000))}</td>
-      </tr>`
-    )
+    .map((e, i) => {
+      const width = top > 0 ? Math.max(4, Math.round((Number(e.live_balance_micronoid) / top) * 90)) : 4;
+      return `<div class="trow cols-rich">
+        <span class="rank">${i + 1}</span>
+        <span>${link(`/address/${e.address}`, shortHash(e.address, 12, 8))}</span>
+        <span class="bal"><span>${noid(e.live_balance_micronoid)}</span><span class="bar" style="width:${width}px"></span></span>
+        <span>${int(e.live_utxo_count)}</span>
+        <span class="dim"><span class="ago" data-ts="${isoToUnix(e.fetched_at)}"></span></span>
+      </div>`;
+    })
     .join("");
-  return `
-    <div class="panel">
-      <h2>Rich list</h2>
-      <p>Every address this permanode has ever recorded, by current live balance
-        (paranoid_getSlotsByOwner - the node's actual current state, not
-        reconstructed from history). Refreshed periodically in the background,
-        not on every page view.</p>
-      <div class="table-scroll"><table>
-        <thead><tr><th>#</th><th>Address</th><th>Balance</th><th>UTXOs</th><th>Updated</th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="5">No known addresses yet.</td></tr>'}</tbody>
-      </table></div>
-    </div>`;
+
+  const html = page(`
+    ${back()}
+    <div class="card">
+      <div class="card-title">
+        <h1 class="title">Rich list</h1>
+        <p class="note">Every address with a live balance in the node's current state, sorted by that balance.
+          Found by sweeping the node's UTXO set directly and refreshed periodically in the background, not on every page view.</p>
+      </div>
+      <div class="tbl-scroll">
+        <div class="thead cols-rich"><span>#</span><span>Address</span><span>Balance</span><span>UTXOs</span><span>Updated</span></div>
+        ${rows || '<div class="trow cols-rich"><span class="empty">No addresses known yet.</span></div>'}
+      </div>
+    </div>`);
+  return { html, mount: tickingMount };
 }
 
 export function notFoundHtml(msg) {
-  return `<div class="error">${escapeHtml(msg || "Not found.")}</div>`;
+  return page(`${back()}<div class="card"><p class="error">${escapeHtml(msg || "Not found.")}</p></div>`);
 }

@@ -1,9 +1,23 @@
-export function noid(micronoid) {
+// Thousands grouping with a narrow no-break space, so large NOID figures
+// read as "5 454 023.7275" without ever wrapping mid-number.
+function group(intStr) {
+  return intStr.replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+}
+
+export function noid(micronoid, unit = true) {
   if (micronoid === null || micronoid === undefined) return "-";
-  const n = typeof micronoid === "string" ? BigInt(micronoid) : BigInt(micronoid);
-  const whole = n / 1_000_000n;
-  const frac = (n % 1_000_000n).toString().padStart(6, "0").replace(/0+$/, "");
-  return frac ? `${whole}.${frac} NOID` : `${whole} NOID`;
+  const n = BigInt(micronoid);
+  const neg = n < 0n;
+  const abs = neg ? -n : n;
+  const whole = group((abs / 1_000_000n).toString());
+  const frac = (abs % 1_000_000n).toString().padStart(6, "0").replace(/0+$/, "");
+  const num = (neg ? "−" : "") + (frac ? `${whole}.${frac}` : whole);
+  return unit ? `${num} NOID` : num;
+}
+
+export function int(n) {
+  if (n === null || n === undefined) return "-";
+  return group(String(n));
 }
 
 export function shortHash(h, lead = 8, tail = 6) {
@@ -22,7 +36,7 @@ export function timeAgo(unixSeconds) {
   if (s < 60) return `${s}s ago`;
   if (s < 3600) return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s ago`;
   if (s < 86400) return `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m ago`;
-  return `${Math.floor(s / 86400)}d ago`;
+  return `${Math.floor(s / 86400)}d ${String(Math.floor((s % 86400) / 3600)).padStart(2, "0")}h ago`;
 }
 
 export function hashrate(hs) {
@@ -39,12 +53,29 @@ export function hashrate(hs) {
 
 export function seconds(s) {
   if (s === null || s === undefined) return "-";
-  return `${s.toFixed(1)}s`;
+  return `${s.toFixed(1)} s`;
 }
 
 export function fullTime(unixSeconds) {
   if (!unixSeconds) return "-";
   return new Date(unixSeconds * 1000).toISOString().replace("T", " ").replace(".000Z", " UTC");
+}
+
+export function isoToUnix(iso) {
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? Math.floor(t / 1000) : 0;
+}
+
+// The node's own mempool ordering key (noid_chain::mempool::compute_fee_rate):
+// fee divided by a weight of inputs + outputs + 4 per net new slot, in
+// µNOID per weight unit. Mempool entries carry it already; for confirmed
+// transactions we recompute it from the same inputs.
+export function feeRateOf(tx) {
+  if (typeof tx.fee_rate === "number") return tx.fee_rate;
+  const nIn = Number(tx.n_inputs) || 0;
+  const nOut = Number(tx.n_outputs) || 0;
+  const weight = Math.max(1, nIn + nOut + 4 * Math.max(0, nOut - nIn));
+  return Math.floor((Number(tx.fee_micronoid) || 0) / weight);
 }
 
 export function escapeHtml(s) {
