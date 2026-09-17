@@ -6,12 +6,47 @@ function link(href, text) {
   return `<a href="${href}" data-link>${escapeHtml(text)}</a>`;
 }
 
+// A <td class="time-cell" data-ts="..."> whose text is filled in by
+// applyTimeFormat() right after insertion, so it always matches whatever
+// mode the table's "Time" header is currently toggled to.
+function timeCell(ts) {
+  return `<td class="time-cell" data-ts="${ts}"></td>`;
+}
+
+// Applies the current relative/absolute mode to every .time-cell under
+// `root`. Call this after inserting or replacing any HTML that contains
+// timeCell() output, including after a live-refresh rebuild.
+function applyTimeFormat(root, absolute) {
+  root.querySelectorAll(".time-cell").forEach((td) => {
+    const ts = Number(td.dataset.ts);
+    td.textContent = absolute ? fullTime(ts) : timeAgo(ts);
+  });
+}
+
+// Wires every "Time" column header under `root` to toggle all .time-cell
+// text between relative and absolute on click. Returns a dispose function.
+// State lives in the closure so it survives table rebuilds as long as the
+// caller re-applies it (see applyTimeFormat) and re-wires after replacing
+// a header element.
+function wireTimeToggle(root, getAbsolute, setAbsolute) {
+  const disposers = [];
+  root.querySelectorAll(".time-toggle").forEach((th) => {
+    const onClick = () => {
+      setAbsolute(!getAbsolute());
+      applyTimeFormat(root, getAbsolute());
+    };
+    th.addEventListener("click", onClick);
+    disposers.push(() => th.removeEventListener("click", onClick));
+  });
+  return () => disposers.forEach((d) => d());
+}
+
 function blocksTable(blocks) {
   const rows = blocks
     .map(
       (b) => `<tr>
         <td>${link(`/block/${b.height}`, "#" + b.height)}</td>
-        <td>${timeAgo(b.timestamp)}</td>
+        ${timeCell(b.timestamp)}
         <td class="mono">${link(`/address/${b.miner}`, shortHash(b.miner))}</td>
         <td>${b.tx_count}</td>
         <td>${noid(b.reward_micronoid)}</td>
@@ -21,7 +56,7 @@ function blocksTable(blocks) {
     )
     .join("");
   return `<div class="table-scroll"><table>
-      <thead><tr><th>Height</th><th>Time</th><th>Miner</th><th>Txs</th><th>Reward</th><th>Fees</th><th></th></tr></thead>
+      <thead><tr><th>Height</th><th class="time-toggle" title="Click to toggle relative/absolute time">Time</th><th>Miner</th><th>Txs</th><th>Reward</th><th>Fees</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>`;
 }
@@ -95,6 +130,14 @@ export async function homeView() {
 
   function mount(root) {
     let blockDisposers = [];
+    let absoluteTime = false;
+    let timeToggleDisposer = () => {};
+
+    function refreshTimeToggle() {
+      timeToggleDisposer();
+      applyTimeFormat(root, absoluteTime);
+      timeToggleDisposer = wireTimeToggle(root, () => absoluteTime, (v) => (absoluteTime = v));
+    }
 
     function wireMempoolTile() {
       const c = root.querySelector("#mempool-canvas");
@@ -113,6 +156,7 @@ export async function homeView() {
 
     let mempoolDisposer = wireMempoolTile();
     wireBlockTiles();
+    refreshTimeToggle();
 
     const timer = setInterval(async () => {
       try {
@@ -132,6 +176,7 @@ export async function homeView() {
 
           const table = root.querySelector("#recent-blocks-table");
           if (table) table.innerHTML = blocksTable(summaries);
+          refreshTimeToggle();
         } else {
           const c = root.querySelector("#mempool-canvas");
           if (c) renderBlockSquare(c, mempoolInfo.txs, { emptyLabel: "empty" });
@@ -147,6 +192,7 @@ export async function homeView() {
       clearInterval(timer);
       mempoolDisposer();
       blockDisposers.forEach((d) => d());
+      timeToggleDisposer();
     };
   }
 
@@ -282,7 +328,7 @@ function addressTxRow(tx) {
   const extra = tx.n_outputs > 1 ? ` <span class="hint" title="${tx.n_outputs} receivers total, showing the first">+${tx.n_outputs - 1} more</span>` : "";
   return `<tr>
       <td class="mono">${link(`/tx/${tx.txid}`, shortHash(tx.txid))} ${kind}</td>
-      <td>${timeAgo(tx.timestamp)}</td>
+      ${timeCell(tx.timestamp)}
       <td>${link(`/block/${tx.height}`, "#" + tx.height)}</td>
       <td class="mono">${sender}</td>
       <td>${tx.n_inputs} → ${tx.n_outputs}</td>
@@ -297,7 +343,7 @@ export async function addressView(address, page = 1) {
   const rows = result.transactions.map(addressTxRow).join("");
   const totalPages = Math.max(1, Math.ceil(result.total / result.page_size));
   const b = result.balance;
-  return `
+  const html = `
     <div class="panel">
       <h2>Address</h2>
       <p class="mono">${address}</p>
@@ -311,7 +357,7 @@ export async function addressView(address, page = 1) {
     </div>
     <div class="panel">
       <div class="table-scroll"><table>
-        <thead><tr><th>Txid</th><th>Time</th><th>Block</th><th>Sender</th><th>In → Out</th><th>Receiver</th><th>Amount</th><th>Fee</th></tr></thead>
+        <thead><tr><th>Txid</th><th class="time-toggle" title="Click to toggle relative/absolute time">Time</th><th>Block</th><th>Sender</th><th>In → Out</th><th>Receiver</th><th>Amount</th><th>Fee</th></tr></thead>
         <tbody>${rows || '<tr><td colspan="8">No transactions found.</td></tr>'}</tbody>
       </table></div>
       <div class="pager">
@@ -320,6 +366,14 @@ export async function addressView(address, page = 1) {
         ${page < totalPages ? link(`/address/${address}?page=${page + 1}`, "older →") : ""}
       </div>
     </div>`;
+
+  function mount(root) {
+    let absoluteTime = false;
+    applyTimeFormat(root, absoluteTime);
+    return wireTimeToggle(root, () => absoluteTime, (v) => (absoluteTime = v));
+  }
+
+  return { html, mount };
 }
 
 export async function mempoolView() {
