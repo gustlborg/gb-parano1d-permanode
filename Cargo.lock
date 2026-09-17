@@ -951,6 +951,8 @@ dependencies = [
  "anyhow",
  "rusqlite",
  "serde",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]

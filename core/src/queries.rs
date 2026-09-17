@@ -48,6 +48,7 @@ pub struct BlockDetail {
 pub struct TxSummary {
     pub position: i64,
     pub txid: String,
+    pub page_count: i64,
     pub fee_micronoid: i64,
     pub coinbase: bool,
     pub development_payout: bool,
@@ -187,7 +188,7 @@ fn block_id_and_row(
 
 fn tx_summaries_for_block(conn: &Connection, block_id: i64) -> Result<Vec<TxSummary>> {
     let mut stmt = conn.prepare(
-        "SELECT t.position, t.txid, t.fee_micronoid, t.coinbase, t.development_payout,
+        "SELECT t.position, t.txid, t.page_count, t.fee_micronoid, t.coinbase, t.development_payout,
                 t.input_owner, t.input_sum_micronoid, t.output_sum_micronoid,
                 (SELECT COUNT(*) FROM tx_inputs i WHERE i.tx_id = t.id) AS n_inputs,
                 (SELECT COUNT(*) FROM tx_outputs o WHERE o.tx_id = t.id) AS n_outputs
@@ -199,14 +200,15 @@ fn tx_summaries_for_block(conn: &Connection, block_id: i64) -> Result<Vec<TxSumm
         Ok(TxSummary {
             position: row.get(0)?,
             txid: row.get(1)?,
-            fee_micronoid: row.get(2)?,
-            coinbase: row.get::<_, i64>(3)? != 0,
-            development_payout: row.get::<_, i64>(4)? != 0,
-            input_owner: row.get(5)?,
-            input_sum_micronoid: row.get(6)?,
-            output_sum_micronoid: row.get(7)?,
-            n_inputs: row.get(8)?,
-            n_outputs: row.get(9)?,
+            page_count: row.get(2)?,
+            fee_micronoid: row.get(3)?,
+            coinbase: row.get::<_, i64>(4)? != 0,
+            development_payout: row.get::<_, i64>(5)? != 0,
+            input_owner: row.get(6)?,
+            input_sum_micronoid: row.get(7)?,
+            output_sum_micronoid: row.get(8)?,
+            n_inputs: row.get(9)?,
+            n_outputs: row.get(10)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -323,7 +325,7 @@ pub fn txs_by_address(
     let offset = (page.max(1) - 1) * page_size;
     let canonical_on_b = canonical_filter_on("b");
     let sql = format!(
-        "SELECT t.position, t.txid, t.fee_micronoid, t.coinbase, t.development_payout,
+        "SELECT t.position, t.txid, t.page_count, t.fee_micronoid, t.coinbase, t.development_payout,
                 t.input_owner, t.input_sum_micronoid, t.output_sum_micronoid,
                 (SELECT COUNT(*) FROM tx_inputs i WHERE i.tx_id = t.id) AS n_inputs,
                 (SELECT COUNT(*) FROM tx_outputs o WHERE o.tx_id = t.id) AS n_outputs,
@@ -341,14 +343,15 @@ pub fn txs_by_address(
         Ok(TxSummary {
             position: row.get(0)?,
             txid: row.get(1)?,
-            fee_micronoid: row.get(2)?,
-            coinbase: row.get::<_, i64>(3)? != 0,
-            development_payout: row.get::<_, i64>(4)? != 0,
-            input_owner: row.get(5)?,
-            input_sum_micronoid: row.get(6)?,
-            output_sum_micronoid: row.get(7)?,
-            n_inputs: row.get(8)?,
-            n_outputs: row.get(9)?,
+            page_count: row.get(2)?,
+            fee_micronoid: row.get(3)?,
+            coinbase: row.get::<_, i64>(4)? != 0,
+            development_payout: row.get::<_, i64>(5)? != 0,
+            input_owner: row.get(6)?,
+            input_sum_micronoid: row.get(7)?,
+            output_sum_micronoid: row.get(8)?,
+            n_inputs: row.get(9)?,
+            n_outputs: row.get(10)?,
         })
     })?;
     let items: Vec<TxSummary> = rows.collect::<rusqlite::Result<_>>()?;

@@ -7,7 +7,7 @@ use axum::{
     Router,
 };
 use clap::Parser;
-use permanode_core::{db, queries};
+use permanode_core::{db, mempool, queries};
 use rusqlite::Connection;
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -29,10 +29,16 @@ struct Args {
     /// Address to listen on.
     #[arg(long, default_value = "127.0.0.1:8420")]
     listen: String,
+
+    /// Node JSON-RPC endpoint, used only for the live mempool view (block
+    /// data always comes from the indexer's database, never from here).
+    #[arg(long, default_value = "http://127.0.0.1:9601")]
+    rpc_url: String,
 }
 
 struct AppState {
     conn: Mutex<Connection>,
+    rpc: mempool::RpcClient,
 }
 
 type ApiResult<T> = Result<Json<T>, ApiError>;
@@ -65,6 +71,7 @@ async fn main() -> Result<()> {
     let conn = db::open(args.db_path.to_str().expect("db_path must be valid UTF-8"))?;
     let state = Arc::new(AppState {
         conn: Mutex::new(conn),
+        rpc: mempool::RpcClient::new(args.rpc_url.clone()),
     });
 
     let index_file = args.site_dir.join("index.html");
@@ -78,6 +85,7 @@ async fn main() -> Result<()> {
         .route("/api/v1/tx/{txid}", get(get_tx))
         .route("/api/v1/address/{address}", get(get_address))
         .route("/api/v1/gaps", get(get_gaps))
+        .route("/api/v1/mempool", get(get_mempool))
         .fallback_service(static_service)
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -176,6 +184,16 @@ async fn get_address(
 async fn get_gaps(State(state): State<Arc<AppState>>) -> ApiResult<Vec<queries::GapEntry>> {
     let conn = state.conn.lock().unwrap();
     Ok(Json(queries::recent_gaps(&conn, 100)?))
+}
+
+async fn get_mempool(State(state): State<Arc<AppState>>) -> ApiResult<mempool::MempoolInfo> {
+    // Runs the blocking RPC call on a blocking-safe thread so it can't
+    // stall the async runtime's other requests.
+    let rpc_client = state.rpc.clone();
+    let info = tokio::task::spawn_blocking(move || rpc_client.get_mempool_info())
+        .await
+        .map_err(anyhow::Error::from)??;
+    Ok(Json(info))
 }
 
 enum ApiErrorOr404 {
