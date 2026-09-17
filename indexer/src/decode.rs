@@ -65,7 +65,8 @@ pub fn decode_retained_block(
         .fold(0u64, u64::saturating_add);
     let coinbase_outputs = u16::try_from(coinbase.body.live_outputs().count())?;
     let development_outputs = if stream.has_development_payout {
-        u16::try_from(block.transactions[1].body.live_outputs().count())?
+        let payout = block.transactions.get(1).context("development payout flagged but block has no second page")?;
+        u16::try_from(payout.body.live_outputs().count())?
     } else {
         0
     };
@@ -91,7 +92,7 @@ pub fn decode_retained_block(
             creation_id: noid_chain::consensus::params::coinbase_creation_id(header.height),
         });
     }
-    let cb_txid = hex::encode(logical_txids[0].0);
+    let cb_txid = hex::encode(logical_txids.first().context("no logical txids")?.0);
     transactions.push(BlockTransactionInfo {
         position: 0,
         txid: cb_txid.clone(),
@@ -112,7 +113,7 @@ pub fn decode_retained_block(
 
     // --- development payout (position 1, optional) ---
     if stream.has_development_payout {
-        let payout = &block.transactions[1];
+        let payout = block.transactions.get(1).context("development payout page missing")?;
         let mut outs = Vec::new();
         let mut sum = 0u128;
         for (lane, o) in payout.body.live_outputs() {
@@ -127,7 +128,7 @@ pub fn decode_retained_block(
                 creation_id: alloc_cursor,
             });
         }
-        let txid = hex::encode(logical_txids[1].0);
+        let txid = hex::encode(logical_txids.get(1).context("development payout txid missing")?.0);
         transactions.push(BlockTransactionInfo {
             position: 1,
             txid: txid.clone(),

@@ -24,9 +24,16 @@ pub struct RpcClient {
 
 impl RpcClient {
     pub fn new(url: String) -> Self {
+        // ureq has no timeouts by default; without one a hung node would
+        // pin every request that touches it. Loopback calls take
+        // milliseconds, so anything past this is a stuck node.
+        let config = ureq::Agent::config_builder()
+            .timeout_connect(Some(std::time::Duration::from_secs(5)))
+            .timeout_global(Some(std::time::Duration::from_secs(20)))
+            .build();
         Self {
             url,
-            agent: ureq::Agent::new_with_defaults(),
+            agent: config.new_agent(),
         }
     }
 

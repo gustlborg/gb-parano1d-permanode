@@ -41,6 +41,15 @@ struct AppState {
     rpc: live_rpc::RpcClient,
 }
 
+impl AppState {
+    /// A poisoned mutex (a handler panicked while holding it) must not
+    /// take every later request down with it - the connection itself is
+    /// still fine, so just keep using it.
+    fn db(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 type ApiResult<T> = Result<Json<T>, ApiError>;
 
 struct ApiError(anyhow::Error);
@@ -132,7 +141,7 @@ async fn get_stats(State(state): State<Arc<AppState>>) -> ApiResult<StatsRespons
         .unwrap_or(0);
 
     let (chain, avg_10m, avg_1h, avg_24h) = {
-        let conn = state.conn.lock().unwrap();
+        let conn = state.db();
         (
             queries::chain_stats(&conn)?,
             queries::avg_block_time_seconds(&conn, 600, now_unix)?,
@@ -180,7 +189,7 @@ async fn get_blocks(
     State(state): State<Arc<AppState>>,
     Query(q): Query<LimitQuery>,
 ) -> ApiResult<Vec<queries::BlockSummary>> {
-    let conn = state.conn.lock().unwrap();
+    let conn = state.db();
     let limit = q.limit.unwrap_or(25).clamp(1, 200);
     Ok(Json(queries::recent_blocks(&conn, limit)?))
 }
@@ -189,7 +198,7 @@ async fn get_block_by_height(
     State(state): State<Arc<AppState>>,
     Path(height): Path<i64>,
 ) -> Result<Json<queries::BlockDetail>, ApiErrorOr404> {
-    let conn = state.conn.lock().unwrap();
+    let conn = state.db();
     match queries::block_by_height(&conn, height)? {
         Some(b) => Ok(Json(b)),
         None => Err(ApiErrorOr404::NotFound),
@@ -200,7 +209,7 @@ async fn get_block_by_hash(
     State(state): State<Arc<AppState>>,
     Path(hash): Path<String>,
 ) -> Result<Json<queries::BlockDetail>, ApiErrorOr404> {
-    let conn = state.conn.lock().unwrap();
+    let conn = state.db();
     match queries::block_by_hash(&conn, &hash)? {
         Some(b) => Ok(Json(b)),
         None => Err(ApiErrorOr404::NotFound),
@@ -211,7 +220,7 @@ async fn get_tx(
     State(state): State<Arc<AppState>>,
     Path(txid): Path<String>,
 ) -> Result<Json<queries::TxDetail>, ApiErrorOr404> {
-    let conn = state.conn.lock().unwrap();
+    let conn = state.db();
     match queries::tx_by_txid(&conn, &txid)? {
         Some(t) => Ok(Json(t)),
         None => Err(ApiErrorOr404::NotFound),
@@ -264,7 +273,7 @@ async fn get_address(
     let page = q.page.unwrap_or(1).max(1);
     let page_size = q.page_size.unwrap_or(25).clamp(1, 100);
     let (transactions, total, balance) = {
-        let conn = state.conn.lock().unwrap();
+        let conn = state.db();
         let (transactions, total) = queries::txs_by_address(&conn, &address, page, page_size)?;
         let balance = queries::address_balance(&conn, &address)?;
         (transactions, total, balance)
@@ -305,12 +314,12 @@ struct AddressUtxosPage {
 }
 
 async fn get_gaps(State(state): State<Arc<AppState>>) -> ApiResult<Vec<queries::GapEntry>> {
-    let conn = state.conn.lock().unwrap();
+    let conn = state.db();
     Ok(Json(queries::recent_gaps(&conn, 100)?))
 }
 
 async fn get_richlist(State(state): State<Arc<AppState>>) -> ApiResult<Vec<queries::RichListEntry>> {
-    let conn = state.conn.lock().unwrap();
+    let conn = state.db();
     Ok(Json(queries::richlist(&conn, 100)?))
 }
 

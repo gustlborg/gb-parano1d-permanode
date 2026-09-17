@@ -75,9 +75,11 @@ pub fn run(conn: &Connection, rpc: &RpcClient, cfg: &Config) -> Result<()> {
 fn poll_once(conn: &Connection, rpc: &RpcClient, cfg: &Config) -> Result<()> {
     let tip = rpc.block_count()?;
 
+    // A fresh database starts as far back as the node can still serve
+    // bodies for, rather than at the tip - free history on day one.
     let last_processed: u64 = db::get_state(conn, "last_processed_height")?
         .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| tip.saturating_sub(1));
+        .unwrap_or_else(|| tip.saturating_sub(GETBLOCK_SERVING_WINDOW + 1));
 
     // Ingest any new heights.
     for height in (last_processed + 1)..=tip {
@@ -137,46 +139,61 @@ fn try_getblock_fallback(rpc: &RpcClient, height: u64, expected_hash: &str) -> F
     }
 }
 
+/// What a height should be written as, decided before any database write
+/// so the write itself can be a single transaction.
+enum BodyOutcome {
+    Store(BlockDetailsInfo, &'static str),
+    Gap(BlockDetailsInfo, String),
+}
+
+/// Resolves a height's body: getBlockDetails first, then (if enabled) the
+/// getBlock fallback decoder. Pure RPC, no database access.
+fn resolve_body(rpc: &RpcClient, cfg: &Config, mut details: BlockDetailsInfo, missing_note: &str) -> BodyOutcome {
+    if details.retained.is_some() {
+        return BodyOutcome::Store(details, "details");
+    }
+    if cfg.getblock_fallback {
+        return match try_getblock_fallback(rpc, details.header.height, &details.header.hash) {
+            FallbackOutcome::Recovered(retained) => {
+                details.retained = Some(retained);
+                BodyOutcome::Store(details, "getblock")
+            }
+            FallbackOutcome::NoBody => BodyOutcome::Gap(
+                details,
+                "no body via getBlockDetails nor getBlock (outside serving window)".to_string(),
+            ),
+            FallbackOutcome::DecodeFailed(err) => {
+                BodyOutcome::Gap(details, format!("getBlock body could not be decoded: {err}"))
+            }
+        };
+    }
+    BodyOutcome::Gap(details, missing_note.to_string())
+}
+
 fn ingest_height(conn: &Connection, rpc: &RpcClient, cfg: &Config, height: u64) -> Result<()> {
-    let Some(mut details) = rpc.get_block_details(height)? else {
+    let Some(details) = rpc.get_block_details(height)? else {
         // Header not available yet (node not synced this far) - nothing
         // to do, next poll cycle will retry.
         return Ok(());
     };
 
-    if details.retained.is_some() {
-        store_block(conn, &details, "details")?;
-        if cfg.decoder_selfcheck {
-            selfcheck(conn, rpc, height, &details);
-        }
-        return Ok(());
-    }
-
-    if cfg.getblock_fallback {
-        match try_getblock_fallback(rpc, height, &details.header.hash) {
-            FallbackOutcome::Recovered(retained) => {
-                let n = retained.transactions.len();
-                details.retained = Some(retained);
-                store_block(conn, &details, "getblock")?;
-                info!("height {height}: body recovered via getBlock ({n} tx)");
-                return Ok(());
-            }
-            FallbackOutcome::NoBody => {
-                record_gap_block(
-                    conn,
-                    &details,
-                    "no body via getBlockDetails nor getBlock (outside serving window)",
-                )?;
-                return Ok(());
-            }
-            FallbackOutcome::DecodeFailed(err) => {
-                record_gap_block(conn, &details, &format!("getBlock body could not be decoded: {err}"))?;
-                return Ok(());
+    match resolve_body(rpc, cfg, details, "body already pruned by node on first ingest attempt") {
+        BodyOutcome::Store(details, source) => {
+            let tx = db::write_tx(conn)?;
+            store_block(&tx, &details, source)?;
+            tx.commit()?;
+            if source == "getblock" {
+                info!("height {height}: body recovered via getBlock ({} tx)", details.retained.as_ref().map_or(0, |r| r.transactions.len()));
+            } else if cfg.decoder_selfcheck {
+                selfcheck(conn, rpc, height, &details);
             }
         }
+        BodyOutcome::Gap(details, note) => {
+            let tx = db::write_tx(conn)?;
+            record_gap_block(&tx, &details, &note)?;
+            tx.commit()?;
+        }
     }
-
-    record_gap_block(conn, &details, "body already pruned by node on first ingest attempt")?;
     Ok(())
 }
 
@@ -200,43 +217,40 @@ fn recheck_height(conn: &Connection, rpc: &RpcClient, cfg: &Config, height: u64)
                  new canonical hash is {}",
                 header.hash
             );
-            db::mark_orphaned(conn, old_block_id, &now)?;
-
-            let Some(mut details) = rpc.get_block_details(height)? else {
-                record_gap(conn, height, Some(&header.hash), &now, "reorg: new canonical body already unavailable at recheck time")?;
-                return Ok(());
+            // Fetch the replacement before touching the database, so the
+            // orphan mark and the replacement land in the same transaction:
+            // a failure in between must not leave the height with no
+            // canonical block at all.
+            let replacement = match rpc.get_block_details(height)? {
+                Some(details) => Some(resolve_body(
+                    rpc,
+                    cfg,
+                    details,
+                    "reorg: new canonical body already unavailable at recheck time",
+                )),
+                None => None,
             };
 
-            if details.retained.is_some() {
-                store_block(conn, &details, "details")?;
-                return Ok(());
-            }
-
-            if cfg.getblock_fallback {
-                match try_getblock_fallback(rpc, height, &details.header.hash) {
-                    FallbackOutcome::Recovered(retained) => {
-                        let n = retained.transactions.len();
-                        details.retained = Some(retained);
-                        store_block(conn, &details, "getblock")?;
+            let tx = db::write_tx(conn)?;
+            db::mark_orphaned(&tx, old_block_id, &now)?;
+            match replacement {
+                Some(BodyOutcome::Store(details, source)) => {
+                    store_block(&tx, &details, source)?;
+                    if source == "getblock" {
+                        let n = details.retained.as_ref().map_or(0, |r| r.transactions.len());
                         info!("height {height}: reorg replacement body recovered via getBlock ({n} tx)");
-                        return Ok(());
-                    }
-                    FallbackOutcome::NoBody => {
-                        record_gap_block(
-                            conn,
-                            &details,
-                            "no body via getBlockDetails nor getBlock (outside serving window)",
-                        )?;
-                        return Ok(());
-                    }
-                    FallbackOutcome::DecodeFailed(err) => {
-                        record_gap_block(conn, &details, &format!("getBlock body could not be decoded: {err}"))?;
-                        return Ok(());
                     }
                 }
+                Some(BodyOutcome::Gap(details, note)) => record_gap_block(&tx, &details, &note)?,
+                None => record_gap(
+                    &tx,
+                    height,
+                    Some(&header.hash),
+                    &now,
+                    "reorg: new canonical body already unavailable at recheck time",
+                )?,
             }
-
-            record_gap_block(conn, &details, "reorg: new canonical body already unavailable at recheck time")?;
+            tx.commit()?;
         }
     }
     Ok(())
@@ -258,10 +272,12 @@ fn backfill_gap(conn: &Connection, rpc: &RpcClient, height: u64) -> Result<()> {
     match try_getblock_fallback(rpc, height, &hash) {
         FallbackOutcome::Recovered(retained) => {
             let n = retained.transactions.len();
-            insert_transactions(conn, uncaptured_id, &retained)?;
-            db::mark_body_recovered(conn, uncaptured_id, "getblock")?;
+            let tx = db::write_tx(conn)?;
+            insert_transactions(&tx, uncaptured_id, &retained)?;
+            db::mark_body_recovered(&tx, uncaptured_id, "getblock")?;
             let now = Utc::now().to_rfc3339();
-            db::resolve_gap(conn, height, &now, "recovered via getBlock")?;
+            db::resolve_gap(&tx, height, &now, "recovered via getBlock")?;
+            tx.commit()?;
             info!("height {height}: gap recovered via getBlock ({n} tx)");
         }
         FallbackOutcome::NoBody | FallbackOutcome::DecodeFailed(_) => {
@@ -480,9 +496,9 @@ fn insert_transactions(conn: &Connection, block_id: i64, retained: &RetainedBloc
 fn refresh_known_address_balances(conn: &Connection, rpc: &RpcClient) -> Result<usize> {
     let addresses = db::known_addresses(conn)?;
     let now = Utc::now().to_rfc3339();
-    let mut refreshed = 0;
-    for address in &addresses {
-        let slots = match rpc.get_slots_by_owner(address) {
+    let mut fresh: Vec<(String, u128, usize)> = Vec::new();
+    for address in addresses {
+        let slots = match rpc.get_slots_by_owner(&address) {
             Ok(s) => s,
             Err(e) => {
                 warn!("address balance refresh: {address}: {e:#}");
@@ -490,11 +506,15 @@ fn refresh_known_address_balances(conn: &Connection, rpc: &RpcClient) -> Result<
             }
         };
         let live: Vec<_> = slots.into_iter().filter(|s| !s.empty).collect();
-        let balance: u64 = live.iter().map(|s| s.value).sum();
-        db::upsert_address_balance_cache(conn, address, &balance.to_string(), live.len() as i64, &now)?;
-        refreshed += 1;
+        let balance: u128 = live.iter().map(|s| u128::from(s.value)).sum();
+        fresh.push((address, balance, live.len()));
     }
-    Ok(refreshed)
+    let tx = db::write_tx(conn)?;
+    for (address, balance, count) in &fresh {
+        db::upsert_address_balance_cache(&tx, address, &balance.to_string(), *count as i64, &now)?;
+    }
+    tx.commit()?;
+    Ok(fresh.len())
 }
 
 /// Sweep every populated segment of the node's Live State
@@ -565,11 +585,13 @@ fn scan_live_state(conn: &Connection, rpc: &RpcClient) -> Result<usize> {
     }
 
     let now = Utc::now().to_rfc3339();
+    let tx = db::write_tx(conn)?;
     for (address, (total, count)) in &owners {
-        db::upsert_address_balance_cache(conn, address, &total.to_string(), *count as i64, &now)?;
+        db::upsert_address_balance_cache(&tx, address, &total.to_string(), *count as i64, &now)?;
     }
     // Bounds from the earlier range-based sweep design; no longer read.
-    conn.execute("DELETE FROM indexer_state WHERE key IN ('slot_scan_low', 'slot_scan_high')", [])?;
+    tx.execute("DELETE FROM indexer_state WHERE key IN ('slot_scan_low', 'slot_scan_high')", [])?;
+    tx.commit()?;
 
     let tip_after = rpc.block_count().unwrap_or(tip_before);
     if tip_after == tip_before && found != expected {
