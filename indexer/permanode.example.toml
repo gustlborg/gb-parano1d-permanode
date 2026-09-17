@@ -1,0 +1,27 @@
+# Example config for the parano1d-permanode indexer.
+# Copy to permanode.toml next to the binary, or point --config at it.
+# Any key left out falls back to the built-in default shown here.
+
+# JSON-RPC endpoint of your own Parano1d node. Must stay reachable only on
+# loopback/a private network - RPC has no authentication by default.
+rpc_url = "http://127.0.0.1:9601"
+
+# SQLite database file the indexer writes to.
+db_path = "permanode.sqlite3"
+
+# How often to poll the node for new blocks, in seconds. The node's body
+# retention window has been observed to be considerably tighter in
+# practice than its own documentation states, so keep this low.
+poll_interval_seconds = 5
+
+# How many recent blocks to re-check on every poll for reorgs. Must stay
+# above the protocol's maximum reorg depth (17 blocks at mainnet launch)
+# with a safety margin.
+reorg_check_depth = 30
+
+# Days of transaction detail to keep before pruning. 0 = keep forever.
+# Block headers are always kept regardless of this setting.
+retention_days = 0
+
+# How often (in poll cycles) to run the pruning pass.
+prune_every_cycles = 720
