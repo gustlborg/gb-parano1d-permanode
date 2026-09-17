@@ -40,14 +40,17 @@ pub fn run(conn: &Connection, rpc: &RpcClient, cfg: &Config) -> Result<()> {
             }
         }
 
-        if cycles % cfg.refresh_addresses_every_cycles == 0 {
+        // Both balance jobs also run on the first cycle, so a fresh
+        // install has every address and balance within seconds of
+        // starting rather than after the first full interval.
+        if cycles == 1 || cycles % cfg.refresh_addresses_every_cycles == 0 {
             match refresh_known_address_balances(conn, rpc) {
                 Ok(n) => info!("refreshed live balance cache for {n} known address(es)"),
                 Err(e) => warn!("address balance refresh pass failed: {e:#}"),
             }
         }
 
-        if cfg.scan_slots_every_cycles > 0 && cycles % cfg.scan_slots_every_cycles == 0 {
+        if cfg.scan_slots_every_cycles > 0 && (cycles == 1 || cycles % cfg.scan_slots_every_cycles == 0) {
             if slot_scan_running.swap(true, Ordering::SeqCst) {
                 warn!("live state sweep trigger fired but a previous sweep is still running, skipping");
             } else {
