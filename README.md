@@ -11,18 +11,46 @@ It is meant to be installed by anyone running a Parano1d node, not just on
 one central server. Point it at your own node's local RPC and it builds up
 its own local, permanent transaction history for as long as it runs.
 
-Status: the indexer (`indexer/`) works and has been tested against a live
-mainnet node. A block-explorer frontend, based on mempool.space's design and
-adapted to Parano1d, is planned next and not started yet.
+Status: the indexer, the API server and a first explorer frontend all work
+and have been tested against a live mainnet node. The frontend covers the
+core views (blocks, transactions, addresses) but is not feature-complete.
 
-## The indexer
+## Layout
+
+This is a Cargo workspace:
+
+- `core/` — shared library: the SQLite schema and all read/write queries.
+- `indexer/` — the binary that polls a node and fills the database.
+- `api/` — a small JSON API (axum) that reads the database and also serves
+  the static frontend, so a self-hoster only needs these two binaries plus
+  the `frontend/site/` directory.
+- `frontend/site/` — the explorer UI: plain HTML/CSS/JS (ES modules), no
+  build step, no framework. Visually inspired by mempool.space's dark theme
+  and block-grid visualization, but written independently — mempool.space's
+  actual codebase is ~750 files, much of it tied to Bitcoin/Lightning/Liquid
+  features that have no Parano1d equivalent, and its name and logos are
+  trademarked regardless of the code license.
+
+## Running it
 
 ```sh
-cd indexer
 cargo build --release
-cp permanode.example.toml permanode.toml   # edit if your node RPC isn't the default
-./target/release/parano1d-permanode-indexer --config permanode.toml
+
+# 1. the indexer, next to your own already-running Parano1d node
+cd run   # or any directory you want the database and config in
+cp ../indexer/permanode.example.toml permanode.toml   # edit if your node RPC isn't the default
+../target/release/parano1d-permanode-indexer --config permanode.toml
+
+# 2. the API + frontend, pointed at that same database
+../target/release/permanode-api \
+  --db-path permanode.sqlite3 \
+  --site-dir ../frontend/site \
+  --listen 127.0.0.1:8420
 ```
+
+Then open `http://127.0.0.1:8420/`. `--listen` defaults to loopback only;
+change it if you want it reachable from elsewhere, e.g. behind your own
+reverse proxy.
 
 It expects a Parano1d node already running and reachable on its RPC port
 (default `127.0.0.1:9601`, no separate setup needed on the node side beyond
