@@ -15,9 +15,13 @@ export function shortHash(h, lead = 8, tail = 6) {
 export function timeAgo(unixSeconds) {
   if (!unixSeconds) return "-";
   const s = Math.max(0, Math.floor(Date.now() / 1000) - unixSeconds);
+  // The trailing sub-unit is zero-padded to a fixed width so that, combined
+  // with right-aligning the column, "m"/"h" land in the same place on every
+  // row - right-alignment only keeps things lined up if everything to the
+  // right of them is the same width, and an unpadded "5s" vs "45s" isn't.
   if (s < 60) return `${s}s ago`;
-  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m ago`;
   return `${Math.floor(s / 86400)}d ago`;
 }
 
