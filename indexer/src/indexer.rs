@@ -21,9 +21,9 @@ const GETBLOCK_SERVING_WINDOW: u64 = 42;
 
 pub fn run(conn: &Connection, rpc: &RpcClient, cfg: &Config) -> Result<()> {
     let mut cycles: u64 = 0;
-    // Guards against two slot-range scans overlapping if one is still
-    // running (hundreds of thousands of RPC calls) when its next trigger
-    // comes around - the flag lives for the whole run(), not per-thread.
+    // Guards against two live-state sweeps overlapping if one is still
+    // running (tens of thousands of RPC calls per populated segment) when
+    // its next trigger comes around - the flag lives for the whole run().
     let slot_scan_running = Arc::new(AtomicBool::new(false));
     loop {
         if let Err(e) = poll_once(conn, rpc, cfg) {
@@ -49,19 +49,19 @@ pub fn run(conn: &Connection, rpc: &RpcClient, cfg: &Config) -> Result<()> {
 
         if cfg.scan_slots_every_cycles > 0 && cycles % cfg.scan_slots_every_cycles == 0 {
             if slot_scan_running.swap(true, Ordering::SeqCst) {
-                warn!("slot range scan trigger fired but a previous scan is still running, skipping");
+                warn!("live state sweep trigger fired but a previous sweep is still running, skipping");
             } else {
                 let db_path = cfg.db_path.clone();
                 let rpc = rpc.clone();
                 let running_flag = Arc::clone(&slot_scan_running);
                 // Its own connection (WAL mode allows concurrent readers/
-                // writers) so hundreds of thousands of getSlot calls never
-                // hold up the main ingest loop's connection.
+                // writers) so the getSlot flood never holds up the main
+                // ingest loop's connection.
                 thread::spawn(move || {
-                    let result = db::open(&db_path).and_then(|scan_conn| scan_slot_range(&scan_conn, &rpc));
+                    let result = db::open(&db_path).and_then(|scan_conn| scan_live_state(&scan_conn, &rpc));
                     match result {
-                        Ok(n) => info!("slot range scan finished: {n} distinct address(es) with a balance"),
-                        Err(e) => warn!("slot range scan failed: {e:#}"),
+                        Ok(n) => info!("live state sweep finished: {n} distinct address(es) with a balance"),
+                        Err(e) => warn!("live state sweep failed: {e:#}"),
                     }
                     running_flag.store(false, Ordering::SeqCst);
                 });
@@ -497,102 +497,92 @@ fn refresh_known_address_balances(conn: &Connection, rpc: &RpcClient) -> Result<
     Ok(refreshed)
 }
 
-/// If an occupied slot turns up within this many indices of a scan bound,
-/// treat the bound as possibly cutting off real addresses.
-const SLOT_SCAN_EDGE_MARGIN: u64 = 2_000;
-/// How far to push a bound out once the scan hits it, before the next run.
-const SLOT_SCAN_GROW_STEP: u64 = 250_000;
-/// First-ever-run bounds, padded well past the dense band of occupied
-/// slots observed live on 17.09.2026 (~9,699,328-9,762,631+, boundary
-/// fuzzy/non-monotonic rather than a hard cliff) - see project memory.
-/// Only used once; after that the persisted indexer_state bounds take
-/// over and adapt via the edge margin/grow step above.
-const SLOT_SCAN_DEFAULT_LOW: u64 = 9_500_000;
-const SLOT_SCAN_DEFAULT_HIGH: u64 = 10_000_000;
-
-/// Sweep a range of the node's raw Live State slot indices
-/// (`paranoid_getSlot`) directly, to discover every address that currently
-/// holds a balance - not just ones `known_addresses()` already knows about
-/// (which only covers addresses that moved funds in a transaction this
-/// permanode has itself recorded since it started indexing). Occupied
-/// slots are empirically clustered in a dense, bounded band rather than
-/// scattered across the full 2^log_slots capacity, so a bounded sweep is
-/// a few hundred thousand RPC calls, not tens of millions.
+/// Sweep every populated segment of the node's Live State
+/// (`paranoid_getSlot` over each 65,536-slot bucket that
+/// `paranoid_getStateMap` reports as holding live slots) to discover every
+/// address that currently holds a balance - not just ones
+/// `known_addresses()` already knows about (which only covers addresses
+/// that moved funds in a transaction this permanode has itself recorded
+/// since it started indexing).
 ///
-/// The [low, high) bounds live in indexer_state and adapt over time: if an
-/// occupied slot shows up within SLOT_SCAN_EDGE_MARGIN of either edge,
-/// that edge grows by SLOT_SCAN_GROW_STEP (capped at the node's actual
-/// slot-index capacity) so the band can't silently leave addresses
-/// uncovered on either side as the active set grows.
+/// The node's allocator does not fill the slot index space contiguously:
+/// each zone of 65,536 mints lands in a segment chosen by a permutation
+/// (see `noid_chain::consensus::allocator`), and the node's own block
+/// template prefers reusing holes in already-populated segments. So the
+/// state map, not any range heuristic, decides what gets swept - and its
+/// per-segment counts are the exact figure the sweep must reproduce
+/// whenever no block landed while it ran. Any shortfall at an unchanged
+/// tip is logged as a coverage problem rather than papered over.
 ///
 /// Called from its own background thread spawned in `run()` - never call
-/// this on the main ingest connection/loop, it's hundreds of thousands of
-/// sequential RPC round-trips.
-fn scan_slot_range(conn: &Connection, rpc: &RpcClient) -> Result<usize> {
-    let mut low: u64 = db::get_state(conn, "slot_scan_low")?
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(SLOT_SCAN_DEFAULT_LOW);
-    let mut high: u64 = db::get_state(conn, "slot_scan_high")?
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(SLOT_SCAN_DEFAULT_HIGH);
-    db::set_state(conn, "slot_scan_low", &low.to_string())?;
-    db::set_state(conn, "slot_scan_high", &high.to_string())?;
-
-    let capacity: u64 = rpc
-        .block_count()
-        .and_then(|tip| rpc.get_block_header(tip))
-        .ok()
-        .flatten()
-        .map(|h| 1u64 << h.log_slots)
-        .unwrap_or(u64::MAX);
-
-    info!("slot range scan: sweeping [{low}, {high}) of {capacity} total slot(s)");
+/// this on the main ingest connection/loop, it's tens of thousands of
+/// sequential RPC round-trips per populated segment.
+fn scan_live_state(conn: &Connection, rpc: &RpcClient) -> Result<usize> {
+    let tip_before = rpc.block_count()?;
+    let map = rpc.get_state_map()?;
+    let expected: u64 = map.live_counts.iter().sum();
+    let populated: Vec<(usize, u64)> = map
+        .live_counts
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| **c > 0)
+        .map(|(i, c)| (i, *c))
+        .collect();
+    info!(
+        "live state sweep: {} populated segment(s) of {} ({} slots each), {expected} live slot(s) at #{tip_before}",
+        populated.len(),
+        map.live_counts.len(),
+        map.bucket_capacity
+    );
 
     let mut owners: HashMap<String, (u128, u64)> = HashMap::new();
-    let mut hit_low_edge = false;
-    let mut hit_high_edge = false;
-    let mut queried = 0usize;
-
-    for idx in low..high {
-        let slot = match rpc.get_slot(idx) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("slot range scan: getSlot({idx}) failed, skipping: {e:#}");
+    let mut queried = 0u64;
+    let mut found = 0u64;
+    for (segment, count) in &populated {
+        let start = *segment as u64 * map.bucket_capacity;
+        let mut seg_found = 0u64;
+        for idx in start..start + map.bucket_capacity {
+            let slot = match rpc.get_slot(idx) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("live state sweep: getSlot({idx}) failed, skipping: {e:#}");
+                    continue;
+                }
+            };
+            queried += 1;
+            if slot.empty {
                 continue;
             }
-        };
-        queried += 1;
-        if slot.empty {
-            continue;
+            seg_found += 1;
+            let entry = owners.entry(slot.owner).or_insert((0u128, 0u64));
+            entry.0 += slot.value as u128;
+            entry.1 += 1;
         }
-        if idx < low.saturating_add(SLOT_SCAN_EDGE_MARGIN) {
-            hit_low_edge = true;
+        found += seg_found;
+        if seg_found != *count {
+            info!("live state sweep: segment {segment} swept {seg_found} live slot(s), state map said {count}");
         }
-        if idx.saturating_add(SLOT_SCAN_EDGE_MARGIN) >= high {
-            hit_high_edge = true;
-        }
-        let entry = owners.entry(slot.owner).or_insert((0u128, 0u64));
-        entry.0 += slot.value as u128;
-        entry.1 += 1;
     }
 
     let now = Utc::now().to_rfc3339();
-    let found = owners.len();
     for (address, (total, count)) in &owners {
         db::upsert_address_balance_cache(conn, address, &total.to_string(), *count as i64, &now)?;
     }
+    // Bounds from the earlier range-based sweep design; no longer read.
+    conn.execute("DELETE FROM indexer_state WHERE key IN ('slot_scan_low', 'slot_scan_high')", [])?;
 
-    if hit_low_edge {
-        low = low.saturating_sub(SLOT_SCAN_GROW_STEP);
-        db::set_state(conn, "slot_scan_low", &low.to_string())?;
-        warn!("slot range scan: occupied slot(s) near the low edge, widening low bound to {low}");
+    let tip_after = rpc.block_count().unwrap_or(tip_before);
+    if tip_after == tip_before && found != expected {
+        warn!(
+            "live state sweep: found {found} live slot(s) but the node reported {expected} at the same height #{tip_before} - the sweep is missing part of the state"
+        );
+    } else if tip_after == tip_before {
+        info!("live state sweep: queried {queried} slot(s), found {found} live slot(s) across {} address(es) - exact match with the node at #{tip_before}", owners.len());
+    } else {
+        info!(
+            "live state sweep: queried {queried} slot(s), found {found} live slot(s) across {} address(es); node said {expected} at #{tip_before}, chain advanced to #{tip_after} during the sweep",
+            owners.len()
+        );
     }
-    if hit_high_edge {
-        high = high.saturating_add(SLOT_SCAN_GROW_STEP).min(capacity);
-        db::set_state(conn, "slot_scan_high", &high.to_string())?;
-        warn!("slot range scan: occupied slot(s) near the high edge, widening high bound to {high}");
-    }
-
-    info!("slot range scan: queried {queried} slot(s), found {found} distinct address(es) with a balance");
-    Ok(found)
+    Ok(owners.len())
 }
