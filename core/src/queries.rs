@@ -53,6 +53,10 @@ pub struct TxSummary {
     pub coinbase: bool,
     pub development_payout: bool,
     pub input_owner: Option<String>,
+    /// Owner of the first output (by idx). A transaction can have more
+    /// than one output; `n_outputs` tells the caller whether there are
+    /// others besides this one.
+    pub receiver: Option<String>,
     pub input_sum_micronoid: String,
     pub output_sum_micronoid: String,
     pub n_inputs: i64,
@@ -186,31 +190,44 @@ fn block_id_and_row(
     Ok(row)
 }
 
+// Column names rather than positions on purpose: a positional mismatch
+// after adding `receiver` bit us twice already (n_outputs silently reading
+// n_inputs' column). Named lookups can't drift out of sync with the SELECT
+// list like that.
+const TX_SUMMARY_COLUMNS: &str = "
+    t.position, t.txid, t.page_count, t.fee_micronoid, t.coinbase, t.development_payout,
+    t.input_owner, t.input_sum_micronoid, t.output_sum_micronoid,
+    (SELECT COUNT(*) FROM tx_inputs i WHERE i.tx_id = t.id) AS n_inputs,
+    (SELECT COUNT(*) FROM tx_outputs o WHERE o.tx_id = t.id) AS n_outputs,
+    (SELECT o.owner FROM tx_outputs o WHERE o.tx_id = t.id ORDER BY o.idx ASC LIMIT 1) AS receiver
+";
+
+fn tx_summary_from_row(row: &rusqlite::Row) -> rusqlite::Result<TxSummary> {
+    Ok(TxSummary {
+        position: row.get("position")?,
+        txid: row.get("txid")?,
+        page_count: row.get("page_count")?,
+        fee_micronoid: row.get("fee_micronoid")?,
+        coinbase: row.get::<_, i64>("coinbase")? != 0,
+        development_payout: row.get::<_, i64>("development_payout")? != 0,
+        input_owner: row.get("input_owner")?,
+        receiver: row.get("receiver")?,
+        input_sum_micronoid: row.get("input_sum_micronoid")?,
+        output_sum_micronoid: row.get("output_sum_micronoid")?,
+        n_inputs: row.get("n_inputs")?,
+        n_outputs: row.get("n_outputs")?,
+    })
+}
+
 fn tx_summaries_for_block(conn: &Connection, block_id: i64) -> Result<Vec<TxSummary>> {
-    let mut stmt = conn.prepare(
-        "SELECT t.position, t.txid, t.page_count, t.fee_micronoid, t.coinbase, t.development_payout,
-                t.input_owner, t.input_sum_micronoid, t.output_sum_micronoid,
-                (SELECT COUNT(*) FROM tx_inputs i WHERE i.tx_id = t.id) AS n_inputs,
-                (SELECT COUNT(*) FROM tx_outputs o WHERE o.tx_id = t.id) AS n_outputs
+    let sql = format!(
+        "SELECT {TX_SUMMARY_COLUMNS}
          FROM transactions t
          WHERE t.block_id = ?1
-         ORDER BY t.position ASC",
-    )?;
-    let rows = stmt.query_map(params![block_id], |row| {
-        Ok(TxSummary {
-            position: row.get(0)?,
-            txid: row.get(1)?,
-            page_count: row.get(2)?,
-            fee_micronoid: row.get(3)?,
-            coinbase: row.get::<_, i64>(4)? != 0,
-            development_payout: row.get::<_, i64>(5)? != 0,
-            input_owner: row.get(6)?,
-            input_sum_micronoid: row.get(7)?,
-            output_sum_micronoid: row.get(8)?,
-            n_inputs: row.get(9)?,
-            n_outputs: row.get(10)?,
-        })
-    })?;
+         ORDER BY t.position ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![block_id], tx_summary_from_row)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
@@ -325,11 +342,7 @@ pub fn txs_by_address(
     let offset = (page.max(1) - 1) * page_size;
     let canonical_on_b = canonical_filter_on("b");
     let sql = format!(
-        "SELECT t.position, t.txid, t.page_count, t.fee_micronoid, t.coinbase, t.development_payout,
-                t.input_owner, t.input_sum_micronoid, t.output_sum_micronoid,
-                (SELECT COUNT(*) FROM tx_inputs i WHERE i.tx_id = t.id) AS n_inputs,
-                (SELECT COUNT(*) FROM tx_outputs o WHERE o.tx_id = t.id) AS n_outputs,
-                b.height
+        "SELECT {TX_SUMMARY_COLUMNS}, b.height
          FROM transactions t
          JOIN blocks b ON b.id = t.block_id
          WHERE {canonical_on_b}
@@ -339,21 +352,7 @@ pub fn txs_by_address(
          LIMIT ?2 OFFSET ?3"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![address, page_size, offset], |row| {
-        Ok(TxSummary {
-            position: row.get(0)?,
-            txid: row.get(1)?,
-            page_count: row.get(2)?,
-            fee_micronoid: row.get(3)?,
-            coinbase: row.get::<_, i64>(4)? != 0,
-            development_payout: row.get::<_, i64>(5)? != 0,
-            input_owner: row.get(6)?,
-            input_sum_micronoid: row.get(7)?,
-            output_sum_micronoid: row.get(8)?,
-            n_inputs: row.get(9)?,
-            n_outputs: row.get(10)?,
-        })
-    })?;
+    let rows = stmt.query_map(params![address, page_size, offset], tx_summary_from_row)?;
     let items: Vec<TxSummary> = rows.collect::<rusqlite::Result<_>>()?;
 
     let count_sql = format!(

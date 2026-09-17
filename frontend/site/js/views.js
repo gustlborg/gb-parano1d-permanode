@@ -172,10 +172,13 @@ function txRow(tx) {
     ? '<span class="badge dev">dev payout</span>'
     : "";
   const sender = tx.input_owner ? link(`/address/${tx.input_owner}`, shortHash(tx.input_owner)) : "-";
+  const receiver = tx.receiver ? link(`/address/${tx.receiver}`, shortHash(tx.receiver)) : "-";
+  const extra = tx.n_outputs > 1 ? ` +${tx.n_outputs - 1}` : "";
   return `<tr>
       <td class="mono">${link(`/tx/${tx.txid}`, shortHash(tx.txid))} ${kind}</td>
       <td class="mono">${sender}</td>
       <td>${tx.n_inputs} → ${tx.n_outputs}</td>
+      <td class="mono">${receiver}${extra}</td>
       <td>${noid(tx.output_sum_micronoid)}</td>
       <td>${noid(tx.fee_micronoid)}</td>
     </tr>`;
@@ -209,7 +212,7 @@ export async function blockView(idParam) {
     <div class="panel">
       <h2>Transactions (${block.transactions.length}), packed by size, shaded by fee rate</h2>
       <table>
-        <thead><tr><th>Txid</th><th>Sender</th><th>In → Out</th><th>Amount</th><th>Fee</th></tr></thead>
+        <thead><tr><th>Txid</th><th>Sender</th><th>In → Out</th><th>Receiver</th><th>Amount</th><th>Fee</th></tr></thead>
         <tbody>${txRows || '<tr><td colspan="5">No transactions recorded for this block.</td></tr>'}</tbody>
       </table>
     </div>`;
@@ -280,7 +283,7 @@ export async function addressView(address, page = 1) {
     </div>
     <div class="panel">
       <table>
-        <thead><tr><th>Txid</th><th>Sender</th><th>In → Out</th><th>Amount</th><th>Fee</th></tr></thead>
+        <thead><tr><th>Txid</th><th>Sender</th><th>In → Out</th><th>Receiver</th><th>Amount</th><th>Fee</th></tr></thead>
         <tbody>${rows || '<tr><td colspan="5">No transactions found.</td></tr>'}</tbody>
       </table>
       <div class="pager">
