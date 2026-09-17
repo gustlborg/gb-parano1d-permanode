@@ -509,6 +509,30 @@ pub fn chain_stats(conn: &Connection) -> Result<ChainStats> {
     })
 }
 
+/// Average interval between canonical blocks recorded in the last
+/// `window_seconds`, i.e. (span between oldest and newest block in the
+/// window) / (count - 1). `None` if fewer than 2 blocks fall in the
+/// window - including, unavoidably, for a window that reaches further
+/// back than this permanode has been recording.
+pub fn avg_block_time_seconds(conn: &Connection, window_seconds: i64, now_unix: i64) -> Result<Option<f64>> {
+    let cutoff = now_unix - window_seconds;
+    let sql = format!(
+        "SELECT COUNT(*), MIN(timestamp), MAX(timestamp)
+         FROM blocks
+         WHERE timestamp >= ?1 AND {CANONICAL_BLOCK_FILTER}"
+    );
+    let (count, min_ts, max_ts): (i64, Option<i64>, Option<i64>) =
+        conn.query_row(&sql, params![cutoff], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+    match (count, min_ts, max_ts) {
+        (c, Some(min), Some(max)) if c >= 2 && max > min => {
+            Ok(Some((max - min) as f64 / (c - 1) as f64))
+        }
+        _ => Ok(None),
+    }
+}
+
 pub fn recent_gaps(conn: &Connection, limit: i64) -> Result<Vec<GapEntry>> {
     let mut stmt = conn.prepare(
         "SELECT height, hash, detected_at, note FROM ingest_gaps ORDER BY height DESC LIMIT ?1",
