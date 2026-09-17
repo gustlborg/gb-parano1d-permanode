@@ -1,0 +1,76 @@
+{
+  "proof_class": "B25 / m22",
+  "logical_transactions": 2,
+  "user_pages": 1,
+  "live_inputs": 1,
+  "live_outputs": 2,
+  "reward_micronoid": 45009000,
+  "total_fees_micronoid": "9000",
+  "block_bytes": 863,
+  "transactions": [
+    {
+      "position": 0,
+      "txid": "d3dce2f363352e4d533659a755d5baa1d46c0a47927c4a556d185badc763a83a",
+      "page_count": 1,
+      "live_inputs": 0,
+      "live_outputs": 1,
+      "fee_micronoid": 0,
+      "coinbase": true,
+      "development_payout": false,
+      "epoch_anchor": "bcc31c705a6e7b1e57e1c6bfbe8c75583e9aa23888c5f0f41905e661f18c2d74",
+      "input_owner": null,
+      "input_sum_micronoid": "0",
+      "output_sum_micronoid": "45009000",
+      "page_hashes": [
+        "d3dce2f363352e4d533659a755d5baa1d46c0a47927c4a556d185badc763a83a"
+      ],
+      "inputs": [],
+      "outputs": [
+        {
+          "page": 0,
+          "lane": 0,
+          "slot_index": 9733182,
+          "amount_micronoid": 45009000,
+          "owner": "o1w6az7pl8djrnh75dmc63xwsvy2h8d5852tej4prj2nkalx2vmrls029wf8",
+          "creation_id": 9223372036854884345
+        }
+      ]
+    },
+    {
+      "position": 1,
+      "txid": "297494b0d3c0c66d7f05c12215762814aead9ce68311abeb973ba6447bfaf370",
+      "page_count": 1,
+      "live_inputs": 1,
+      "live_outputs": 1,
+      "fee_micronoid": 9000,
+      "coinbase": false,
+      "development_payout": false,
+      "epoch_anchor": "c9c9f94c3eac2fa0bce3c0df906147015ee3dff379cbab40fd97aadf68405f8f",
+      "input_owner": "o1m3r8qu2pl3dkjhhlzdwmlqwpewk2yentsyspa2vyawdegx6tyg3q5kuhn0",
+      "input_sum_micronoid": "24441319",
+      "output_sum_micronoid": "24432319",
+      "page_hashes": [
+        "71702f19f668c7f0712911cfa7701b6bdb0b6a57bd0909625edd27b8a8b50c6d"
+      ],
+      "inputs": [
+        {
+          "page": 0,
+          "lane": 0,
+          "slot_index": 9705194,
+          "amount_micronoid": 24441319,
+          "creation_id": 250975
+        }
+      ],
+      "outputs": [
+        {
+          "page": 0,
+          "lane": 0,
+          "slot_index": 9721405,
+          "amount_micronoid": 24432319,
+          "owner": "o1hk70wqcqkxjx7stha3xaz8g0mz7akz2wzf49z2dwce3wxmy2jveqqnx9sy",
+          "creation_id": 251329
+        }
+      ]
+    }
+  ]
+}

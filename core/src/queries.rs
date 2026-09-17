@@ -111,7 +111,18 @@ pub struct ChainStats {
     pub last_processed_height: Option<i64>,
     pub indexed_blocks: i64,
     pub indexed_transactions: i64,
+    /// Still-unresolved gaps only - a gap the getBlock fallback decoder
+    /// later recovered is no longer missing data, so it's not counted
+    /// here anymore (see `gaps_resolved`).
     pub gaps: i64,
+    /// Gaps that were recovered via the getBlock fallback decoder after
+    /// initially being recorded - kept visible for transparency even
+    /// though the data is no longer actually missing.
+    pub gaps_resolved: i64,
+    /// Times the getBlock fallback decoder's output has disagreed with
+    /// getBlockDetails for a block both could decode - see
+    /// indexer's `decoder_selfcheck` config option. Should stay 0.
+    pub decoder_mismatches: i64,
     pub oldest_retained_timestamp: Option<i64>,
     /// Outputs recorded on a canonical block whose creation_id has not
     /// (yet) been consumed by any recorded input - the live UTXO set as
@@ -127,6 +138,8 @@ pub struct GapEntry {
     pub hash: Option<String>,
     pub detected_at: String,
     pub note: String,
+    pub resolved_at: Option<String>,
+    pub resolution: Option<String>,
 }
 
 pub fn recent_blocks(conn: &Connection, limit: i64) -> Result<Vec<BlockSummary>> {
@@ -468,11 +481,24 @@ pub fn chain_stats(conn: &Connection) -> Result<ChainStats> {
         .optional()?
         .and_then(|s| s.parse().ok());
 
+    let decoder_mismatches: i64 = conn
+        .query_row(
+            "SELECT value FROM indexer_state WHERE key = 'decoder_mismatches'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
     let indexed_blocks: i64 =
         conn.query_row(&format!("SELECT COUNT(*) FROM blocks WHERE {CANONICAL_BLOCK_FILTER}"), [], |r| r.get(0))?;
     let indexed_transactions: i64 =
         conn.query_row("SELECT COUNT(*) FROM transactions", [], |r| r.get(0))?;
-    let gaps: i64 = conn.query_row("SELECT COUNT(*) FROM ingest_gaps", [], |r| r.get(0))?;
+    let gaps: i64 =
+        conn.query_row("SELECT COUNT(*) FROM ingest_gaps WHERE resolved_at IS NULL", [], |r| r.get(0))?;
+    let gaps_resolved: i64 =
+        conn.query_row("SELECT COUNT(*) FROM ingest_gaps WHERE resolved_at IS NOT NULL", [], |r| r.get(0))?;
     let oldest_retained_timestamp: Option<i64> = conn.query_row(
         "SELECT MIN(timestamp) FROM blocks WHERE body_captured = 1",
         [],
@@ -504,6 +530,8 @@ pub fn chain_stats(conn: &Connection) -> Result<ChainStats> {
         indexed_blocks,
         indexed_transactions,
         gaps,
+        gaps_resolved,
+        decoder_mismatches,
         oldest_retained_timestamp,
         live_utxos,
     })
@@ -535,7 +563,8 @@ pub fn avg_block_time_seconds(conn: &Connection, window_seconds: i64, now_unix: 
 
 pub fn recent_gaps(conn: &Connection, limit: i64) -> Result<Vec<GapEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT height, hash, detected_at, note FROM ingest_gaps ORDER BY height DESC LIMIT ?1",
+        "SELECT height, hash, detected_at, note, resolved_at, resolution
+         FROM ingest_gaps ORDER BY height DESC LIMIT ?1",
     )?;
     let rows = stmt.query_map(params![limit], |row| {
         Ok(GapEntry {
@@ -543,6 +572,8 @@ pub fn recent_gaps(conn: &Connection, limit: i64) -> Result<Vec<GapEntry>> {
             hash: row.get(1)?,
             detected_at: row.get(2)?,
             note: row.get(3)?,
+            resolved_at: row.get(4)?,
+            resolution: row.get(5)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)

@@ -1,12 +1,9 @@
-mod config;
-mod indexer;
-mod rpc;
-
 use anyhow::Result;
 use clap::Parser;
-use config::Config;
+use parano1d_permanode_indexer::config::Config;
+use parano1d_permanode_indexer::indexer;
+use parano1d_permanode_indexer::rpc::RpcClient;
 use permanode_core::db;
-use rpc::RpcClient;
 use std::path::PathBuf;
 
 /// Records Parano1d transaction history that the node itself only keeps

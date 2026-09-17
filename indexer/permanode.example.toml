@@ -25,3 +25,17 @@ retention_days = 0
 
 # How often (in poll cycles) to run the pruning pass.
 prune_every_cycles = 720
+
+# Work around a node RPC bug: getBlockDetails/getRecentTransactions return
+# retained: null for every "marker" block of a multi-block commit (~2.2% of
+# all heights) even though the node still has the body. When this happens
+# inside the serving window, decode the raw block from getBlock ourselves
+# instead of recording a gap. Requires a C compiler and libclang (the node's
+# own crates are linked in for the decode). See project docs for details.
+getblock_fallback = true
+
+# For every block getBlockDetails already served fine, also decode it via
+# getBlock and compare, as a continuous check that the fallback decoder
+# still matches the node's own output. Safe to turn off after it's been
+# quiet for a while.
+decoder_selfcheck = true

@@ -1,12 +1,20 @@
 use crate::config::Config;
-use crate::rpc::{BlockDetailsInfo, RpcClient};
-use permanode_core::db;
+use crate::decode;
+use crate::rpc::{BlockDetailsInfo, BlockHeaderInfo, RetainedBlockInfo, RpcClient};
 use anyhow::Result;
 use chrono::Utc;
-use log::{info, warn};
+use log::{error, info, warn};
+use permanode_core::db;
 use rusqlite::{params, Connection};
 use std::thread;
 use std::time::Duration;
+
+/// Observed width of the node's getBlock serving window (see
+/// docs/ANLEITUNG-getblock-decoder.md / node-issue-17-09 REPORT.md
+/// section 6: `repro_retained_null.py 42` against a live node). Only used
+/// to bound how far back the gap-backfill sweep still bothers looking -
+/// anything older than this is permanently gone even via getBlock.
+const GETBLOCK_SERVING_WINDOW: u64 = 42;
 
 pub fn run(conn: &Connection, rpc: &RpcClient, cfg: &Config) -> Result<()> {
     let mut cycles: u64 = 0;
@@ -38,7 +46,7 @@ fn poll_once(conn: &Connection, rpc: &RpcClient, cfg: &Config) -> Result<()> {
 
     // Ingest any new heights.
     for height in (last_processed + 1)..=tip {
-        ingest_height(conn, rpc, height)?;
+        ingest_height(conn, rpc, cfg, height)?;
         db::set_state(conn, "last_processed_height", &height.to_string())?;
     }
 
@@ -46,23 +54,98 @@ fn poll_once(conn: &Connection, rpc: &RpcClient, cfg: &Config) -> Result<()> {
     // just ingested new heights this cycle.
     let recheck_from = tip.saturating_sub(cfg.reorg_check_depth);
     for height in recheck_from..=tip {
-        recheck_height(conn, rpc, height)?;
+        recheck_height(conn, rpc, cfg, height)?;
+    }
+
+    // Retry still-open gaps that are still inside the getBlock serving
+    // window - a gap recorded a few cycles ago (e.g. getblock_fallback was
+    // briefly toggled off, or the node hadn't finished writing the body
+    // yet) may be recoverable now even though it wasn't at first ingest.
+    if cfg.getblock_fallback {
+        let min_height = tip.saturating_sub(GETBLOCK_SERVING_WINDOW);
+        for height in db::open_gap_heights(conn, min_height)? {
+            backfill_gap(conn, rpc, height)?;
+        }
     }
 
     Ok(())
 }
 
-fn ingest_height(conn: &Connection, rpc: &RpcClient, height: u64) -> Result<()> {
-    let Some(details) = rpc.get_block_details(height)? else {
+/// What happened when we tried the getBlock fallback for a height whose
+/// getBlockDetails came back with `retained: null`.
+enum FallbackOutcome {
+    Recovered(RetainedBlockInfo),
+    /// getBlock also has nothing (outside its serving window, or the node
+    /// genuinely never had this body) - not the decoder's fault.
+    NoBody,
+    /// getBlock had bytes but decode_retained_block rejected them (hash
+    /// mismatch from a reorg race between the two RPC calls, or a real
+    /// wire-format problem). Already logged by the caller of decode.
+    DecodeFailed(String),
+}
+
+fn try_getblock_fallback(rpc: &RpcClient, height: u64, expected_hash: &str) -> FallbackOutcome {
+    let raw = match rpc.get_block_raw(height) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return FallbackOutcome::NoBody,
+        Err(e) => {
+            warn!("height {height}: getBlock RPC call failed: {e:#}");
+            return FallbackOutcome::NoBody;
+        }
+    };
+    match decode::decode_retained_block(&raw, height, expected_hash) {
+        Ok(retained) => FallbackOutcome::Recovered(retained),
+        Err(e) => {
+            error!("height {height}: getBlock body could not be decoded: {e:#}");
+            FallbackOutcome::DecodeFailed(e.to_string())
+        }
+    }
+}
+
+fn ingest_height(conn: &Connection, rpc: &RpcClient, cfg: &Config, height: u64) -> Result<()> {
+    let Some(mut details) = rpc.get_block_details(height)? else {
         // Header not available yet (node not synced this far) - nothing
         // to do, next poll cycle will retry.
         return Ok(());
     };
-    store_block(conn, &details)?;
+
+    if details.retained.is_some() {
+        store_block(conn, &details, "details")?;
+        if cfg.decoder_selfcheck {
+            selfcheck(conn, rpc, height, &details);
+        }
+        return Ok(());
+    }
+
+    if cfg.getblock_fallback {
+        match try_getblock_fallback(rpc, height, &details.header.hash) {
+            FallbackOutcome::Recovered(retained) => {
+                let n = retained.transactions.len();
+                details.retained = Some(retained);
+                store_block(conn, &details, "getblock")?;
+                info!("height {height}: body recovered via getBlock ({n} tx)");
+                return Ok(());
+            }
+            FallbackOutcome::NoBody => {
+                record_gap_block(
+                    conn,
+                    &details,
+                    "no body via getBlockDetails nor getBlock (outside serving window)",
+                )?;
+                return Ok(());
+            }
+            FallbackOutcome::DecodeFailed(err) => {
+                record_gap_block(conn, &details, &format!("getBlock body could not be decoded: {err}"))?;
+                return Ok(());
+            }
+        }
+    }
+
+    record_gap_block(conn, &details, "body already pruned by node on first ingest attempt")?;
     Ok(())
 }
 
-fn recheck_height(conn: &Connection, rpc: &RpcClient, height: u64) -> Result<()> {
+fn recheck_height(conn: &Connection, rpc: &RpcClient, cfg: &Config, height: u64) -> Result<()> {
     let Some(header) = rpc.get_block_header(height)? else {
         return Ok(());
     };
@@ -83,53 +166,182 @@ fn recheck_height(conn: &Connection, rpc: &RpcClient, height: u64) -> Result<()>
                 header.hash
             );
             db::mark_orphaned(conn, old_block_id, &now)?;
-            // Fetch and store the new canonical block body immediately -
-            // it may already be gone if the node's retained window is as
-            // tight as observed live on 17.09.2026.
-            match rpc.get_block_details(height)? {
-                Some(details) => store_block(conn, &details)?,
-                None => {
-                    db::record_gap(
-                        conn,
-                        height,
-                        Some(&header.hash),
-                        &now,
-                        "reorg: new canonical body already unavailable at recheck time",
-                    )?;
+
+            let Some(mut details) = rpc.get_block_details(height)? else {
+                record_gap(conn, height, Some(&header.hash), &now, "reorg: new canonical body already unavailable at recheck time")?;
+                return Ok(());
+            };
+
+            if details.retained.is_some() {
+                store_block(conn, &details, "details")?;
+                return Ok(());
+            }
+
+            if cfg.getblock_fallback {
+                match try_getblock_fallback(rpc, height, &details.header.hash) {
+                    FallbackOutcome::Recovered(retained) => {
+                        let n = retained.transactions.len();
+                        details.retained = Some(retained);
+                        store_block(conn, &details, "getblock")?;
+                        info!("height {height}: reorg replacement body recovered via getBlock ({n} tx)");
+                        return Ok(());
+                    }
+                    FallbackOutcome::NoBody => {
+                        record_gap_block(
+                            conn,
+                            &details,
+                            "no body via getBlockDetails nor getBlock (outside serving window)",
+                        )?;
+                        return Ok(());
+                    }
+                    FallbackOutcome::DecodeFailed(err) => {
+                        record_gap_block(conn, &details, &format!("getBlock body could not be decoded: {err}"))?;
+                        return Ok(());
+                    }
                 }
             }
+
+            record_gap_block(conn, &details, "reorg: new canonical body already unavailable at recheck time")?;
         }
     }
     Ok(())
 }
 
-fn store_block(conn: &Connection, details: &BlockDetailsInfo) -> Result<()> {
+/// Retries a previously recorded gap that is still inside the getBlock
+/// serving window. Leaves the gap open (tries again next cycle) if
+/// getBlock still has nothing or decode fails - `ingest_gaps` already has
+/// the original detection note, no need to overwrite it on every retry.
+fn backfill_gap(conn: &Connection, rpc: &RpcClient, height: u64) -> Result<()> {
+    let Some((_block_id, hash)) = db::canonical_hash_at(conn, height)? else {
+        return Ok(());
+    };
+    let Some(uncaptured_id) = db::uncaptured_block_id(conn, height, &hash)? else {
+        // Already recovered by ingest_height/recheck_height in the meantime.
+        return Ok(());
+    };
+
+    match try_getblock_fallback(rpc, height, &hash) {
+        FallbackOutcome::Recovered(retained) => {
+            let n = retained.transactions.len();
+            insert_transactions(conn, uncaptured_id, &retained)?;
+            db::mark_body_recovered(conn, uncaptured_id, "getblock")?;
+            let now = Utc::now().to_rfc3339();
+            db::resolve_gap(conn, height, &now, "recovered via getBlock")?;
+            info!("height {height}: gap recovered via getBlock ({n} tx)");
+        }
+        FallbackOutcome::NoBody | FallbackOutcome::DecodeFailed(_) => {
+            // Stays open; already logged by try_getblock_fallback if it
+            // was a decode failure. Next cycle will retry until it falls
+            // out of the serving window.
+        }
+    }
+    Ok(())
+}
+
+/// Runs the fallback decoder against a block whose getBlockDetails call
+/// already returned full data, purely to cross-check the decoder's output
+/// against the RPC's own - see config.rs `decoder_selfcheck`. Never
+/// affects storage; only logs and counts mismatches.
+fn selfcheck(conn: &Connection, rpc: &RpcClient, height: u64, details: &BlockDetailsInfo) {
+    let raw = match rpc.get_block_raw(height) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return, // already outside the getBlock window somehow; not a mismatch
+        Err(e) => {
+            warn!("height {height}: selfcheck getBlock call failed: {e:#}");
+            return;
+        }
+    };
+    let decoded = match decode::decode_retained_block(&raw, height, &details.header.hash) {
+        Ok(d) => d,
+        Err(e) => {
+            // A hash mismatch here usually means the two RPC calls
+            // straddled a reorg, not a decoder bug - don't count it.
+            warn!("height {height}: selfcheck decode inconclusive this cycle: {e:#}");
+            return;
+        }
+    };
+    let mine = serde_json::to_value(&decoded).ok();
+    let theirs = details.retained.as_ref().and_then(|r| serde_json::to_value(r).ok());
+    if mine != theirs {
+        error!("height {height}: decoder selfcheck MISMATCH against getBlockDetails output");
+        if let Err(e) = increment_mismatch_counter(conn) {
+            warn!("failed to record selfcheck mismatch counter: {e:#}");
+        }
+    }
+}
+
+fn increment_mismatch_counter(conn: &Connection) -> Result<()> {
+    let current: i64 = db::get_state(conn, "decoder_mismatches")?
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    db::set_state(conn, "decoder_mismatches", &(current + 1).to_string())
+}
+
+fn record_gap(conn: &Connection, height: u64, hash: Option<&str>, now: &str, note: &str) -> Result<()> {
+    db::record_gap(conn, height, hash, now, note)
+}
+
+/// Inserts (or no-ops if already present) the `blocks` row for a header
+/// that has no usable body, and records the gap. Idempotent the same way
+/// `store_block` is.
+fn record_gap_block(conn: &Connection, details: &BlockDetailsInfo, note: &str) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     let h = &details.header;
 
+    if db::canonical_hash_at(conn, h.height)?.is_some_and(|(_, known_hash)| known_hash == h.hash) {
+        // Row already exists (e.g. from an earlier attempt) - just make
+        // sure the gap is on record, in case this note is more specific.
+        db::record_gap(conn, h.height, Some(&h.hash), &now, note)?;
+        return Ok(());
+    }
+
+    insert_block_header_row(conn, h, false, None, &now)?;
+    db::record_gap(conn, h.height, Some(&h.hash), &now, note)?;
+    Ok(())
+}
+
+/// Stores a block whose body IS available (`details.retained` must be
+/// `Some`), from whichever source. `body_source` is `"details"` when it
+/// came straight from getBlockDetails, `"getblock"` when the fallback
+/// decoder had to reconstruct it.
+fn store_block(conn: &Connection, details: &BlockDetailsInfo, body_source: &str) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    let h = &details.header;
+    let retained = details
+        .retained
+        .as_ref()
+        .expect("store_block called without a retained body - caller bug");
+
     // Already recorded with this exact hash? Nothing new to do (idempotent
-    // re-poll of an unchanged height).
+    // re-poll of an unchanged height), unless it was previously stored as
+    // a gap and we can now upgrade it in place.
     if let Some((_, known_hash)) = db::canonical_hash_at(conn, h.height)? {
         if known_hash == h.hash {
+            if let Some(block_id) = db::uncaptured_block_id(conn, h.height, &h.hash)? {
+                insert_transactions(conn, block_id, retained)?;
+                db::mark_body_recovered(conn, block_id, body_source)?;
+                db::resolve_gap(conn, h.height, &now, &format!("recovered via {body_source}"))?;
+            }
             return Ok(());
         }
     }
 
-    let body_captured = details.retained.is_some();
-    let (reward, fees, proof_class) = match &details.retained {
-        Some(r) => (
-            Some(r.reward_micronoid as i64),
-            Some(r.total_fees_micronoid.clone()),
-            Some(r.proof_class.clone()),
-        ),
-        None => (None, None, None),
-    };
+    let block_id = insert_block_header_row(conn, h, true, Some(body_source), &now)?;
+    insert_transactions(conn, block_id, retained)?;
+    Ok(())
+}
 
+fn insert_block_header_row(
+    conn: &Connection,
+    h: &BlockHeaderInfo,
+    body_captured: bool,
+    body_source: Option<&str>,
+    now: &str,
+) -> Result<i64> {
     conn.execute(
         "INSERT INTO blocks (height, hash, prev_hash, state_root, tx_root, timestamp, miner,
-            nonce_hex, difficulty_target, proof_class, reward_micronoid, total_fees_micronoid,
-            body_captured, first_seen_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+            nonce_hex, difficulty_target, body_captured, body_source, first_seen_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
          ON CONFLICT(height, hash) DO NOTHING",
         params![
             h.height as i64,
@@ -141,10 +353,8 @@ fn store_block(conn: &Connection, details: &BlockDetailsInfo) -> Result<()> {
             h.miner,
             h.nonce_hex,
             h.difficulty_target,
-            proof_class,
-            reward,
-            fees,
             body_captured as i64,
+            body_source,
             now,
         ],
     )?;
@@ -160,18 +370,20 @@ fn store_block(conn: &Connection, details: &BlockDetailsInfo) -> Result<()> {
         params![block_id, now],
     )?;
 
-    if !body_captured {
-        db::record_gap(
-            conn,
-            h.height,
-            Some(&h.hash),
-            &now,
-            "body already pruned by node on first ingest attempt",
-        )?;
-        return Ok(());
-    }
+    Ok(block_id)
+}
 
-    let retained = details.retained.as_ref().unwrap();
+fn insert_transactions(conn: &Connection, block_id: i64, retained: &RetainedBlockInfo) -> Result<()> {
+    conn.execute(
+        "UPDATE blocks SET proof_class = ?2, reward_micronoid = ?3, total_fees_micronoid = ?4 WHERE id = ?1",
+        params![
+            block_id,
+            retained.proof_class,
+            retained.reward_micronoid as i64,
+            retained.total_fees_micronoid,
+        ],
+    )?;
+
     for tx in &retained.transactions {
         conn.execute(
             "INSERT INTO transactions (block_id, position, txid, page_count, fee_micronoid,

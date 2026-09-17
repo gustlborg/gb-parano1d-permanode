@@ -12,8 +12,10 @@ one central server. Point it at your own node's local RPC and it builds up
 its own local, permanent transaction history for as long as it runs.
 
 Status: the indexer, the API server and a first explorer frontend all work
-and have been tested against a live mainnet node. The frontend covers the
-core views (blocks, transactions, addresses) but is not feature-complete.
+and have been tested against a live mainnet node, including a fallback
+decoder that recovers ~2.2% of blocks a node RPC bug would otherwise make
+permanently unrecoverable (see below). The frontend covers the core views
+(blocks, transactions, addresses, live mempool) but is not feature-complete.
 
 ## Layout
 
@@ -31,7 +33,16 @@ This is a Cargo workspace:
   features that have no Parano1d equivalent, and its name and logos are
   trademarked regardless of the code license.
 
-## Running it
+## Building
+
+Needs a C compiler and libclang (`clang`) in addition to Rust — the indexer
+links the node's own `noid_chain` crate (via git, pinned to the node's
+`v1.1.0` tag) to work around a node RPC bug (see below), and that crate's
+storage dependency needs bindgen. On Ubuntu: `apt install clang`. If
+bindgen fails with `'stdarg.h' file not found`, your GCC's own resource
+headers aren't where clang expects them; point it there explicitly, e.g.
+`BINDGEN_EXTRA_CLANG_ARGS="-I/usr/lib/gcc/x86_64-linux-gnu/13/include" cargo build --release`
+(adjust the GCC version to whatever `ls /usr/lib/gcc/x86_64-linux-gnu/*/include/stdarg.h` shows).
 
 ```sh
 cargo build --release
@@ -68,6 +79,24 @@ needed to reconstruct the protocol's own inclusion receipts later, and a
 canonical/orphaned status history (chain reorganizations are logged, not
 silently overwritten, so a transaction that was briefly included in a block
 that later got reorged out remains visible as such).
+
+### Working around a node RPC bug (getBlock fallback)
+
+The node's `getBlockDetails`/`getRecentTransactions` RPCs report no
+transactions (`retained: null`) for roughly 1 in 45 canonical blocks —
+every "marker" block of a multi-block commit (a catch-up suffix of ≥2
+blocks, or a reorg that applies ≥2 blocks) — even though the node still
+has the block body; it's just served through the wrong internal accessor.
+Full writeup: `docs/ANLEITUNG-getblock-decoder.md`. Since the RPC still
+serves the raw body through `paranoid_getBlock`, the indexer decodes those
+blocks itself (linking the node's own crates so the field derivation stays
+byte-identical to the node's own RPC) instead of recording a permanent
+gap. This is on by default (`getblock_fallback = true`); a continuous
+self-check (`decoder_selfcheck = true`) decodes every normal block a
+second way too and logs/counts any disagreement, in case a future node
+version changes the wire format. Gaps recorded before this existed, or
+outside the ~42-block window the node still serves bodies for, cannot be
+recovered — there is no RPC path to older bodies.
 
 ### Configuration
 
