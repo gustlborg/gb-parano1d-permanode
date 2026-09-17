@@ -399,23 +399,32 @@ export async function addressView(address, page = 1) {
   const rows = result.transactions.map((tx) => addressTxRow(tx, address)).join("");
   const totalPages = Math.max(1, Math.ceil(result.total / result.page_size));
   const b = result.balance;
+  const liveKnown = result.live_balance_micronoid !== null && result.live_balance_micronoid !== undefined;
   const html = `
     <div class="panel">
       <h2>Address</h2>
       <p class="mono">${address}</p>
       <div class="mempool-stats">
-        <div class="stat"><div class="v">${noid(b.confirmed_balance_micronoid)}</div><div class="k">Confirmed balance</div></div>
-        <div class="stat"><div class="v">${b.confirmed_utxos}</div><div class="k">Confirmed UTXOs</div></div>
-        <div class="stat"><div class="v">${noid(b.total_received_micronoid)}</div><div class="k">Total received</div></div>
-        <div class="stat"><div class="v">${noid(b.total_sent_micronoid)}</div><div class="k">Total sent</div></div>
+        <div class="stat"><div class="v hint" title="Read live from the node's current
+state, independent of anything this
+permanode has recorded - the true
+balance right now.">${liveKnown ? noid(result.live_balance_micronoid) : "?"}</div><div class="k">Current balance (live)</div></div>
+        <div class="stat"><div class="v">${liveKnown ? result.live_utxo_count : "?"}</div><div class="k">Current UTXOs (live)</div></div>
+        <div class="stat"><div class="v hint" title="From this permanode's own recorded
+history only - transactions it has
+itself seen since it started running.">${noid(b.confirmed_balance_micronoid)}</div><div class="k">Recorded balance</div></div>
+        <div class="stat"><div class="v">${b.confirmed_utxos}</div><div class="k">Recorded UTXOs</div></div>
+        <div class="stat"><div class="v">${noid(b.total_received_micronoid)}</div><div class="k">Total received (recorded)</div></div>
+        <div class="stat"><div class="v">${noid(b.total_sent_micronoid)}</div><div class="k">Total sent (recorded)</div></div>
       </div>
       <p>${result.total} transaction(s) recorded involving this address.</p>
       ${
         result.total === 0
-          ? `<p class="hint-block">This permanode has recorded no activity at all for this address -
-             the figures above are not necessarily its real balance, only what we've
-             seen since we started recording. If it already held funds before that,
-             this page has no way to know.</p>`
+          ? `<p class="hint-block">This permanode has recorded no transaction activity for this
+             address since it started running - the "recorded" figures above are
+             genuinely zero, not missing data. The "live" balance above comes
+             straight from the node's current state instead, so it's accurate
+             even though we have no transaction history to show for it.</p>`
           : ""
       }
     </div>
