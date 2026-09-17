@@ -23,10 +23,28 @@ use rusqlite::{params, Connection, OptionalExtension};
 pub fn open(path: &str) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
+    // FULL is SQLite's default, set explicitly because it is what makes a
+    // committed block survive a power cut: every commit fsyncs the WAL
+    // before returning, and recovery replays only whole, checksummed
+    // frames. (NORMAL would keep the file consistent but could drop the
+    // last few commits.) Writers must also wrap each logical unit - a
+    // block with all its rows - in one transaction, see `write_tx`.
+    conn.pragma_update(None, "synchronous", "FULL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    // The indexer's main loop, its sweep thread and the API all share the
+    // file; WAL lets readers run alongside a writer, but two writers still
+    // queue - long enough for a whole block insert or sweep commit.
+    conn.busy_timeout(std::time::Duration::from_secs(15))?;
     init_schema(&conn)?;
     migrate(&conn)?;
     Ok(conn)
+}
+
+/// Starts a write transaction on a shared `&Connection`. Callers commit
+/// with `tx.commit()`; dropping it rolls back, so a crash or error between
+/// the statements of one logical unit leaves nothing half-written.
+pub fn write_tx(conn: &Connection) -> Result<rusqlite::Transaction<'_>> {
+    Ok(conn.unchecked_transaction()?)
 }
 
 /// Idempotent schema migrations for columns added after the initial
@@ -37,6 +55,13 @@ fn migrate(conn: &Connection) -> Result<()> {
     add_column_if_missing(conn, "blocks", "body_source", "TEXT")?;
     add_column_if_missing(conn, "ingest_gaps", "resolved_at", "TEXT")?;
     add_column_if_missing(conn, "ingest_gaps", "resolution", "TEXT")?;
+    // Unspent-output queries match outputs against inputs by creation_id;
+    // without these every such query is outputs x inputs.
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_inputs_creation ON tx_inputs(creation_id);
+         CREATE INDEX IF NOT EXISTS idx_outputs_creation ON tx_outputs(creation_id);
+         CREATE INDEX IF NOT EXISTS idx_blocks_timestamp ON blocks(timestamp);",
+    )?;
     Ok(())
 }
 
@@ -287,23 +312,25 @@ pub fn prune_older_than(conn: &Connection, cutoff_unix: i64) -> Result<usize> {
         .collect::<rusqlite::Result<_>>()?;
 
     for block_id in &block_ids {
-        conn.execute(
+        let tx = write_tx(conn)?;
+        tx.execute(
             "DELETE FROM tx_page_hashes WHERE tx_id IN (SELECT id FROM transactions WHERE block_id = ?1)",
             params![block_id],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM tx_inputs WHERE tx_id IN (SELECT id FROM transactions WHERE block_id = ?1)",
             params![block_id],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM tx_outputs WHERE tx_id IN (SELECT id FROM transactions WHERE block_id = ?1)",
             params![block_id],
         )?;
-        conn.execute("DELETE FROM transactions WHERE block_id = ?1", params![block_id])?;
-        conn.execute(
+        tx.execute("DELETE FROM transactions WHERE block_id = ?1", params![block_id])?;
+        tx.execute(
             "UPDATE blocks SET body_captured = 0 WHERE id = ?1",
             params![block_id],
         )?;
+        tx.commit()?;
     }
     Ok(block_ids.len())
 }

@@ -16,9 +16,18 @@ pub struct RpcClient {
 
 impl RpcClient {
     pub fn new(url: String) -> Self {
+        // ureq has no timeouts by default. A node that hangs (or a
+        // half-open socket after it crashed) would otherwise block the
+        // poll loop forever, and systemd only restarts dead processes,
+        // not stuck ones. Loopback calls finish in milliseconds; a
+        // minute is generous even for a large getBlock.
+        let config = ureq::Agent::config_builder()
+            .timeout_connect(Some(std::time::Duration::from_secs(5)))
+            .timeout_global(Some(std::time::Duration::from_secs(60)))
+            .build();
         Self {
             url,
-            agent: ureq::Agent::new_with_defaults(),
+            agent: config.new_agent(),
         }
     }
 
