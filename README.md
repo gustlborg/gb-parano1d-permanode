@@ -1,111 +1,144 @@
 # parano1d-permanode
 
-A Parano1d node only keeps full transaction bodies for a short window (18
-blocks by protocol, roughly the last few minutes) before pruning them —
-headers stay forever, but the actual transaction history does not. This
-project fills that gap: a small companion program you run next to your own
-Parano1d node that watches every new block as it arrives and records the
-transactions permanently, in a compact form, before the node discards them.
+A Parano1d node keeps full transaction bodies only for a short window
+(a few minutes) before pruning them. Headers stay forever, the actual
+transaction history does not. This program runs next to your own node,
+records every transaction permanently before the node discards it, and
+serves a block explorer over that history.
 
-It is meant to be installed by anyone running a Parano1d node, not just on
-one central server. Point it at your own node's local RPC and it builds up
-its own local, permanent transaction history for as long as it runs.
+One binary, one config file, one SQLite database. Anyone running a
+Parano1d node can run it; it only talks to the node's local RPC.
 
-Status: the indexer, the API server and a first explorer frontend all work
-and have been tested against a live mainnet node, including a fallback
-decoder that recovers ~2.2% of blocks a node RPC bug would otherwise make
-permanently unrecoverable (see below). The frontend covers the core views
-(dashboard, blocks, transactions, addresses, live mempool, rich list).
+## Quick start
 
-## Layout
+1. Have a Parano1d node running and fully synced, with its RPC on the
+   default `127.0.0.1:9601`.
+2. Download the latest `parano1d-permanode` binary from the releases page
+   (Linux x86_64) or build it yourself (see below).
+3. Run it in a directory of your choice:
 
-This is a Cargo workspace:
+   ```sh
+   mkdir -p ~/permanode && cd ~/permanode
+   ./parano1d-permanode
+   ```
 
-- `core/` — shared library: the SQLite schema and all read/write queries.
-- `indexer/` — the binary that polls a node and fills the database.
-- `api/` — a small JSON API (axum) that reads the database and also serves
-  the static frontend, so a self-hoster only needs these two binaries plus
-  the `frontend/site/` directory.
-- `frontend/site/` — the explorer UI: plain HTML/CSS/JS (ES modules), no
-  build step, no framework, no third-party requests (fonts are bundled
-  under `fonts/`, both SIL OFL). Six views: dashboard with the animated
-  block chain, block, transaction, address, live mempool, rich list. The
-  design tokens and layout rules it follows are documented in
-  `docs/design/README.md`.
+   The first start writes a commented `permanode.toml` next to the binary
+   and a `permanode.sqlite3` database, then starts indexing and serving.
+
+4. Open `http://127.0.0.1:8420/`.
+
+Recording starts from the oldest block the node can still serve a body
+for (about 40 blocks back). History from before the first start is gone,
+the node itself no longer has it either.
+
+## What you get
+
+- **Indexer**: polls the node, stores every canonical block's header and
+  all transactions (sender, inputs, outputs, amounts, fee, coinbase /
+  development-payout flags, the Merkle-path data for the protocol's
+  inclusion receipts) and logs chain reorganizations instead of
+  overwriting them.
+- **Explorer**: dashboard with the live block chain and mempool, block,
+  transaction and address pages, live mempool, rich list. Plain
+  HTML/CSS/JS, no build step, no third-party requests (fonts are bundled,
+  SIL OFL). Compiled into the binary.
+- **JSON API** under `/api/v1/` (`stats`, `blocks`, `block/height/{h}`,
+  `block/hash/{h}`, `tx/{txid}`, `address/{a}`, `address/{a}/utxos`,
+  `mempool`, `richlist`, `gaps`).
+- **Live balances for every address**: the node's UTXO state is swept
+  periodically (`paranoid_getStateMap` + `paranoid_getSlot`), so the rich
+  list and address balances are complete and verified against the node's
+  own totals, not reconstructed from partial history.
+
+## Configuration
+
+`permanode.toml` (see `permanode/permanode.example.toml` for every key):
+
+- `rpc_url` — the node's RPC, default `http://127.0.0.1:9601`.
+- `listen` — where the explorer listens, default `127.0.0.1:8420`. Keep it
+  on loopback for a public instance and put a TLS reverse proxy in front.
+- `retention_days` — how long to keep transaction detail (0 = forever,
+  the default). Block headers are always kept.
+- `poll_interval_seconds` — how often to check the node (default 5).
+  Keep this well below the node's body window.
+- `scan_slots_every_cycles` — how often the UTXO sweep runs (0 disables it).
+
+Subcommands: `parano1d-permanode index` runs only the indexer,
+`parano1d-permanode serve` only the explorer over an existing database.
+The default runs both in one process.
+
+## Running as a service
+
+```ini
+[Unit]
+Description=Parano1d permanode (indexer + explorer)
+After=network-online.target
+
+[Service]
+WorkingDirectory=/home/you/permanode
+ExecStart=/home/you/permanode/parano1d-permanode
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+The indexer must not fall behind the node's pruning: an outage longer
+than roughly 14 minutes leaves permanent gaps for that time (they are
+listed under `/api/v1/gaps` and counted in the status bar).
+
+For a public instance, a reverse proxy with TLS, e.g. Caddy:
+
+```
+explorer.example.org {
+    reverse_proxy 127.0.0.1:8420
+}
+```
 
 ## Building
 
-Needs a C compiler and libclang (`clang`) in addition to Rust — the indexer
-links the node's own `noid_chain` crate (via git, pinned to the node's
-`v1.1.0` tag) to work around a node RPC bug (see below), and that crate's
-storage dependency needs bindgen. On Ubuntu: `apt install clang`. If
-bindgen fails with `'stdarg.h' file not found`, your GCC's own resource
-headers aren't where clang expects them; point it there explicitly, e.g.
-`BINDGEN_EXTRA_CLANG_ARGS="-I/usr/lib/gcc/x86_64-linux-gnu/13/include" cargo build --release`
-(adjust the GCC version to whatever `ls /usr/lib/gcc/x86_64-linux-gnu/*/include/stdarg.h` shows).
+Rust (stable), a C compiler and libclang (`apt install clang`). The
+indexer links the node's own `noid_chain` crate (git, pinned to the
+node's `v1.1.0` tag) for the block decoder described below; that crate's
+storage dependency needs bindgen.
 
 ```sh
 cargo build --release
-
-# 1. the indexer, next to your own already-running Parano1d node
-cd run   # or any directory you want the database and config in
-cp ../indexer/permanode.example.toml permanode.toml   # edit if your node RPC isn't the default
-../target/release/parano1d-permanode-indexer --config permanode.toml
-
-# 2. the API + frontend, pointed at that same database
-../target/release/permanode-api \
-  --db-path permanode.sqlite3 \
-  --site-dir ../frontend/site \
-  --listen 127.0.0.1:8420
+./target/release/parano1d-permanode --help
 ```
 
-Then open `http://127.0.0.1:8420/`. `--listen` defaults to loopback only;
-change it if you want it reachable from elsewhere, e.g. behind your own
-reverse proxy.
+If bindgen fails with `'stdarg.h' file not found`, point it at your
+GCC's resource headers:
+`BINDGEN_EXTRA_CLANG_ARGS="-I/usr/lib/gcc/x86_64-linux-gnu/13/include" cargo build --release`
+(adjust the GCC version to what `ls /usr/lib/gcc/x86_64-linux-gnu/*/include/stdarg.h` shows).
 
-It expects a Parano1d node already running and reachable on its RPC port
-(default `127.0.0.1:9601`, no separate setup needed on the node side beyond
-running it normally). It creates/uses a SQLite database and starts recording
-from the current chain tip forward — it cannot recover transaction history
-from before it was first started, since the node itself no longer has that
-data either.
+Layout: `core/` is the SQLite schema and queries, `permanode/` the binary
+(indexer, node RPC client, block decoder, explorer server), `frontend/site/`
+the explorer UI, `docs/` design notes and the node bug report below.
 
-### What gets recorded
+## Working around a node RPC bug
 
-Per transaction: timestamp, block height, block hash and parent hash, txid,
-sender (input owner, null for coinbase/dev-payout), inputs, outputs and
-amounts, fee, a coinbase/development-payout flag, the raw Merkle-path data
-needed to reconstruct the protocol's own inclusion receipts later, and a
-canonical/orphaned status history (chain reorganizations are logged, not
-silently overwritten, so a transaction that was briefly included in a block
-that later got reorged out remains visible as such).
+The node's `getBlockDetails` / `getRecentTransactions` return no
+transactions (`retained: null`) for roughly 1 in 45 canonical blocks: every
+"marker" block of a multi-block commit, even though the node still holds
+the body. Full analysis and a reproduction script:
+`docs/node-rpc-marker-bug/`. The raw body is still served by
+`paranoid_getBlock`, so the indexer decodes those blocks itself, linking
+the node's own crates so the derived fields stay byte-identical to the
+node's RPC. This is on by default (`getblock_fallback`); a continuous
+self-check (`decoder_selfcheck`) decodes every normal block a second way
+and counts any disagreement, in case a future node version changes the
+wire format.
 
-### Working around a node RPC bug (getBlock fallback)
+## Crash safety
 
-The node's `getBlockDetails`/`getRecentTransactions` RPCs report no
-transactions (`retained: null`) for roughly 1 in 45 canonical blocks —
-every "marker" block of a multi-block commit (a catch-up suffix of ≥2
-blocks, or a reorg that applies ≥2 blocks) — even though the node still
-has the block body; it's just served through the wrong internal accessor.
-Full writeup: `docs/ANLEITUNG-getblock-decoder.md`. Since the RPC still
-serves the raw body through `paranoid_getBlock`, the indexer decodes those
-blocks itself (linking the node's own crates so the field derivation stays
-byte-identical to the node's own RPC) instead of recording a permanent
-gap. This is on by default (`getblock_fallback = true`); a continuous
-self-check (`decoder_selfcheck = true`) decodes every normal block a
-second way too and logs/counts any disagreement, in case a future node
-version changes the wire format. Gaps recorded before this existed, or
-outside the ~42-block window the node still serves bodies for, cannot be
-recovered — there is no RPC path to older bodies.
-
-### Configuration
-
-See `indexer/permanode.example.toml`. The two settings that matter most:
-
-- `retention_days` — how long to keep full transaction detail before
-  pruning it (0 = forever). Block headers are always kept regardless.
-- `poll_interval_seconds` — how often to check the node for new blocks.
+SQLite in WAL mode with `synchronous=FULL`: every commit is fsynced, and
+each block is written in one transaction, so a power cut leaves either the
+whole block or nothing. For backups use
+`sqlite3 permanode.sqlite3 ".backup copy.sqlite3"` while it runs, or a
+filesystem snapshot of the directory.
 
 ## License
 
-AGPL-3.0 (see `LICENSE`) — proposed default, not yet finalized.
+AGPL-3.0-or-later, see `LICENSE`.

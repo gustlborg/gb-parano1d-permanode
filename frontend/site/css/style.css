@@ -1,5 +1,5 @@
-/* Design tokens - see docs/design/README.md (handoff from the Claude Design
-   prototype). Swap only --accent / --accent-rgb to re-theme. */
+/* Design tokens - see docs/design/README.md. Swap only --accent /
+   --accent-rgb to re-theme. */
 :root {
   --bg: #050908;
   --bg-bar: #070d0c;

@@ -65,6 +65,17 @@ pub struct Config {
     /// against the shared node. 0 disables it.
     #[serde(default = "default_scan_slots_every_cycles")]
     pub scan_slots_every_cycles: u64,
+
+    /// Address the explorer + JSON API listen on. Loopback by default;
+    /// put a reverse proxy with TLS in front for a public instance rather
+    /// than exposing this port directly.
+    #[serde(default = "default_listen")]
+    pub listen: String,
+
+    /// Serve the explorer frontend from this directory instead of the copy
+    /// built into the binary - only useful while editing the frontend.
+    #[serde(default)]
+    pub site_dir: Option<String>,
 }
 
 fn default_rpc_url() -> String {
@@ -94,6 +105,9 @@ fn default_refresh_addresses_every_cycles() -> u64 {
 fn default_scan_slots_every_cycles() -> u64 {
     360 // ~30min at the default 5s poll interval
 }
+fn default_listen() -> String {
+    "127.0.0.1:8420".to_string()
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -108,12 +122,14 @@ impl Default for Config {
             decoder_selfcheck: default_true(),
             refresh_addresses_every_cycles: default_refresh_addresses_every_cycles(),
             scan_slots_every_cycles: default_scan_slots_every_cycles(),
+            listen: default_listen(),
+            site_dir: None,
         }
     }
 }
 
 impl Config {
-    /// Load from `path`, creating it with commented defaults if missing —
+    /// Load from `path`, creating it with commented defaults if missing -
     /// mirrors the node binary's own `-c/--config` behaviour.
     pub fn load_or_create(path: &Path) -> Result<Config> {
         if !path.exists() {
@@ -132,7 +148,9 @@ impl Config {
                  decoder_selfcheck = {}\n\
                  refresh_addresses_every_cycles = {}\n\
                  # 0 disables the live-state sweep\n\
-                 scan_slots_every_cycles = {}\n",
+                 scan_slots_every_cycles = {}\n\
+                 # explorer + API listen address (put a TLS reverse proxy in front for the public)\n\
+                 listen = {:?}\n",
                 cfg.rpc_url,
                 cfg.db_path,
                 cfg.poll_interval_seconds,
@@ -143,6 +161,7 @@ impl Config {
                 cfg.decoder_selfcheck,
                 cfg.refresh_addresses_every_cycles,
                 cfg.scan_slots_every_cycles,
+                cfg.listen,
             );
             std::fs::write(path, toml_str)?;
             return Ok(cfg);

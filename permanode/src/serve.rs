@@ -1,40 +1,26 @@
+//! The explorer: JSON API over the indexer's database plus the static
+//! frontend, which is compiled into the binary so a self-hoster only ever
+//! deals with one file. Runs in the same process as the indexer by
+//! default (see main.rs), on its own database connection.
+
+use crate::config::Config;
 use anyhow::Result;
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
-    response::{IntoResponse, Json},
+    http::{header, StatusCode, Uri},
+    response::{IntoResponse, Json, Response},
     routing::get,
     Router,
 };
-use clap::Parser;
+use include_dir::{include_dir, Dir};
 use permanode_core::{db, live_rpc, queries};
 use rusqlite::Connection;
 use serde::Deserialize;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 
-#[derive(Parser, Debug)]
-#[command(version)]
-struct Args {
-    /// SQLite database written by the indexer.
-    #[arg(long, default_value = "permanode.sqlite3")]
-    db_path: PathBuf,
-
-    /// Directory of static frontend files to serve.
-    #[arg(long, default_value = "site")]
-    site_dir: PathBuf,
-
-    /// Address to listen on.
-    #[arg(long, default_value = "127.0.0.1:8420")]
-    listen: String,
-
-    /// Node JSON-RPC endpoint, used only for the live mempool view (block
-    /// data always comes from the indexer's database, never from here).
-    #[arg(long, default_value = "http://127.0.0.1:9601")]
-    rpc_url: String,
-}
+static SITE: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../frontend/site");
 
 struct AppState {
     conn: Mutex<Connection>,
@@ -72,21 +58,14 @@ impl IntoResponse for NotFound {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let args = Args::parse();
-
-    let conn = db::open(args.db_path.to_str().expect("db_path must be valid UTF-8"))?;
+pub async fn run(cfg: &Config) -> Result<()> {
+    let conn = db::open(&cfg.db_path)?;
     let state = Arc::new(AppState {
         conn: Mutex::new(conn),
-        rpc: live_rpc::RpcClient::new(args.rpc_url.clone()),
+        rpc: live_rpc::RpcClient::new(cfg.rpc_url.clone()),
     });
 
-    let index_file = args.site_dir.join("index.html");
-    let static_service = ServeDir::new(&args.site_dir).fallback(ServeFile::new(index_file));
-
-    let app = Router::new()
+    let api = Router::new()
         .route("/api/v1/stats", get(get_stats))
         .route("/api/v1/blocks", get(get_blocks))
         .route("/api/v1/block/height/{height}", get(get_block_by_height))
@@ -96,15 +75,55 @@ async fn main() -> Result<()> {
         .route("/api/v1/address/{address}/utxos", get(get_address_utxos))
         .route("/api/v1/gaps", get(get_gaps))
         .route("/api/v1/richlist", get(get_richlist))
-        .route("/api/v1/mempool", get(get_mempool))
-        .fallback_service(static_service)
-        .layer(CorsLayer::permissive())
-        .with_state(state);
+        .route("/api/v1/mempool", get(get_mempool));
 
-    log::info!("listening on http://{}", args.listen);
-    let listener = tokio::net::TcpListener::bind(&args.listen).await?;
+    let app = match &cfg.site_dir {
+        Some(dir) => {
+            log::info!("serving frontend from {dir} instead of the built-in copy");
+            let index_file = std::path::Path::new(dir).join("index.html");
+            api.fallback_service(ServeDir::new(dir).fallback(ServeFile::new(index_file)))
+        }
+        None => api.fallback(embedded_site),
+    }
+    .layer(CorsLayer::permissive())
+    .with_state(state);
+
+    log::info!("explorer listening on http://{}", cfg.listen);
+    let listener = tokio::net::TcpListener::bind(&cfg.listen).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Serves the frontend compiled into the binary. Unknown paths get
+/// index.html so the client-side router can take over (block/tx/address
+/// URLs are all handled there), the same fallback ServeDir does in
+/// `site_dir` mode.
+async fn embedded_site(uri: Uri) -> Response {
+    let path = uri.path().trim_start_matches('/');
+    let (file, spa) = match SITE.get_file(path) {
+        Some(f) => (f, false),
+        None => match SITE.get_file("index.html") {
+            Some(f) => (f, true),
+            None => return (StatusCode::NOT_FOUND, "not found").into_response(),
+        },
+    };
+    let mime = if spa {
+        mime_guess::mime::TEXT_HTML_UTF_8
+    } else {
+        mime_guess::from_path(file.path()).first_or_octet_stream()
+    };
+    // HTML is always re-validated (it is what changes on an update);
+    // scripts, styles and fonts may be cached for a while.
+    let cache = if mime.type_() == mime_guess::mime::TEXT && mime.subtype() == mime_guess::mime::HTML {
+        "no-cache"
+    } else {
+        "public, max-age=3600"
+    };
+    (
+        [(header::CONTENT_TYPE, mime.as_ref().to_string()), (header::CACHE_CONTROL, cache.to_string())],
+        file.contents(),
+    )
+        .into_response()
 }
 
 #[derive(serde::Serialize)]

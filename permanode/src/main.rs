@@ -1,0 +1,96 @@
+use anyhow::{bail, Result};
+use clap::{Parser, Subcommand};
+use parano1d_permanode::config::Config;
+use parano1d_permanode::rpc::RpcClient;
+use parano1d_permanode::{indexer, serve};
+use permanode_core::db;
+use std::path::PathBuf;
+use std::time::Duration;
+
+/// Records the transaction history a Parano1d node itself only keeps for
+/// a few minutes, and serves a block explorer over it.
+#[derive(Parser, Debug)]
+#[command(version)]
+struct Args {
+    /// Path to the TOML config file. A missing file is created with safe
+    /// defaults, matching the node's own -c/--config behaviour.
+    #[arg(short, long, default_value = "permanode.toml")]
+    config: PathBuf,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Index the node and serve the explorer, in one process (the default).
+    Run,
+    /// Only index the node into the database.
+    Index,
+    /// Only serve the explorer + API over an existing database.
+    Serve,
+}
+
+fn main() -> Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    let args = Args::parse();
+    let cfg = Config::load_or_create(&args.config)?;
+    log::info!("loaded config from {}", args.config.display());
+    log::info!("node RPC: {}", cfg.rpc_url);
+    log::info!("database: {}", cfg.db_path);
+    log::info!(
+        "retention: {}",
+        if cfg.retention_days == 0 {
+            "unlimited".to_string()
+        } else {
+            format!("{} day(s)", cfg.retention_days)
+        }
+    );
+
+    match args.command.unwrap_or(Command::Run) {
+        Command::Index => run_indexer(&cfg),
+        Command::Serve => run_server(&cfg),
+        Command::Run => run_both(cfg),
+    }
+}
+
+fn run_indexer(cfg: &Config) -> Result<()> {
+    let conn = db::open(&cfg.db_path)?;
+    let rpc = RpcClient::new(cfg.rpc_url.clone());
+    indexer::run(&conn, &rpc, cfg)
+}
+
+fn run_server(cfg: &Config) -> Result<()> {
+    tokio::runtime::Runtime::new()?.block_on(serve::run(cfg))
+}
+
+/// Indexer on its own thread, explorer on this one. Either half dying
+/// ends the process so a supervisor (systemd) restarts both together;
+/// half a permanode silently limping on is worse than a clean restart.
+fn run_both(cfg: Config) -> Result<()> {
+    let indexer_cfg = cfg.clone();
+    let indexer_thread = std::thread::Builder::new()
+        .name("indexer".into())
+        .spawn(move || run_indexer(&indexer_cfg))?;
+
+    let server_thread = std::thread::Builder::new()
+        .name("explorer".into())
+        .spawn(move || run_server(&cfg))?;
+
+    loop {
+        if indexer_thread.is_finished() {
+            return match indexer_thread.join() {
+                Ok(r) => r.and_then(|()| bail!("indexer stopped")),
+                Err(_) => bail!("indexer thread panicked"),
+            };
+        }
+        if server_thread.is_finished() {
+            return match server_thread.join() {
+                Ok(r) => r.and_then(|()| bail!("explorer stopped")),
+                Err(_) => bail!("explorer thread panicked"),
+            };
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}

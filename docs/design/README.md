@@ -7,12 +7,10 @@ die bereits gefundenen Blöcke; beim Blockfund wandert die Kette in ~3,4 s nach 
 Enthalten sind sechs Views: Dashboard, Block, Transaction, Address, Live Mempool, Rich list.
 
 ## About the Design Files
-`Parano1d Explorer.dc.html` in diesem Ordner ist eine **Design-Referenz**, kein Produktionscode.
-Sie ist als streamende Design-Component (React-artige Laufzeit, Inline-Styles, Mock-Daten) gebaut.
-Zielumgebung laut Briefing ist **Plain HTML/CSS/JS mit plain CSS** — die Datei also *nicht* übernehmen,
-sondern das Markup, die Tokens und das Verhalten in der bestehenden Frontend-Struktur nachbauen
-(semantisches HTML, eine `explorer.css`, ein `explorer.js` mit Polling + Rendering).
-`reference_current_main.png` zeigt den bisherigen Stand zum Vergleich.
+Die ursprüngliche Design-Referenz war ein interaktiver Prototyp (React-artige Laufzeit, Inline-Styles,
+Mock-Daten) und ist nicht Teil dieses Repos. Zielumgebung ist **Plain HTML/CSS/JS mit plain CSS** —
+Markup, Tokens und Verhalten sind in `frontend/site/` nachgebaut (`css/style.css`, `js/`).
+`before-redesign.png` zeigt den Stand davor zum Vergleich.
 
 ## Fidelity
 **Hi-fi.** Farben, Typografie, Abstände, Radien und Animationsparameter sind final und unten exakt
@@ -223,7 +221,6 @@ Keine Bild-Assets. Logo-Raute ist ein gedrehtes `div`. Schriften über Google Fo
 `font-display: swap` und Preload der beiden Mono-/Sans-Regular-Schnitte.
 
 ## Files
-- `Parano1d Explorer.dc.html` — Design-Referenz mit allen sechs Views und lauffähiger Kettenanimation
-  (Mock-Daten, im Browser direkt öffenbar; die Navigation oben schaltet die Views um).
-- `reference_current_main.png` — bisheriger Stand des Explorers zum Vergleich.
-- (screens/ was not part of the delivered zip)
+- `before-redesign.png` — Stand des Explorers vor dem Redesign, zum Vergleich.
+- Umsetzung: `frontend/site/css/style.css` (Tokens, Layout), `frontend/site/js/chain.js` (Blockkette +
+  Animation), `frontend/site/js/cells.js` (4×4-Zellenraster), `frontend/site/js/views.js` (die sechs Views).
