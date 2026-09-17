@@ -113,6 +113,12 @@ pub struct ChainStats {
     pub indexed_transactions: i64,
     pub gaps: i64,
     pub oldest_retained_timestamp: Option<i64>,
+    /// Outputs recorded on a canonical block whose creation_id has not
+    /// (yet) been consumed by any recorded input - the live UTXO set as
+    /// far as this permanode's own indexed history can tell. Same caveat
+    /// as an address's confirmed balance: outputs already unspent before
+    /// this permanode started recording are invisible to it.
+    pub live_utxos: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -473,12 +479,33 @@ pub fn chain_stats(conn: &Connection) -> Result<ChainStats> {
         |r| r.get(0),
     )?;
 
+    let canonical_on_b = canonical_filter_on("b");
+    let canonical_on_b2 = canonical_filter_on("b2");
+    let live_utxos: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*)
+             FROM tx_outputs o
+             JOIN transactions t ON t.id = o.tx_id
+             JOIN blocks b ON b.id = t.block_id
+             WHERE {canonical_on_b}
+               AND NOT EXISTS (
+                 SELECT 1 FROM tx_inputs i
+                 JOIN transactions t2 ON t2.id = i.tx_id
+                 JOIN blocks b2 ON b2.id = t2.block_id
+                 WHERE i.creation_id = o.creation_id AND {canonical_on_b2}
+               )"
+        ),
+        [],
+        |r| r.get(0),
+    )?;
+
     Ok(ChainStats {
         last_processed_height,
         indexed_blocks,
         indexed_transactions,
         gaps,
         oldest_retained_timestamp,
+        live_utxos,
     })
 }
 
