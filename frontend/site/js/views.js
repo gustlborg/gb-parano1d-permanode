@@ -215,6 +215,7 @@ export function tickerHtml(stats) {
     <span>Indexed tip: <strong>#${stats.last_processed_height ?? "-"}</strong></span>
     <span>Blocks recorded: <strong>${stats.indexed_blocks}</strong></span>
     <span>Transactions: <strong>${stats.indexed_transactions}</strong></span>
+    <span>Live UTXOs: <strong>${stats.live_utxos}</strong></span>
     <span>History since: <strong>${oldest}</strong></span>
     ${stats.gaps > 0 ? `<span>Gaps: <strong class="mono">${stats.gaps}</strong></span>` : ""}
     <span>${link("/mempool", "Live mempool →")}</span>`;
