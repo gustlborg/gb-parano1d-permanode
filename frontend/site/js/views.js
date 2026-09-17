@@ -1,17 +1,9 @@
 import { api } from "./api.js";
 import { noid, shortHash, timeAgo, fullTime, escapeHtml } from "./format.js";
+import { renderBlockSquare, pickTx } from "./blocksquare.js";
 
 function link(href, text) {
   return `<a href="${href}" data-link>${escapeHtml(text)}</a>`;
-}
-
-function blockTile(b) {
-  const href = `/block/${b.height}`;
-  const cls = b.body_captured ? "block-tile" : "block-tile gap";
-  return `<a class="${cls}" href="${href}" data-link title="height ${b.height}">
-      <div class="h">#${b.height}</div>
-      <div class="n">${b.tx_count} tx</div>
-    </a>`;
 }
 
 function blocksTable(blocks) {
@@ -34,16 +26,98 @@ function blocksTable(blocks) {
     </table>`;
 }
 
+function navigateToTx(txid) {
+  history.pushState(null, "", `/tx/${txid}`);
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
+// Wires a canvas to draw `txs` (a fixed snapshot or a live-refreshed
+// getter) and click-navigate to the tx under the pointer. Returns
+// {draw, dispose} - callers must call dispose() when the view unmounts, or
+// the resize listener piles up against a detached canvas forever.
+function wireSquare(canvas, getTxs, opts = {}) {
+  const draw = () => renderBlockSquare(canvas, getTxs(), opts);
+  draw();
+  const onClick = (e) => {
+    const tx = pickTx(canvas, getTxs(), e.clientX, e.clientY);
+    const id = tx && (tx.txid || tx.tx_hash);
+    if (id) navigateToTx(id);
+  };
+  canvas.addEventListener("click", onClick);
+  window.addEventListener("resize", draw);
+  const dispose = () => {
+    canvas.removeEventListener("click", onClick);
+    window.removeEventListener("resize", draw);
+  };
+  return { draw, dispose };
+}
+
+const STRIP_BLOCK_COUNT = 8;
+const LIVE_REFRESH_MS = 8000;
+
 export async function homeView() {
-  const [stats, blocks] = await Promise.all([api.stats(), api.blocks(25)]);
-  const tiles = blocks.map(blockTile).join("");
-  return `
-    ${tickerHtml(stats)}
-    <div class="block-grid">${tiles}</div>
+  const [summaries, mempoolInfo] = await Promise.all([
+    api.blocks(25),
+    api.mempool().catch(() => null),
+  ]);
+  const stripSummaries = summaries.slice(0, STRIP_BLOCK_COUNT);
+  const stripBlocks = await Promise.all(
+    stripSummaries.map((b) => api.blockByHeight(b.height).catch(() => null))
+  );
+
+  const tilesHtml = [
+    `<div class="block-tile mempool" id="mempool-tile">
+       <a class="square" href="/mempool" data-link><canvas id="mempool-canvas"></canvas></a>
+       <div class="label"><strong>Mempool</strong><br>${mempoolInfo ? mempoolInfo.size : "-"} pending</div>
+     </div>`,
+    ...stripBlocks.map((b, i) => {
+      const summary = stripSummaries[i];
+      if (!b) return "";
+      const cls = b.body_captured ? "block-tile" : "block-tile gap";
+      return `<div class="${cls}">
+          <a class="square" href="/block/${b.height}" data-link><canvas id="block-canvas-${b.height}"></canvas></a>
+          <div class="label"><strong>#${b.height}</strong><br>${timeAgo(summary.timestamp)}</div>
+        </div>`;
+    }),
+  ].join('<span class="chain-arrow">←</span>');
+
+  const html = `
+    <div class="chain-strip" id="chain-strip">${tilesHtml}</div>
     <div class="panel">
       <h2>Recent blocks</h2>
-      ${blocksTable(blocks)}
+      ${blocksTable(summaries)}
     </div>`;
+
+  function mount(root) {
+    const disposers = [];
+    let liveMempool = mempoolInfo;
+    const mempoolCanvas = root.querySelector("#mempool-canvas");
+    if (mempoolCanvas) {
+      disposers.push(wireSquare(mempoolCanvas, () => liveMempool?.txs || [], { emptyLabel: "empty" }).dispose);
+    }
+    for (const b of stripBlocks) {
+      if (!b) continue;
+      const c = root.querySelector(`#block-canvas-${b.height}`);
+      if (c) disposers.push(wireSquare(c, () => b.transactions).dispose);
+    }
+
+    const timer = setInterval(async () => {
+      try {
+        liveMempool = await api.mempool();
+        if (mempoolCanvas) renderBlockSquare(mempoolCanvas, liveMempool.txs, { emptyLabel: "empty" });
+        const label = root.querySelector("#mempool-tile .label");
+        if (label) label.innerHTML = `<strong>Mempool</strong><br>${liveMempool.size} pending`;
+      } catch {
+        /* node/API momentarily unreachable - keep last known view */
+      }
+    }, LIVE_REFRESH_MS);
+    return () => {
+      clearInterval(timer);
+      disposers.forEach((d) => d());
+    };
+  }
+
+  return { html, mount };
 }
 
 export function tickerHtml(stats) {
@@ -54,7 +128,8 @@ export function tickerHtml(stats) {
     <span>Blocks recorded: <strong>${stats.indexed_blocks}</strong></span>
     <span>Transactions: <strong>${stats.indexed_transactions}</strong></span>
     <span>History since: <strong>${oldest}</strong></span>
-    ${stats.gaps > 0 ? `<span>Gaps: <strong class="mono">${stats.gaps}</strong></span>` : ""}`;
+    ${stats.gaps > 0 ? `<span>Gaps: <strong class="mono">${stats.gaps}</strong></span>` : ""}
+    <span>${link("/mempool", "Live mempool →")}</span>`;
 }
 
 function txRow(tx) {
@@ -79,9 +154,10 @@ export async function blockView(idParam) {
   if (!block) return notFoundHtml(`Block ${idParam} not found (or not canonical).`);
 
   const txRows = block.transactions.map(txRow).join("");
-  return `
+  const html = `
     <div class="panel">
       <h2>Block #${block.height}</h2>
+      <div class="tx-square-large"><canvas id="block-square"></canvas></div>
       <dl class="kv">
         <dt>Hash</dt><dd class="mono">${block.hash}</dd>
         <dt>Parent</dt><dd class="mono">${link(`/block/${block.prev_hash}`, block.prev_hash)}</dd>
@@ -98,12 +174,20 @@ export async function blockView(idParam) {
       </dl>
     </div>
     <div class="panel">
-      <h2>Transactions (${block.transactions.length})</h2>
+      <h2>Transactions (${block.transactions.length}), packed by size, shaded by fee rate</h2>
       <table>
         <thead><tr><th>Txid</th><th>Sender</th><th>In → Out</th><th>Amount</th><th>Fee</th></tr></thead>
         <tbody>${txRows || '<tr><td colspan="5">No transactions recorded for this block.</td></tr>'}</tbody>
       </table>
     </div>`;
+
+  function mount(root) {
+    const c = root.querySelector("#block-square");
+    if (!c) return undefined;
+    return wireSquare(c, () => block.transactions, { emptyLabel: "no transactions" }).dispose;
+  }
+
+  return { html, mount };
 }
 
 export async function txView(txid) {
@@ -168,6 +252,70 @@ export async function addressView(address, page = 1) {
         ${page < totalPages ? link(`/address/${address}?page=${page + 1}`, "older →") : ""}
       </div>
     </div>`;
+}
+
+export async function mempoolView() {
+  let info = await api.mempool();
+  const html = `
+    <div class="panel">
+      <h2>Live mempool</h2>
+      <div class="tx-square-large"><canvas id="mempool-square-large"></canvas></div>
+      <div class="mempool-stats" id="mempool-stats">${mempoolStatsHtml(info)}</div>
+    </div>
+    <div class="panel">
+      <h2>Pending transactions</h2>
+      <table id="mempool-table">${mempoolTableHtml(info)}</table>
+    </div>`;
+
+  function mount(root) {
+    const c = root.querySelector("#mempool-square-large");
+    const wired = c ? wireSquare(c, () => info.txs, { emptyLabel: "mempool is empty" }) : null;
+    const timer = setInterval(async () => {
+      try {
+        info = await api.mempool();
+        if (wired) wired.draw();
+        const stats = root.querySelector("#mempool-stats");
+        if (stats) stats.innerHTML = mempoolStatsHtml(info);
+        const table = root.querySelector("#mempool-table");
+        if (table) table.innerHTML = mempoolTableHtml(info);
+      } catch {
+        /* keep last known view */
+      }
+    }, LIVE_REFRESH_MS);
+    return () => {
+      clearInterval(timer);
+      if (wired) wired.dispose();
+    };
+  }
+
+  return { html, mount };
+}
+
+function mempoolStatsHtml(info) {
+  const rates = info.txs.map((t) => t.fee_rate);
+  const min = rates.length ? Math.min(...rates) : 0;
+  const max = rates.length ? Math.max(...rates) : 0;
+  return `
+    <div class="stat"><div class="v">${info.size}</div><div class="k">Pending txs</div></div>
+    <div class="stat"><div class="v">${noid(info.fee_floor)}</div><div class="k">Fee floor</div></div>
+    <div class="stat"><div class="v">${min} – ${max}</div><div class="k">Fee rate range</div></div>`;
+}
+
+function mempoolTableHtml(info) {
+  const rows = info.txs
+    .slice()
+    .sort((a, b) => b.fee_rate - a.fee_rate)
+    .map(
+      (t) => `<tr>
+        <td class="mono">${link(`/tx/${t.tx_hash}`, shortHash(t.tx_hash))}</td>
+        <td>${t.n_inputs} → ${t.n_outputs}</td>
+        <td>${noid(t.fee_micronoid)}</td>
+        <td>${t.fee_rate}</td>
+      </tr>`
+    )
+    .join("");
+  return `<thead><tr><th>Txid</th><th>In → Out</th><th>Fee</th><th>Fee rate</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="4">Mempool is empty.</td></tr>'}</tbody>`;
 }
 
 export function notFoundHtml(msg) {

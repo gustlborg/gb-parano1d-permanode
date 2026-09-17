@@ -47,6 +47,13 @@ a:hover { text-decoration: underline; }
 .brand:hover { text-decoration: none; color: var(--accent); }
 .brand-mark { color: var(--accent); }
 
+.nav-link {
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+.nav-link:hover { color: var(--accent); text-decoration: none; }
+
 .search { display: flex; gap: 8px; flex: 1; max-width: 560px; }
 .search input {
   flex: 1;
@@ -81,30 +88,73 @@ a:hover { text-decoration: underline; }
 
 main { flex: 1; padding: 20px; max-width: 1100px; width: 100%; margin: 0 auto; }
 
-.block-grid {
+.chain-strip {
   display: flex;
-  gap: 6px;
+  align-items: center;
+  gap: 10px;
   overflow-x: auto;
-  padding: 12px 0 20px;
+  padding: 16px 4px 24px;
+}
+.chain-arrow {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-size: 1.4rem;
+  padding: 0 2px;
 }
 .block-tile {
   flex: 0 0 auto;
-  width: 76px;
-  height: 76px;
+  width: 108px;
+}
+.block-tile .square {
+  width: 108px;
+  height: 108px;
   border-radius: 8px;
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 6px;
-  transition: transform 0.1s, border-color 0.1s;
+  overflow: hidden;
+  position: relative;
+  cursor: pointer;
+  transition: border-color 0.1s, transform 0.1s;
 }
-.block-tile:hover { border-color: var(--accent); transform: translateY(-2px); text-decoration: none; }
-.block-tile .h { font-family: var(--mono); font-size: 0.72rem; color: var(--text); }
-.block-tile .n { font-size: 0.68rem; color: var(--text-dim); margin-top: 4px; }
-.block-tile.gap { border-style: dashed; opacity: 0.5; }
+.block-tile:hover .square { border-color: var(--accent); transform: translateY(-2px); }
+.block-tile canvas { display: block; width: 100%; height: 100%; }
+.block-tile .label {
+  margin-top: 6px;
+  text-align: center;
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+.block-tile .label strong { color: var(--text); font-family: var(--mono); }
+.block-tile.mempool .square { border-style: dashed; border-color: var(--accent-dim); }
+.block-tile.mempool .label strong { color: var(--accent); }
+.block-tile.gap .square { opacity: 0.5; }
+
+.tx-square-large {
+  width: 100%;
+  aspect-ratio: 1;
+  max-width: 420px;
+  border-radius: 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  margin: 0 auto 16px;
+}
+.tx-square-large canvas { display: block; width: 100%; height: 100%; cursor: pointer; }
+
+.mempool-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.mempool-stats .stat {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+}
+.mempool-stats .stat .v { font-size: 1.2rem; font-family: var(--mono); }
+.mempool-stats .stat .k { font-size: 0.75rem; color: var(--text-dim); text-transform: uppercase; }
 
 table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
 th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }

@@ -16,4 +16,5 @@ export const api = {
   address: (addr, page = 1, pageSize = 25) =>
     getJson(`/address/${addr}?page=${page}&page_size=${pageSize}`),
   gaps: () => getJson("/gaps"),
+  mempool: () => getJson("/mempool"),
 };

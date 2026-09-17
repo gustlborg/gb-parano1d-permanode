@@ -1,8 +1,9 @@
 import { api } from "./api.js";
-import { homeView, blockView, txView, addressView, tickerHtml, notFoundHtml } from "./views.js";
+import { homeView, blockView, txView, addressView, mempoolView, tickerHtml, notFoundHtml } from "./views.js";
 
 const app = document.getElementById("app");
 const ticker = document.getElementById("ticker");
+let viewCleanup = null;
 
 async function renderTicker() {
   try {
@@ -24,25 +25,38 @@ async function search(query) {
 }
 
 async function render() {
+  if (viewCleanup) {
+    viewCleanup();
+    viewCleanup = null;
+  }
+
   const path = location.pathname;
   const params = new URLSearchParams(location.search);
   app.innerHTML = '<div class="loading">Loading…</div>';
 
   try {
-    let html;
+    let result;
     if (path === "/" || path === "") {
-      html = await homeView();
+      result = await homeView();
+    } else if (path === "/mempool") {
+      result = await mempoolView();
     } else if (path.startsWith("/block/")) {
-      html = await blockView(decodeURIComponent(path.slice("/block/".length)));
+      result = await blockView(decodeURIComponent(path.slice("/block/".length)));
     } else if (path.startsWith("/tx/")) {
-      html = await txView(decodeURIComponent(path.slice("/tx/".length)));
+      result = await txView(decodeURIComponent(path.slice("/tx/".length)));
     } else if (path.startsWith("/address/")) {
       const page = parseInt(params.get("page") || "1", 10) || 1;
-      html = await addressView(decodeURIComponent(path.slice("/address/".length)), page);
+      result = await addressView(decodeURIComponent(path.slice("/address/".length)), page);
     } else {
-      html = notFoundHtml(`Unknown page: ${path}`);
+      result = notFoundHtml(`Unknown page: ${path}`);
     }
-    app.innerHTML = html;
+
+    if (result && typeof result === "object" && "html" in result) {
+      app.innerHTML = result.html;
+      if (result.mount) viewCleanup = result.mount(app) || null;
+    } else {
+      app.innerHTML = result;
+    }
   } catch (e) {
     console.error(e);
     app.innerHTML = notFoundHtml(`Failed to load: ${e.message}`);
