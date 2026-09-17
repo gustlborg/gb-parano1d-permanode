@@ -215,7 +215,11 @@ export function tickerHtml(stats) {
     <span>Indexed tip: <strong>#${stats.last_processed_height ?? "-"}</strong></span>
     <span>Blocks recorded: <strong>${stats.indexed_blocks}</strong></span>
     <span>Transactions: <strong>${stats.indexed_transactions}</strong></span>
-    <span>Live UTXOs: <strong>${stats.live_utxos}</strong></span>
+    <span class="hint" title="Only what this permanode has itself recorded
+as created and still unspent since it started
+indexing - not the network-wide total.">Live UTXOs (recorded): <strong>${stats.live_utxos}</strong></span>
+    ${stats.network_active_slots != null ? `<span class="hint" title="The node's own count across its entire
+history since genesis, for comparison.">Live UTXOs (network): <strong>${stats.network_active_slots}</strong></span>` : ""}
     <span>History since: <strong>${oldest}</strong></span>
     ${stats.gaps > 0 ? `<span>Gaps: <strong class="mono">${stats.gaps}</strong></span>` : ""}
     <span>${link("/mempool", "Live mempool →")}</span>`;
