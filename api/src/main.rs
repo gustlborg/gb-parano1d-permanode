@@ -100,27 +100,73 @@ async fn main() -> Result<()> {
 struct StatsResponse {
     #[serde(flatten)]
     chain: queries::ChainStats,
+    network: NetworkMetrics,
+}
+
+#[derive(serde::Serialize, Default)]
+struct NetworkMetrics {
     /// The node's own live UTXO count across its whole history, for
     /// comparison against `chain.live_utxos` (which only reflects what
-    /// this permanode has itself recorded since it started). `null` if the
-    /// node couldn't be reached for this figure.
-    network_active_slots: Option<u64>,
+    /// this permanode has itself recorded since it started).
+    active_slots: Option<u64>,
+    circulating_supply_micronoid: Option<String>,
+    block_reward_micronoid: Option<u64>,
+    difficulty_bits: Option<u32>,
+    difficulty_target: Option<String>,
+    /// Rough estimate derived from the current PoW target, not a measured
+    /// figure - see live_rpc::estimate_hashrate.
+    estimated_hashrate_hs: Option<f64>,
+    /// From this permanode's own recorded block timestamps, so a fresh
+    /// install won't have a 24h figure yet - not from the node.
+    avg_block_time_10m_seconds: Option<f64>,
+    avg_block_time_1h_seconds: Option<f64>,
+    avg_block_time_24h_seconds: Option<f64>,
 }
 
 async fn get_stats(State(state): State<Arc<AppState>>) -> ApiResult<StatsResponse> {
-    let chain = {
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let (chain, avg_10m, avg_1h, avg_24h) = {
         let conn = state.conn.lock().unwrap();
-        queries::chain_stats(&conn)?
+        (
+            queries::chain_stats(&conn)?,
+            queries::avg_block_time_seconds(&conn, 600, now_unix)?,
+            queries::avg_block_time_seconds(&conn, 3600, now_unix)?,
+            queries::avg_block_time_seconds(&conn, 86400, now_unix)?,
+        )
     };
+
     let rpc_client = state.rpc.clone();
-    let network_active_slots = tokio::task::spawn_blocking(move || rpc_client.get_active_slot_count())
-        .await
-        .ok()
-        .and_then(|r| r.ok());
-    Ok(Json(StatsResponse {
-        chain,
-        network_active_slots,
-    }))
+    let (active_slots, chain_info, mining_info) = tokio::task::spawn_blocking(move || {
+        (
+            rpc_client.get_active_slot_count().ok(),
+            rpc_client.get_chain_info().ok(),
+            rpc_client.get_mining_info().ok(),
+        )
+    })
+    .await
+    .unwrap_or((None, None, None));
+
+    let estimated_hashrate_hs = mining_info
+        .as_ref()
+        .and_then(|m| live_rpc::estimate_hashrate(&m.difficulty_target));
+
+    let network = NetworkMetrics {
+        active_slots,
+        circulating_supply_micronoid: chain_info.map(|c| c.circulating_supply_micronoid),
+        block_reward_micronoid: mining_info.as_ref().map(|m| m.block_reward_micronoid),
+        difficulty_bits: mining_info.as_ref().map(|m| m.difficulty_bits),
+        difficulty_target: mining_info.map(|m| m.difficulty_target),
+        estimated_hashrate_hs,
+        avg_block_time_10m_seconds: avg_10m,
+        avg_block_time_1h_seconds: avg_1h,
+        avg_block_time_24h_seconds: avg_24h,
+    };
+
+    Ok(Json(StatsResponse { chain, network }))
 }
 
 #[derive(Deserialize)]

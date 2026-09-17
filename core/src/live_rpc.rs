@@ -5,8 +5,16 @@
 //! recorded. The API proxies these straight from the node on request.
 
 use anyhow::{bail, Context, Result};
+use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// Mainnet launch value, docs/protocol/parameters.md: "Target block
+/// interval | 20 seconds". Only used to turn a PoW target into an
+/// estimated network hashrate; if this ever changes on-chain the estimate
+/// would need the same adjustment the network's own difficulty retarget
+/// already accounts for.
+const TARGET_BLOCK_INTERVAL_SECONDS: f64 = 20.0;
 
 #[derive(Clone)]
 pub struct RpcClient {
@@ -58,6 +66,64 @@ impl RpcClient {
         let v = self.call("paranoid_getActiveSlotCount", json!([]))?;
         v.as_u64().context("getActiveSlotCount: result is not u64")
     }
+
+    pub fn get_chain_info(&self) -> Result<ChainInfo> {
+        let v = self.call("paranoid_getChainInfo", json!([]))?;
+        Ok(serde_json::from_value(v)?)
+    }
+
+    pub fn get_mining_info(&self) -> Result<MiningInfo> {
+        let v = self.call("paranoid_getMiningInfo", json!([]))?;
+        Ok(serde_json::from_value(v)?)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChainInfo {
+    pub height: u64,
+    pub best_hash: String,
+    pub difficulty_target: String,
+    pub active_slot_count: u64,
+    pub log_slots: u32,
+    pub circulating_supply_micronoid: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MiningInfo {
+    pub height: u64,
+    pub difficulty_bits: u32,
+    pub difficulty_target: String,
+    pub block_reward_micronoid: u64,
+    pub active_slot_count: u64,
+}
+
+/// Estimated network hashrate from a PoW target: expected hashes needed to
+/// find one below `target` is `2^256 / target`, divided by the protocol's
+/// target block interval. `target_hex` is the target's canonical
+/// little-endian byte encoding (as the RPC returns it), so it's parsed with
+/// `from_bytes_le` directly rather than needing to reverse it first.
+pub fn estimate_hashrate(target_hex: &str) -> Option<f64> {
+    let bytes = hex_decode(target_hex)?;
+    let target = BigUint::from_bytes_le(&bytes);
+    if target == BigUint::ZERO {
+        return None;
+    }
+    let max = BigUint::from(1u8) << 256u32;
+    let expected_hashes = &max / &target;
+    // f64 conversion is intentionally approximate - this is a rough
+    // network-wide estimate, not an accounting figure.
+    let expected_hashes_f64: f64 = expected_hashes.to_string().parse().ok()?;
+    Some(expected_hashes_f64 / TARGET_BLOCK_INTERVAL_SECONDS)
+}
+
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

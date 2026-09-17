@@ -25,6 +25,23 @@ export function timeAgo(unixSeconds) {
   return `${Math.floor(s / 86400)}d ago`;
 }
 
+export function hashrate(hs) {
+  if (hs === null || hs === undefined) return "-";
+  const units = ["H/s", "KH/s", "MH/s", "GH/s", "TH/s", "PH/s", "EH/s"];
+  let i = 0;
+  let v = hs;
+  while (v >= 1000 && i < units.length - 1) {
+    v /= 1000;
+    i++;
+  }
+  return `${v.toFixed(2)} ${units[i]}`;
+}
+
+export function seconds(s) {
+  if (s === null || s === undefined) return "-";
+  return `${s.toFixed(1)}s`;
+}
+
 export function fullTime(unixSeconds) {
   if (!unixSeconds) return "-";
   return new Date(unixSeconds * 1000).toISOString().replace("T", " ").replace(".000Z", " UTC");

@@ -1,5 +1,5 @@
 import { api } from "./api.js";
-import { noid, shortHash, timeAgo, fullTime, escapeHtml } from "./format.js";
+import { noid, shortHash, timeAgo, fullTime, escapeHtml, hashrate, seconds } from "./format.js";
 import { renderBlockSquare, pickTx } from "./blocksquare.js";
 
 function link(href, text) {
@@ -99,6 +99,29 @@ function wireSquare(canvas, getTxs, opts = {}) {
 const STRIP_BLOCK_COUNT = 8;
 const LIVE_REFRESH_MS = 1000;
 
+function networkMetricsHtml(stats) {
+  const n = stats?.network;
+  if (!n) return "";
+  return `
+    <div class="panel">
+      <h2>Network</h2>
+      <div class="mempool-stats">
+        <div class="stat"><div class="v">${noid(n.circulating_supply_micronoid)}</div><div class="k">Circulating supply</div></div>
+        <div class="stat"><div class="v">${noid(n.block_reward_micronoid)}</div><div class="k">Block reward</div></div>
+        <div class="stat"><div class="v hint" title="Rough estimate derived from the
+current PoW target, not a
+measured network figure.">${hashrate(n.estimated_hashrate_hs)}</div><div class="k">Network hashrate (est.)</div></div>
+        <div class="stat"><div class="v">${n.difficulty_bits ?? "-"}</div><div class="k">Difficulty (bits)</div></div>
+        <div class="stat"><div class="v hint" title="From this permanode's own recorded
+blocks, not the node - a fresh
+install won't have a 24h figure
+yet.">${seconds(n.avg_block_time_10m_seconds)}</div><div class="k">Avg block time (10m)</div></div>
+        <div class="stat"><div class="v">${seconds(n.avg_block_time_1h_seconds)}</div><div class="k">Avg block time (1h)</div></div>
+        <div class="stat"><div class="v">${seconds(n.avg_block_time_24h_seconds)}</div><div class="k">Avg block time (24h)</div></div>
+      </div>
+    </div>`;
+}
+
 function stripTilesHtml(mempoolInfo, stripBlocks, stripSummaries) {
   return [
     `<div class="block-tile mempool" id="mempool-tile">
@@ -128,10 +151,12 @@ async function fetchStrip(summaries) {
 export async function homeView() {
   let summaries = await api.blocks(25);
   let mempoolInfo = await api.mempool().catch(() => null);
+  let stats = await api.stats().catch(() => null);
   let { stripSummaries, stripBlocks } = await fetchStrip(summaries);
 
   const html = `
     <div class="chain-strip" id="chain-strip">${stripTilesHtml(mempoolInfo, stripBlocks, stripSummaries)}</div>
+    <div id="network-metrics">${networkMetricsHtml(stats)}</div>
     <div class="panel">
       <h2>Recent blocks</h2>
       <div id="recent-blocks-table">${blocksTable(summaries)}</div>
@@ -169,9 +194,16 @@ export async function homeView() {
 
     const timer = setInterval(async () => {
       try {
-        const [newSummaries, newMempool] = await Promise.all([api.blocks(25), api.mempool()]);
+        const [newSummaries, newMempool, newStats] = await Promise.all([
+          api.blocks(25),
+          api.mempool(),
+          api.stats().catch(() => null),
+        ]);
         const tipChanged = newSummaries[0]?.height !== summaries[0]?.height;
         mempoolInfo = newMempool;
+        stats = newStats;
+        const metrics = root.querySelector("#network-metrics");
+        if (metrics) metrics.innerHTML = networkMetricsHtml(stats);
 
         if (tipChanged) {
           summaries = newSummaries;
