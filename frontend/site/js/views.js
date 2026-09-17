@@ -369,6 +369,26 @@ export async function txView(txid) {
     </div>`;
 }
 
+function liveUtxosPanel(utxos) {
+  const rows = utxos
+    .map(
+      (u) => `<tr>
+        <td class="mono">${u.slot_index}</td>
+        <td>${noid(u.value)}</td>
+        <td class="mono">${u.creation_id}</td>
+      </tr>`
+    )
+    .join("");
+  return `
+    <div class="panel">
+      <h2>Live UTXOs (${utxos.length})</h2>
+      <div class="table-scroll"><table>
+        <thead><tr><th>Slot</th><th>Amount</th><th>Creation ID</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="3">No unspent outputs.</td></tr>'}</tbody>
+      </table></div>
+    </div>`;
+}
+
 function addressTxRow(tx, viewedAddress) {
   const kind = tx.coinbase
     ? '<span class="badge coinbase">coinbase</span>'
@@ -428,6 +448,7 @@ itself seen since it started running.">${noid(b.confirmed_balance_micronoid)}</d
           : ""
       }
     </div>
+    ${liveKnown ? liveUtxosPanel(result.live_utxos) : ""}
     <div class="panel">
       <div class="table-scroll"><table>
         <thead><tr><th>Txid</th><th class="time-toggle" title="Click to toggle relative/absolute time">Time</th><th>Block</th><th>Sender</th><th>In → Out</th><th>Receiver</th><th>Amount</th><th>Fee</th></tr></thead>
