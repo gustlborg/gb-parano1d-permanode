@@ -91,12 +91,29 @@ impl RpcClient {
     }
 
     /// A single slot by its raw index (0..2^log_slots), occupied or not.
-    /// Used to sweep a range of the state directly rather than needing to
-    /// already know an address - see indexer::scan_slot_range.
+    /// Used to sweep the state directly rather than needing to already know
+    /// an address - see indexer::scan_live_state.
     pub fn get_slot(&self, slot_index: u64) -> Result<SlotInfo> {
         let v = self.call("paranoid_getSlot", json!([slot_index]))?;
         Ok(serde_json::from_value(v)?)
     }
+
+    /// Live-slot count per state segment (`paranoid_getStateMap`). The
+    /// node's allocator scatters segments across the index space by a
+    /// permutation rather than filling it contiguously, so this is the
+    /// only reliable way to know which ranges are worth sweeping - and it
+    /// doubles as the exact expected count to verify a sweep against.
+    pub fn get_state_map(&self) -> Result<StateMapInfo> {
+        let v = self.call("paranoid_getStateMap", json!([]))?;
+        Ok(serde_json::from_value(v)?)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StateMapInfo {
+    pub log_slots: u32,
+    pub bucket_capacity: u64,
+    pub live_counts: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
