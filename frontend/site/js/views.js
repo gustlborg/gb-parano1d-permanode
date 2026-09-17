@@ -20,10 +20,10 @@ function blocksTable(blocks) {
       </tr>`
     )
     .join("");
-  return `<table>
+  return `<div class="table-scroll"><table>
       <thead><tr><th>Height</th><th>Time</th><th>Miner</th><th>Txs</th><th>Reward</th><th>Fees</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
-    </table>`;
+    </table></div>`;
 }
 
 function navigateToTx(txid) {
@@ -173,7 +173,7 @@ function txRow(tx) {
     : "";
   const sender = tx.input_owner ? link(`/address/${tx.input_owner}`, shortHash(tx.input_owner)) : "-";
   const receiver = tx.receiver ? link(`/address/${tx.receiver}`, shortHash(tx.receiver)) : "-";
-  const extra = tx.n_outputs > 1 ? ` +${tx.n_outputs - 1}` : "";
+  const extra = tx.n_outputs > 1 ? ` <span class="hint" title="${tx.n_outputs} receivers total, showing the first">+${tx.n_outputs - 1} more</span>` : "";
   return `<tr>
       <td class="mono">${link(`/tx/${tx.txid}`, shortHash(tx.txid))} ${kind}</td>
       <td class="mono">${sender}</td>
@@ -211,10 +211,10 @@ export async function blockView(idParam) {
     </div>
     <div class="panel">
       <h2>Transactions (${block.transactions.length}), packed by size, shaded by fee rate</h2>
-      <table>
+      <div class="table-scroll"><table>
         <thead><tr><th>Txid</th><th>Sender</th><th>In → Out</th><th>Receiver</th><th>Amount</th><th>Fee</th></tr></thead>
         <tbody>${txRows || '<tr><td colspan="6">No transactions recorded for this block.</td></tr>'}</tbody>
-      </table>
+      </table></div>
     </div>`;
 
   function mount(root) {
@@ -279,7 +279,7 @@ function addressTxRow(tx) {
     : "";
   const sender = tx.input_owner ? link(`/address/${tx.input_owner}`, shortHash(tx.input_owner)) : "-";
   const receiver = tx.receiver ? link(`/address/${tx.receiver}`, shortHash(tx.receiver)) : "-";
-  const extra = tx.n_outputs > 1 ? ` +${tx.n_outputs - 1}` : "";
+  const extra = tx.n_outputs > 1 ? ` <span class="hint" title="${tx.n_outputs} receivers total, showing the first">+${tx.n_outputs - 1} more</span>` : "";
   return `<tr>
       <td class="mono">${link(`/tx/${tx.txid}`, shortHash(tx.txid))} ${kind}</td>
       <td>${timeAgo(tx.timestamp)}</td>
@@ -303,10 +303,10 @@ export async function addressView(address, page = 1) {
       <p>${result.total} transaction(s) recorded involving this address.</p>
     </div>
     <div class="panel">
-      <table>
+      <div class="table-scroll"><table>
         <thead><tr><th>Txid</th><th>Time</th><th>Block</th><th>Sender</th><th>In → Out</th><th>Receiver</th><th>Amount</th><th>Fee</th></tr></thead>
         <tbody>${rows || '<tr><td colspan="8">No transactions found.</td></tr>'}</tbody>
-      </table>
+      </table></div>
       <div class="pager">
         ${page > 1 ? link(`/address/${address}?page=${page - 1}`, "← newer") : ""}
         <span>page ${page} / ${totalPages}</span>
@@ -325,7 +325,7 @@ export async function mempoolView() {
     </div>
     <div class="panel">
       <h2>Pending transactions</h2>
-      <table id="mempool-table">${mempoolTableHtml(info)}</table>
+      <div class="table-scroll"><table id="mempool-table">${mempoolTableHtml(info)}</table></div>
     </div>`;
 
   function mount(root) {
