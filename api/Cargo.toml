@@ -1,11 +1,11 @@
 [package]
-name = "parano1d-permanode-indexer"
+name = "permanode-api"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
-chrono = { version = "0.4.45", features = ["serde"] }
+axum = "0.8"
 clap = { version = "4.6.7", features = ["derive"] }
 env_logger = "0.11.11"
 log = "0.4.34"
@@ -13,5 +13,5 @@ permanode-core = { path = "../core" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-toml = "1.1.6"
-ureq = { version = "3.4.2", features = ["json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros"] }
+tower-http = { version = "0.6", features = ["fs", "cors"] }
