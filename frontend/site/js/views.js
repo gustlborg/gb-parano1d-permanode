@@ -133,7 +133,7 @@ function stripTilesHtml(mempoolInfo, stripBlocks, stripSummaries) {
       const cls = b.body_captured ? "block-tile" : "block-tile gap";
       return `<div class="${cls}">
           <a class="square" href="/block/${b.height}" data-link><canvas id="block-canvas-${b.height}"></canvas></a>
-          <div class="label"><strong>#${b.height}</strong><br>${timeAgo(summary.timestamp)}</div>
+          <div class="label"><strong>#${b.height}</strong><br><span class="time-cell" data-ts="${summary.timestamp}"></span></div>
         </div>`;
     }),
   ].join('<span class="chain-arrow">←</span>');
@@ -192,6 +192,11 @@ export async function homeView() {
     refreshTimeToggle();
 
     const timer = setInterval(async () => {
+      // Tick relative-time labels forward every second regardless of
+      // whether new block data arrived, so a long gap between blocks
+      // shows the wait growing live instead of sitting frozen until the
+      // next block finally triggers a rebuild.
+      applyTimeFormat(root, absoluteTime);
       try {
         const [newSummaries, newMempool, newStats] = await Promise.all([
           api.blocks(25),
