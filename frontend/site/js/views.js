@@ -6,6 +6,15 @@ function link(href, text) {
   return `<a href="${href}" data-link>${escapeHtml(text)}</a>`;
 }
 
+// Browsers wrap a native title tooltip at literal newlines, so this stays
+// narrow instead of one very wide line.
+function receiverHint(nOutputs) {
+  return `${nOutputs} outputs total, showing the first.
+Extra outputs are often change back
+to the sender, but the protocol
+doesn't guarantee that.`;
+}
+
 // A <td class="time-cell" data-ts="..."> whose text is filled in by
 // applyTimeFormat() right after insertion, so it always matches whatever
 // mode the table's "Time" header is currently toggled to.
@@ -219,7 +228,7 @@ function txRow(tx) {
     : "";
   const sender = tx.input_owner ? link(`/address/${tx.input_owner}`, shortHash(tx.input_owner)) : "-";
   const receiver = tx.receiver ? link(`/address/${tx.receiver}`, shortHash(tx.receiver)) : "-";
-  const extra = tx.n_outputs > 1 ? ` <span class="hint" title="${tx.n_outputs} outputs total, showing the first. Extra outputs are often change back to the sender, but the protocol does not guarantee that - could be a genuine second recipient.">+${tx.n_outputs - 1} more</span>` : "";
+  const extra = tx.n_outputs > 1 ? ` <span class="hint" title="${receiverHint(tx.n_outputs)}">+${tx.n_outputs - 1} more</span>` : "";
   return `<tr>
       <td class="mono">${link(`/tx/${tx.txid}`, shortHash(tx.txid))} ${kind}</td>
       <td class="mono">${sender}</td>
@@ -325,7 +334,7 @@ function addressTxRow(tx) {
     : "";
   const sender = tx.input_owner ? link(`/address/${tx.input_owner}`, shortHash(tx.input_owner)) : "-";
   const receiver = tx.receiver ? link(`/address/${tx.receiver}`, shortHash(tx.receiver)) : "-";
-  const extra = tx.n_outputs > 1 ? ` <span class="hint" title="${tx.n_outputs} outputs total, showing the first. Extra outputs are often change back to the sender, but the protocol does not guarantee that - could be a genuine second recipient.">+${tx.n_outputs - 1} more</span>` : "";
+  const extra = tx.n_outputs > 1 ? ` <span class="hint" title="${receiverHint(tx.n_outputs)}">+${tx.n_outputs - 1} more</span>` : "";
   return `<tr>
       <td class="mono">${link(`/tx/${tx.txid}`, shortHash(tx.txid))} ${kind}</td>
       ${timeCell(tx.timestamp)}
