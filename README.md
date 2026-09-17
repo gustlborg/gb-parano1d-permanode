@@ -15,7 +15,7 @@ Status: the indexer, the API server and a first explorer frontend all work
 and have been tested against a live mainnet node, including a fallback
 decoder that recovers ~2.2% of blocks a node RPC bug would otherwise make
 permanently unrecoverable (see below). The frontend covers the core views
-(blocks, transactions, addresses, live mempool) but is not feature-complete.
+(dashboard, blocks, transactions, addresses, live mempool, rich list).
 
 ## Layout
 
@@ -27,11 +27,11 @@ This is a Cargo workspace:
   the static frontend, so a self-hoster only needs these two binaries plus
   the `frontend/site/` directory.
 - `frontend/site/` — the explorer UI: plain HTML/CSS/JS (ES modules), no
-  build step, no framework. Visually inspired by mempool.space's dark theme
-  and block-grid visualization, but written independently — mempool.space's
-  actual codebase is ~750 files, much of it tied to Bitcoin/Lightning/Liquid
-  features that have no Parano1d equivalent, and its name and logos are
-  trademarked regardless of the code license.
+  build step, no framework, no third-party requests (fonts are bundled
+  under `fonts/`, both SIL OFL). Six views: dashboard with the animated
+  block chain, block, transaction, address, live mempool, rich list. The
+  design tokens and layout rules it follows are documented in
+  `docs/design/README.md`.
 
 ## Building
 
