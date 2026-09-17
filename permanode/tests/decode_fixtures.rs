@@ -3,8 +3,8 @@
 //! live against a running mainnet node - see
 //! `docs/ANLEITUNG-getblock-decoder.md` section 2 for how they were made.
 
-use parano1d_permanode_indexer::decode::decode_retained_block;
-use parano1d_permanode_indexer::rpc::BlockDetailsInfo;
+use parano1d_permanode::decode::decode_retained_block;
+use parano1d_permanode::rpc::BlockDetailsInfo;
 use serde_json::Value;
 use std::path::PathBuf;
 

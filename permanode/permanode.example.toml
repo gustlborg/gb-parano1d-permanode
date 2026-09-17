@@ -1,4 +1,4 @@
-# Example config for the parano1d-permanode indexer.
+# Example config for parano1d-permanode.
 # Copy to permanode.toml next to the binary, or point --config at it.
 # Any key left out falls back to the built-in default shown here.
 
@@ -53,3 +53,11 @@ refresh_addresses_every_cycles = 120
 # ingestion, but it's still 65,536 RPC calls per populated segment against
 # the shared node (a few seconds over loopback). 0 disables the sweep.
 scan_slots_every_cycles = 360
+
+# Where the explorer + JSON API listen. Keep this on loopback for a public
+# instance and put a reverse proxy with TLS in front of it.
+listen = "127.0.0.1:8420"
+
+# Serve the explorer from a directory instead of the copy compiled into the
+# binary - only useful while editing the frontend.
+# site_dir = "frontend/site"

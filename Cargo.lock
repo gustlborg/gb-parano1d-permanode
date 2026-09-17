@@ -852,6 +852,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "include_dir"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "923d117408f1e49d914f1a379a309cffe4f18c05cf4e3d12e613a15fc81bd0dd"
+dependencies = [
+ "include_dir_macros",
+]
+
+[[package]]
+name = "include_dir_macros"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cab85a7ed0bd5f0e76d93846e0147172bed2e2d3f859bcc33a8d9699cad1a75"
+dependencies = [
+ "proc-macro2",
+ "quote",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1201,21 +1220,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
-name = "parano1d-permanode-indexer"
+name = "parano1d-permanode"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "chrono",
  "clap",
  "env_logger",
  "hex",
+ "include_dir",
  "log",
+ "mime_guess",
  "noid_chain",
  "permanode-core",
  "rusqlite",
  "serde",
  "serde_json",
+ "tokio",
  "toml",
+ "tower-http",
  "ureq",
 ]
 
@@ -1247,23 +1271,6 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
-
-[[package]]
-name = "permanode-api"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "env_logger",
- "log",
- "permanode-core",
- "rusqlite",
- "serde",
- "serde_json",
- "tokio",
- "tower-http",
-]
 
 [[package]]
 name = "permanode-core"

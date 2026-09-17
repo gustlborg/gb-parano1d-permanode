@@ -2,7 +2,7 @@
 //! `paranoid_getBlockDetails` reports `retained: null` for a block that is
 //! still within the node's serving window.
 //!
-//! Root cause (full analysis: `~/Claude/Parano1d/node-issue-17-09/REPORT.md`):
+//! Root cause (full analysis: `docs/node-rpc-marker-bug/REPORT.md`):
 //! the node stores every accepted block's body, but for every "marker"
 //! block of a multi-block commit (a catch-up suffix of ≥2 blocks, or a
 //! reorg that applies ≥2 blocks) `getBlockDetails`/`getRecentTransactions`
@@ -18,7 +18,7 @@
 //! node's own crates rather than reimplementing txid/bech32m/paged-spend
 //! logic - verified byte-identical against 40/40 live blocks with existing
 //! `retained` data before this was wired into the indexer, see
-//! `docs/decoder-poc/` and `indexer/tests/decode_fixtures.rs`.
+//! `permanode/tests/decode_fixtures.rs`.
 
 use crate::rpc::{
     BlockTransactionInfo, BlockTransactionInputInfo, BlockTransactionOutputInfo, RetainedBlockInfo,

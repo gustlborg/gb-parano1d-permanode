@@ -1,11 +1,7 @@
-frontend/mempool-upstream/
 /target
-api.log
-nohup.out
-run/permanode.sqlite3
-run/permanode.sqlite3-*
-run/permanode.toml
-# Raw design handoff downloads (extracted copies live in docs/design/)
+# Local instance: config, database, logs
+/run/
+# Design tool exports and screenshots kept locally
 /design/
-# Local screenshots (design form captures etc.)
-frontend/screenshots/
+/frontend/screenshots/
+/frontend/mempool-upstream/

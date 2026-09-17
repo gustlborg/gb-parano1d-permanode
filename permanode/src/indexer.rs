@@ -13,8 +13,8 @@ use std::thread;
 use std::time::Duration;
 
 /// Observed width of the node's getBlock serving window (see
-/// docs/ANLEITUNG-getblock-decoder.md / node-issue-17-09 REPORT.md
-/// section 6: `repro_retained_null.py 42` against a live node). Only used
+/// docs/node-rpc-marker-bug/REPORT.md section 6, measured with
+/// `repro_retained_null.py 42` against a live node). Only used
 /// to bound how far back the gap-backfill sweep still bothers looking -
 /// anything older than this is permanently gone even via getBlock.
 const GETBLOCK_SERVING_WINDOW: u64 = 42;

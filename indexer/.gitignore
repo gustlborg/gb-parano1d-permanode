@@ -1,5 +1,0 @@
-/target
-*.sqlite3
-*.sqlite3-*
-permanode.toml
-run.log
