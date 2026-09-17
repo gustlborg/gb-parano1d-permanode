@@ -111,7 +111,6 @@ function networkMetricsHtml(stats) {
         <div class="stat"><div class="v hint" title="Rough estimate derived from the
 current PoW target, not a
 measured network figure.">${hashrate(n.estimated_hashrate_hs)}</div><div class="k">Network hashrate (est.)</div></div>
-        <div class="stat"><div class="v">${n.difficulty_bits ?? "-"}</div><div class="k">Difficulty (bits)</div></div>
         <div class="stat"><div class="v hint" title="From this permanode's own recorded
 blocks, not the node - a fresh
 install won't have a 24h figure
