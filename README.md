@@ -50,6 +50,34 @@ the node itself no longer has it either.
   list and address balances are complete and verified against the node's
   own totals, not reconstructed from partial history.
 
+## How it works
+
+- **Blocks and transactions** come from `getBlockDetails` every poll
+  (default 5 s), with the `getBlock` decoder as fallback (see below). A
+  block is written as one transaction; reorgs mark the old block orphaned
+  and store the replacement, nothing is overwritten. Blocks and
+  transactions are final at 18 confirmations (the protocol's maximum
+  reorg depth is 17); the pages show the count and a "final" mark.
+- **Balances** come from two sources, shown side by side. *Recorded*
+  figures are computed from the transactions this permanode has stored,
+  so they only cover activity since its first start. *Live* figures come
+  straight from the node's current UTXO state and are always complete.
+- **The UTXO sweep** reads every live UTXO of the node (`getStateMap` to
+  find the populated state segments, `getSlot` for each slot in them) on
+  the first poll after start and then every `scan_slots_every_cycles`
+  polls (default 360, about 30 minutes), assigns each UTXO to its owner
+  and stores balance and UTXO count per address. Every run checks its own
+  total against the node's count and logs the result; a shortfall at an
+  unchanged tip is logged as a warning. This is what makes the rich list
+  and the address balances complete for addresses that never appear in
+  the recorded history. The individual UTXOs are not stored; the address
+  page loads them from the node on request.
+- **Gaps** are heights whose body the node had already pruned when the
+  indexer got to them (for example after an outage longer than the
+  node's serving window, or on a node that just synced from a snapshot).
+  They are listed under `/api/v1/gaps` and counted in the status bar;
+  heights still inside the serving window are retried automatically.
+
 ## Configuration
 
 `permanode.toml` (see `permanode/permanode.example.toml` for every key):
@@ -134,9 +162,13 @@ wire format.
 ## Monitoring
 
 `contrib/watchdog/` has a small stdlib-only Python watchdog with systemd
-units: it checks the services, the node, the indexer's lag, the public
-site and the disk every two minutes and reports changes plus a daily
-heartbeat over Telegram (or just the journal). An indexer that silently
+units: every two minutes it checks that the services are active, the
+node answers, the indexer is not lagging behind the node, blocks keep
+arriving, the public site is reachable and in sync, and disk and memory
+have headroom. It reports every change (new problem, resolved problem)
+and one daily heartbeat over Telegram, or only to the journal if no bot
+is configured. Setup, including how to create the Telegram bot and find
+the chat id, is in `contrib/watchdog/README.md`. An indexer that silently
 stops loses history the network will not hand out again, so run
 something like it.
 
