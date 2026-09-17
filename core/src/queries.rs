@@ -561,6 +561,37 @@ pub fn avg_block_time_seconds(conn: &Connection, window_seconds: i64, now_unix: 
     }
 }
 
+#[derive(Debug, Serialize)]
+pub struct RichListEntry {
+    pub address: String,
+    pub live_balance_micronoid: String,
+    pub live_utxo_count: i64,
+    pub fetched_at: String,
+}
+
+/// The address balance cache (see core::db::address_balance_cache),
+/// largest live balance first. Figures are only as fresh as the indexer's
+/// last refresh pass - `fetched_at` says when that was for each row, since
+/// different addresses can lag by different amounts if the refresh sweep
+/// is still catching up on a growing address list.
+pub fn richlist(conn: &Connection, limit: i64) -> Result<Vec<RichListEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT address, live_balance_micronoid, live_utxo_count, fetched_at
+         FROM address_balance_cache
+         ORDER BY CAST(live_balance_micronoid AS INTEGER) DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit], |row| {
+        Ok(RichListEntry {
+            address: row.get(0)?,
+            live_balance_micronoid: row.get(1)?,
+            live_utxo_count: row.get(2)?,
+            fetched_at: row.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 pub fn recent_gaps(conn: &Connection, limit: i64) -> Result<Vec<GapEntry>> {
     let mut stmt = conn.prepare(
         "SELECT height, hash, detected_at, note, resolved_at, resolution

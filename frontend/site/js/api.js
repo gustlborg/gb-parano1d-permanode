@@ -17,5 +17,6 @@ export const api = {
     getJson(`/address/${addr}?page=${page}&page_size=${pageSize}`),
   addressUtxos: (addr) => getJson(`/address/${addr}/utxos`),
   gaps: () => getJson("/gaps"),
+  richlist: () => getJson("/richlist"),
   mempool: () => getJson("/mempool"),
 };

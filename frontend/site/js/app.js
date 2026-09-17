@@ -1,5 +1,5 @@
 import { api } from "./api.js";
-import { homeView, blockView, txView, addressView, mempoolView, tickerHtml, notFoundHtml } from "./views.js";
+import { homeView, blockView, txView, addressView, mempoolView, richlistView, tickerHtml, notFoundHtml } from "./views.js";
 
 const app = document.getElementById("app");
 const ticker = document.getElementById("ticker");
@@ -40,6 +40,8 @@ async function render() {
       result = await homeView();
     } else if (path === "/mempool") {
       result = await mempoolView();
+    } else if (path === "/richlist") {
+      result = await richlistView();
     } else if (path.startsWith("/block/")) {
       result = await blockView(decodeURIComponent(path.slice("/block/".length)));
     } else if (path.startsWith("/tx/")) {

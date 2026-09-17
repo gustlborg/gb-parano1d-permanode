@@ -39,3 +39,8 @@ getblock_fallback = true
 # still matches the node's own output. Safe to turn off after it's been
 # quiet for a while.
 decoder_selfcheck = true
+
+# How often (in poll cycles) to refresh the live current-balance cache for
+# every address this permanode has ever recorded (paranoid_getSlotsByOwner,
+# one call per known address - powers the rich list).
+refresh_addresses_every_cycles = 120

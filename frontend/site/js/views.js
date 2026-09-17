@@ -260,7 +260,8 @@ history since genesis, for comparison.">Live UTXOs (network): <strong>${stats.ne
     ${stats.gaps > 0 ? `<span class="hint" title="Body still missing outside the node's getBlock serving window - permanently gone.">Gaps: <strong class="mono">${stats.gaps}</strong></span>` : ""}
     ${stats.gaps_resolved > 0 ? `<span class="hint" title="Blocks the getBlock fallback decoder recovered after an initial gap - see project docs on the node RPC bug this works around.">Gaps recovered: <strong class="mono">${stats.gaps_resolved}</strong></span>` : ""}
     ${stats.decoder_mismatches > 0 ? `<span class="hint" title="Times the fallback decoder's output disagreed with the node's own getBlockDetails for a block both could decode - should be 0.">Decoder mismatches: <strong class="mono">${stats.decoder_mismatches}</strong></span>` : ""}
-    <span>${link("/mempool", "Live mempool →")}</span>`;
+    <span>${link("/mempool", "Live mempool →")}</span>
+    <span>${link("/richlist", "Rich list →")}</span>`;
 }
 
 function txRow(tx) {
@@ -562,6 +563,34 @@ function mempoolTableHtml(info) {
     .join("");
   return `<thead><tr><th>Txid</th><th>In → Out</th><th>Fee</th><th>Fee rate</th></tr></thead>
     <tbody>${rows || '<tr><td colspan="4">Mempool is empty.</td></tr>'}</tbody>`;
+}
+
+export async function richlistView() {
+  const entries = await api.richlist();
+  const rows = entries
+    .map(
+      (e, i) => `<tr>
+        <td>${i + 1}</td>
+        <td class="mono">${link(`/address/${e.address}`, shortHash(e.address, 12, 8))}</td>
+        <td>${noid(e.live_balance_micronoid)}</td>
+        <td>${e.live_utxo_count}</td>
+        <td class="hint" title="When the indexer last refreshed this figure - it updates
+periodically for every address it has ever seen, not on every request.">${timeAgo(Math.floor(new Date(e.fetched_at).getTime() / 1000))}</td>
+      </tr>`
+    )
+    .join("");
+  return `
+    <div class="panel">
+      <h2>Rich list</h2>
+      <p>Every address this permanode has ever recorded, by current live balance
+        (paranoid_getSlotsByOwner - the node's actual current state, not
+        reconstructed from history). Refreshed periodically in the background,
+        not on every page view.</p>
+      <div class="table-scroll"><table>
+        <thead><tr><th>#</th><th>Address</th><th>Balance</th><th>UTXOs</th><th>Updated</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="5">No known addresses yet.</td></tr>'}</tbody>
+      </table></div>
+    </div>`;
 }
 
 export function notFoundHtml(msg) {

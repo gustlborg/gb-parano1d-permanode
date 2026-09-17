@@ -79,6 +79,24 @@ impl RpcClient {
         };
         Ok(Some(hex::decode(hex_str).context("getBlock: invalid hex")?))
     }
+
+    /// Every currently-live (unspent) slot owned by `address`, from the
+    /// node's Live State - see core::live_rpc::RpcClient::get_slots_by_owner
+    /// for the full rationale (same call, duplicated here since the
+    /// indexer has its own RPC client rather than depending on the API's).
+    pub fn get_slots_by_owner(&self, address: &str) -> Result<Vec<SlotInfo>> {
+        let v = self.call("paranoid_getSlotsByOwner", json!([address]))?;
+        Ok(serde_json::from_value(v)?)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SlotInfo {
+    pub slot_index: u64,
+    pub value: u64,
+    pub creation_id: u64,
+    pub owner: String,
+    pub empty: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
