@@ -75,11 +75,14 @@ pub fn run(conn: &Connection, rpc: &RpcClient, cfg: &Config) -> Result<()> {
 fn poll_once(conn: &Connection, rpc: &RpcClient, cfg: &Config) -> Result<()> {
     let tip = rpc.block_count()?;
 
-    // A fresh database starts as far back as the node can still serve
-    // bodies for, rather than at the tip - free history on day one.
-    let last_processed: u64 = db::get_state(conn, "last_processed_height")?
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| tip.saturating_sub(GETBLOCK_SERVING_WINDOW + 1));
+    let last_processed: u64 = match db::get_state(conn, "last_processed_height")?.and_then(|s| s.parse().ok()) {
+        Some(h) => h,
+        None => {
+            let start = first_start_height(rpc, tip);
+            info!("fresh database: starting at height {start} (oldest body the node still serves)");
+            start.saturating_sub(1)
+        }
+    };
 
     // Ingest any new heights.
     for height in (last_processed + 1)..=tip {
@@ -137,6 +140,21 @@ fn try_getblock_fallback(rpc: &RpcClient, height: u64, expected_hash: &str) -> F
             FallbackOutcome::DecodeFailed(e.to_string())
         }
     }
+}
+
+/// Where a fresh database begins: the oldest height the node still serves
+/// a body for, probed from the tip backwards. Assuming the full serving
+/// window would record false gaps on a node that just synced from a
+/// snapshot and only holds bodies from that point on.
+fn first_start_height(rpc: &RpcClient, tip: u64) -> u64 {
+    let mut start = tip;
+    for h in (tip.saturating_sub(GETBLOCK_SERVING_WINDOW)..=tip).rev() {
+        match rpc.get_block_raw(h) {
+            Ok(Some(_)) => start = h,
+            _ => break,
+        }
+    }
+    start
 }
 
 /// What a height should be written as, decided before any database write

@@ -1,0 +1,18 @@
+# Environment for permanode-watchdog (loaded by the systemd unit).
+# Create a bot with @BotFather, send it a message, then read the chat id from
+# https://api.telegram.org/bot<TOKEN>/getUpdates . Without token/chat id the
+# watchdog only logs to the journal.
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+# Public site to check through the proxy (leave empty to skip).
+PUBLIC_URL=https://example.org
+NODE_RPC=http://127.0.0.1:9601
+PERMANODE_URL=http://127.0.0.1:8420
+SERVICES=parano1d,parano1d-permanode,caddy
+DISK_PATH=/var/lib/permanode
+DISK_WARN_PCT=80
+LAG_WARN_BLOCKS=3
+STALE_MINUTES=6
+MEM_WARN_MB=200
+# Hour (local time) for the daily "all OK" heartbeat.
+HEARTBEAT_HOUR=9

@@ -199,6 +199,31 @@ async fn get_stats(State(state): State<Arc<AppState>>) -> ApiResult<StatsRespons
     Ok(Json(StatsResponse { chain, network }))
 }
 
+/// Confirmations at which a block can no longer be reorganized away (the
+/// protocol's maximum rollback is 17 blocks).
+const FINAL_CONFIRMATIONS: i64 = 18;
+
+/// Input shapes are checked before touching the database or the node:
+/// every query is parameterized anyway, but a 64-hex txid or a bech32m
+/// `o1…` address is the only thing worth a lookup - anything else is a
+/// fast 404 instead of a wasted query and RPC call.
+fn is_hex64(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+fn is_address(s: &str) -> bool {
+    s.starts_with("o1")
+        && (50..=100).contains(&s.len())
+        && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+}
+
+/// JSON with a cache policy: data that can still change (young blocks,
+/// live state) must always be re-fetched, final history may be cached for
+/// an hour by browsers and proxies.
+fn cached_json<T: serde::Serialize>(value: T, is_final: bool) -> Response {
+    let policy = if is_final { "public, max-age=3600" } else { "no-cache" };
+    ([(header::CACHE_CONTROL, policy)], Json(value)).into_response()
+}
+
 #[derive(Deserialize)]
 struct LimitQuery {
     limit: Option<i64>,
@@ -216,10 +241,16 @@ async fn get_blocks(
 async fn get_block_by_height(
     State(state): State<Arc<AppState>>,
     Path(height): Path<i64>,
-) -> Result<Json<queries::BlockDetail>, ApiErrorOr404> {
+) -> Result<Response, ApiErrorOr404> {
+    if height < 0 {
+        return Err(ApiErrorOr404::NotFound);
+    }
     let conn = state.db();
     match queries::block_by_height(&conn, height)? {
-        Some(b) => Ok(Json(b)),
+        Some(b) => {
+            let is_final = b.confirmations.is_some_and(|c| c >= FINAL_CONFIRMATIONS);
+            Ok(cached_json(b, is_final))
+        }
         None => Err(ApiErrorOr404::NotFound),
     }
 }
@@ -227,10 +258,16 @@ async fn get_block_by_height(
 async fn get_block_by_hash(
     State(state): State<Arc<AppState>>,
     Path(hash): Path<String>,
-) -> Result<Json<queries::BlockDetail>, ApiErrorOr404> {
+) -> Result<Response, ApiErrorOr404> {
+    if !is_hex64(&hash) {
+        return Err(ApiErrorOr404::NotFound);
+    }
     let conn = state.db();
     match queries::block_by_hash(&conn, &hash)? {
-        Some(b) => Ok(Json(b)),
+        Some(b) => {
+            let is_final = b.confirmations.is_some_and(|c| c >= FINAL_CONFIRMATIONS);
+            Ok(cached_json(b, is_final))
+        }
         None => Err(ApiErrorOr404::NotFound),
     }
 }
@@ -238,10 +275,16 @@ async fn get_block_by_hash(
 async fn get_tx(
     State(state): State<Arc<AppState>>,
     Path(txid): Path<String>,
-) -> Result<Json<queries::TxDetail>, ApiErrorOr404> {
+) -> Result<Response, ApiErrorOr404> {
+    if !is_hex64(&txid) {
+        return Err(ApiErrorOr404::NotFound);
+    }
     let conn = state.db();
     match queries::tx_by_txid(&conn, &txid)? {
-        Some(t) => Ok(Json(t)),
+        Some(t) => {
+            let is_final = t.block.canonical && t.confirmations.is_some_and(|c| c >= FINAL_CONFIRMATIONS);
+            Ok(cached_json(t, is_final))
+        }
         None => Err(ApiErrorOr404::NotFound),
     }
 }
@@ -288,7 +331,10 @@ async fn get_address(
     State(state): State<Arc<AppState>>,
     Path(address): Path<String>,
     Query(q): Query<AddressQuery>,
-) -> ApiResult<AddressPage> {
+) -> Result<Json<AddressPage>, ApiErrorOr404> {
+    if !is_address(&address) {
+        return Err(ApiErrorOr404::NotFound);
+    }
     let page = q.page.unwrap_or(1).max(1);
     let page_size = q.page_size.unwrap_or(25).clamp(1, 100);
     let (transactions, total, balance) = {
@@ -320,7 +366,10 @@ async fn get_address(
 async fn get_address_utxos(
     State(state): State<Arc<AppState>>,
     Path(address): Path<String>,
-) -> ApiResult<AddressUtxosPage> {
+) -> Result<Json<AddressUtxosPage>, ApiErrorOr404> {
+    if !is_address(&address) {
+        return Err(ApiErrorOr404::NotFound);
+    }
     let live_utxos = fetch_live_slots(&state.rpc, &address).await;
     Ok(Json(AddressUtxosPage { address, live_utxos }))
 }

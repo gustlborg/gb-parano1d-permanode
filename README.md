@@ -131,6 +131,15 @@ self-check (`decoder_selfcheck`) decodes every normal block a second way
 and counts any disagreement, in case a future node version changes the
 wire format.
 
+## Monitoring
+
+`contrib/watchdog/` has a small stdlib-only Python watchdog with systemd
+units: it checks the services, the node, the indexer's lag, the public
+site and the disk every two minutes and reports changes plus a daily
+heartbeat over Telegram (or just the journal). An indexer that silently
+stops loses history the network will not hand out again, so run
+something like it.
+
 ## Crash safety
 
 SQLite in WAL mode with `synchronous=FULL`: every commit is fsynced, and

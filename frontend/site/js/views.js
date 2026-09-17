@@ -15,6 +15,8 @@ import * as health from "./health.js";
 const LIVE_REFRESH_MS = 1000;
 const STATS_REFRESH_MS = 20_000;
 const ALL_BLOCKS_LIMIT = 200;
+// The protocol's maximum reorg depth is 17 blocks; from 18 on a block is final.
+const FINAL_CONFIRMATIONS = 18;
 
 function link(href, text, cls = "") {
   return `<a href="${href}" data-link${cls ? ` class="${cls}"` : ""}>${escapeHtml(text)}</a>`;
@@ -351,6 +353,15 @@ export async function blockView(idParam) {
     kvRow("Hash", block.hash),
     kvRow("Parent", link(`/block/${block.prev_hash}`, block.prev_hash), "hi"),
     kvRow("Timestamp", `${fullTime(block.timestamp)} (<span class="ago" data-ts="${block.timestamp}"></span>)`, "t2"),
+    kvRow(
+      "Confirmations",
+      block.confirmations == null
+        ? "-"
+        : block.confirmations >= FINAL_CONFIRMATIONS
+        ? `${int(block.confirmations)} <span class="tag" title="Beyond the protocol's maximum reorg depth of 17 blocks">final</span>`
+        : `${block.confirmations} <span class="dim">(final at ${FINAL_CONFIRMATIONS})</span>`,
+      "t2"
+    ),
     kvRow("Miner", addrLink(block.miner, true)),
     kvRow("Proof class", block.proof_class ?? "-", "t2"),
     kvRow("Reward", noid(block.reward_micronoid), "t2"),
@@ -406,9 +417,11 @@ export async function txView(txid) {
     : tx.development_payout
     ? '<span class="tag">dev payout</span> development payout'
     : "transfer";
-  const status = tx.block.canonical
-    ? '<span class="status">confirmed</span>'
-    : '<span class="status bad" title="The block containing this transaction was later replaced by a reorg">orphaned</span>';
+  const status = !tx.block.canonical
+    ? '<span class="status bad" title="The block containing this transaction was later replaced by a reorg">orphaned</span>'
+    : tx.confirmations >= FINAL_CONFIRMATIONS
+    ? `<span class="status" title="${FINAL_CONFIRMATIONS} or more confirmations - beyond the protocol's maximum reorg depth">final · ${int(tx.confirmations)} confirmations</span>`
+    : `<span class="status" title="Final at ${FINAL_CONFIRMATIONS} confirmations">confirmed · ${tx.confirmations ?? "?"} confirmation${tx.confirmations === 1 ? "" : "s"}</span>`;
 
   const rows = [
     kvRow("Txid", tx.txid),

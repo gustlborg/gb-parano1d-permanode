@@ -1,0 +1,9 @@
+[Unit]
+Description=Permanode watchdog (services, node, indexer lag, disk, public site)
+
+[Service]
+Type=oneshot
+DynamicUser=yes
+StateDirectory=permanode-watchdog
+EnvironmentFile=/etc/permanode-watchdog.conf
+ExecStart=/usr/local/sbin/permanode-watchdog
