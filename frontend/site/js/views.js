@@ -202,6 +202,9 @@ export async function txView(txid) {
       (o) => `<li><span>${link(`/address/${o.owner}`, shortHash(o.owner))}</span><span>${noid(o.amount_micronoid)}</span></li>`
     )
     .join("");
+  const receiverSummary = tx.outputs
+    .map((o) => `${link(`/address/${o.owner}`, o.owner)} (${noid(o.amount_micronoid)})`)
+    .join("<br>") || "-";
 
   return `
     <div class="panel">
@@ -215,6 +218,7 @@ export async function txView(txid) {
           tx.coinbase ? '<span class="badge coinbase">coinbase (block reward)</span>' : tx.development_payout ? '<span class="badge dev">development payout</span>' : "transfer"
         }</dd>
         <dt>Sender</dt><dd class="mono">${tx.input_owner ? link(`/address/${tx.input_owner}`, tx.input_owner) : "-"}</dd>
+        <dt>Receiver${tx.outputs.length > 1 ? "s" : ""}</dt><dd class="mono">${receiverSummary}</dd>
         <dt>Fee</dt><dd>${noid(tx.fee_micronoid)}</dd>
         <dt>Input sum</dt><dd>${noid(tx.input_sum_micronoid)}</dd>
         <dt>Output sum</dt><dd>${noid(tx.output_sum_micronoid)}</dd>
