@@ -6,3 +6,5 @@
 /frontend/screenshots/
 /frontend/mempool-upstream/
 /dist/
+# TLS material for the public instance - never commit
+/security/
