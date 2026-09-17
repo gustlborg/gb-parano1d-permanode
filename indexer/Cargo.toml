@@ -8,7 +8,13 @@ anyhow = "1.0.104"
 chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.7", features = ["derive"] }
 env_logger = "0.11.11"
+hex = "0.4"
 log = "0.4.34"
+# getBlock fallback decoder (see src/decode.rs): links the node's own
+# crates so transaction-field derivation stays byte-identical to
+# noid_rpc's get_block_details, instead of reimplementing txid/bech32m/
+# paged-spend logic ourselves.
+noid_chain = { git = "https://git.parano1d.org/ignotusnemo/parano1d.git", tag = "v1.1.0" }
 permanode-core = { path = "../core" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }

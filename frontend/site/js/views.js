@@ -252,7 +252,9 @@ indexing - not the network-wide total.">Live UTXOs (recorded): <strong>${stats.l
     ${stats.network_active_slots != null ? `<span class="hint" title="The node's own count across its entire
 history since genesis, for comparison.">Live UTXOs (network): <strong>${stats.network_active_slots}</strong></span>` : ""}
     <span>History since: <strong>${oldest}</strong></span>
-    ${stats.gaps > 0 ? `<span>Gaps: <strong class="mono">${stats.gaps}</strong></span>` : ""}
+    ${stats.gaps > 0 ? `<span class="hint" title="Body still missing outside the node's getBlock serving window - permanently gone.">Gaps: <strong class="mono">${stats.gaps}</strong></span>` : ""}
+    ${stats.gaps_resolved > 0 ? `<span class="hint" title="Blocks the getBlock fallback decoder recovered after an initial gap - see project docs on the node RPC bug this works around.">Gaps recovered: <strong class="mono">${stats.gaps_resolved}</strong></span>` : ""}
+    ${stats.decoder_mismatches > 0 ? `<span class="hint" title="Times the fallback decoder's output disagreed with the node's own getBlockDetails for a block both could decode - should be 0.">Decoder mismatches: <strong class="mono">${stats.decoder_mismatches}</strong></span>` : ""}
     <span>${link("/mempool", "Live mempool →")}</span>`;
 }
 

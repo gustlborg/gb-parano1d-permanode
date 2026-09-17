@@ -5,7 +5,7 @@
 //! behavior in practice diverged from what the docs promise.
 
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 pub struct RpcClient {
@@ -66,9 +66,22 @@ impl RpcClient {
         }
         Ok(Some(serde_json::from_value(v)?))
     }
+
+    /// Raw canonical block bytes for `height` (`paranoid_getBlock`), decoded
+    /// from hex. Unlike getBlockDetails this is *not* filtered by the
+    /// node's "recursive suffix marker" bundle accessor, so it still serves
+    /// marker blocks - see decode.rs and project docs for why that matters.
+    /// Still only valid within the retention/serving window; `None` after.
+    pub fn get_block_raw(&self, height: u64) -> Result<Option<Vec<u8>>> {
+        let v = self.call("paranoid_getBlock", json!([height]))?;
+        let Some(hex_str) = v.as_str() else {
+            return Ok(None);
+        };
+        Ok(Some(hex::decode(hex_str).context("getBlock: invalid hex")?))
+    }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[allow(dead_code)] // full RPC schema kept for fidelity even where we don't persist every field yet
 pub struct BlockHeaderInfo {
     pub height: u64,
@@ -85,13 +98,13 @@ pub struct BlockHeaderInfo {
     pub alloc_counter: u64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BlockDetailsInfo {
     pub header: BlockHeaderInfo,
     pub retained: Option<RetainedBlockInfo>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[allow(dead_code)]
 pub struct RetainedBlockInfo {
     pub proof_class: String,
@@ -105,7 +118,7 @@ pub struct RetainedBlockInfo {
     pub transactions: Vec<BlockTransactionInfo>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[allow(dead_code)]
 pub struct BlockTransactionInfo {
     pub position: u32,
@@ -125,7 +138,7 @@ pub struct BlockTransactionInfo {
     pub outputs: Vec<BlockTransactionOutputInfo>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BlockTransactionInputInfo {
     pub page: u32,
     pub lane: u32,
@@ -134,7 +147,7 @@ pub struct BlockTransactionInputInfo {
     pub creation_id: u64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BlockTransactionOutputInfo {
     pub page: u32,
     pub lane: u32,

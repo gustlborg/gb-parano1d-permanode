@@ -18,14 +18,38 @@
 //!   to silently ignore.
 
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 pub fn open(path: &str) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     init_schema(&conn)?;
+    migrate(&conn)?;
     Ok(conn)
+}
+
+/// Idempotent schema migrations for columns added after the initial
+/// release. Runs on every open; each ALTER is guarded by a
+/// PRAGMA table_info check so it's safe against the live systemd-managed
+/// database, not just a fresh one from init_schema.
+fn migrate(conn: &Connection) -> Result<()> {
+    add_column_if_missing(conn, "blocks", "body_source", "TEXT")?;
+    add_column_if_missing(conn, "ingest_gaps", "resolved_at", "TEXT")?;
+    add_column_if_missing(conn, "ingest_gaps", "resolution", "TEXT")?;
+    Ok(())
+}
+
+fn add_column_if_missing(conn: &Connection, table: &str, column: &str, decl_type: &str) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let exists = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(|r| r.ok())
+        .any(|name| name == column);
+    if !exists {
+        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl_type}"), [])?;
+    }
+    Ok(())
 }
 
 fn init_schema(conn: &Connection) -> Result<()> {
@@ -186,6 +210,54 @@ pub fn record_gap(conn: &Connection, height: u64, hash: Option<&str>, now: &str,
         "INSERT INTO ingest_gaps (height, hash, detected_at, note) VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(height) DO NOTHING",
         params![height as i64, hash, now, note],
+    )?;
+    Ok(())
+}
+
+/// Marks a previously recorded gap as resolved (e.g. by the getBlock
+/// fallback decoder). The row is kept, not deleted - append-only, so the
+/// gap's original detection stays visible alongside how it got fixed.
+pub fn resolve_gap(conn: &Connection, height: u64, resolved_at: &str, resolution: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE ingest_gaps SET resolved_at = ?2, resolution = ?3
+         WHERE height = ?1 AND resolved_at IS NULL",
+        params![height as i64, resolved_at, resolution],
+    )?;
+    Ok(())
+}
+
+/// Heights with an unresolved gap at or above `min_height` - the sweep only
+/// bothers with heights still inside the node's getBlock serving window,
+/// since anything older is permanently gone.
+pub fn open_gap_heights(conn: &Connection, min_height: u64) -> Result<Vec<u64>> {
+    let mut stmt = conn.prepare(
+        "SELECT height FROM ingest_gaps WHERE resolved_at IS NULL AND height >= ?1 ORDER BY height",
+    )?;
+    let rows = stmt.query_map(params![min_height as i64], |row| {
+        Ok(row.get::<_, i64>(0)? as u64)
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// The block_id for an already-known (height, hash) pair whose body was not
+/// captured yet, if any - used by the getBlock fallback to find the row it
+/// should backfill instead of inserting a duplicate.
+pub fn uncaptured_block_id(conn: &Connection, height: u64, hash: &str) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM blocks WHERE height = ?1 AND hash = ?2 AND body_captured = 0",
+            params![height as i64, hash],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+/// Marks an existing block row's body as now captured (via the getBlock
+/// fallback), after its transaction rows have been inserted by the caller.
+pub fn mark_body_recovered(conn: &Connection, block_id: i64, body_source: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE blocks SET body_captured = 1, body_source = ?2 WHERE id = ?1",
+        params![block_id, body_source],
     )?;
     Ok(())
 }
