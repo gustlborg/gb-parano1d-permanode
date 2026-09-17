@@ -40,7 +40,7 @@ function renderNav() {
       const active = n.key === currentView ? ' class="active"' : "";
       return n.href
         ? `<a href="${n.href}" data-link data-view="${n.key}"${active}>${n.label}</a>`
-        : `<span data-view="${n.key}"${active} title="Open a ${n.label.toLowerCase()} first">${n.label}</span>`;
+        : `<span data-view="${n.key}"${active} title="Open ${n.key === "address" ? "an address" : "a transaction"} first">${n.label}</span>`;
     })
     .join("");
 }
