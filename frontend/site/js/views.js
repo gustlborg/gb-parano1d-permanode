@@ -219,7 +219,7 @@ function txRow(tx) {
     : "";
   const sender = tx.input_owner ? link(`/address/${tx.input_owner}`, shortHash(tx.input_owner)) : "-";
   const receiver = tx.receiver ? link(`/address/${tx.receiver}`, shortHash(tx.receiver)) : "-";
-  const extra = tx.n_outputs > 1 ? ` <span class="hint" title="${tx.n_outputs} receivers total, showing the first">+${tx.n_outputs - 1} more</span>` : "";
+  const extra = tx.n_outputs > 1 ? ` <span class="hint" title="${tx.n_outputs} outputs total, showing the first. Extra outputs are often change back to the sender, but the protocol does not guarantee that - could be a genuine second recipient.">+${tx.n_outputs - 1} more</span>` : "";
   return `<tr>
       <td class="mono">${link(`/tx/${tx.txid}`, shortHash(tx.txid))} ${kind}</td>
       <td class="mono">${sender}</td>
@@ -325,7 +325,7 @@ function addressTxRow(tx) {
     : "";
   const sender = tx.input_owner ? link(`/address/${tx.input_owner}`, shortHash(tx.input_owner)) : "-";
   const receiver = tx.receiver ? link(`/address/${tx.receiver}`, shortHash(tx.receiver)) : "-";
-  const extra = tx.n_outputs > 1 ? ` <span class="hint" title="${tx.n_outputs} receivers total, showing the first">+${tx.n_outputs - 1} more</span>` : "";
+  const extra = tx.n_outputs > 1 ? ` <span class="hint" title="${tx.n_outputs} outputs total, showing the first. Extra outputs are often change back to the sender, but the protocol does not guarantee that - could be a genuine second recipient.">+${tx.n_outputs - 1} more</span>` : "";
   return `<tr>
       <td class="mono">${link(`/tx/${tx.txid}`, shortHash(tx.txid))} ${kind}</td>
       ${timeCell(tx.timestamp)}
