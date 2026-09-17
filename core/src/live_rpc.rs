@@ -76,6 +76,28 @@ impl RpcClient {
         let v = self.call("paranoid_getMiningInfo", json!([]))?;
         Ok(serde_json::from_value(v)?)
     }
+
+    /// Every currently-live (unspent) slot owned by `address`, read
+    /// straight from the node's Live State - not reconstructed from
+    /// transaction history at all, so it's correct regardless of whether
+    /// this permanode has recorded any of the address's activity. This is
+    /// how third-party explorers can show a correct balance for an address
+    /// whose transactions they never archived either: current state and
+    /// historical transaction log are two different things on this chain,
+    /// and only the latter is short-lived.
+    pub fn get_slots_by_owner(&self, address: &str) -> Result<Vec<SlotInfo>> {
+        let v = self.call("paranoid_getSlotsByOwner", json!([address]))?;
+        Ok(serde_json::from_value(v)?)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlotInfo {
+    pub slot_index: u64,
+    pub value: u64,
+    pub creation_id: u64,
+    pub owner: String,
+    pub empty: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

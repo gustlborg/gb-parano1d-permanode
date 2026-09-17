@@ -229,7 +229,14 @@ struct AddressPage {
     page_size: i64,
     total: i64,
     transactions: Vec<queries::TxSummary>,
+    /// Computed from this permanode's own recorded history only.
     balance: queries::AddressBalance,
+    /// Read live from the node's current Live State
+    /// (paranoid_getSlotsByOwner) - correct regardless of when this
+    /// permanode started recording. `null` if the node couldn't be
+    /// reached for this.
+    live_balance_micronoid: Option<String>,
+    live_utxo_count: Option<u64>,
 }
 
 async fn get_address(
@@ -237,11 +244,34 @@ async fn get_address(
     Path(address): Path<String>,
     Query(q): Query<AddressQuery>,
 ) -> ApiResult<AddressPage> {
-    let conn = state.conn.lock().unwrap();
     let page = q.page.unwrap_or(1).max(1);
     let page_size = q.page_size.unwrap_or(25).clamp(1, 100);
-    let (transactions, total) = queries::txs_by_address(&conn, &address, page, page_size)?;
-    let balance = queries::address_balance(&conn, &address)?;
+    let (transactions, total, balance) = {
+        let conn = state.conn.lock().unwrap();
+        let (transactions, total) = queries::txs_by_address(&conn, &address, page, page_size)?;
+        let balance = queries::address_balance(&conn, &address)?;
+        (transactions, total, balance)
+    };
+
+    // Read straight from the node's current Live State, independent of
+    // anything this permanode has itself recorded - correct even for an
+    // address with zero recorded history. Best-effort: a node hiccup here
+    // shouldn't fail the whole address page.
+    let rpc_client = state.rpc.clone();
+    let addr_for_rpc = address.clone();
+    let live_slots = tokio::task::spawn_blocking(move || rpc_client.get_slots_by_owner(&addr_for_rpc))
+        .await
+        .ok()
+        .and_then(|r| r.ok());
+    let (live_balance_micronoid, live_utxo_count) = match live_slots {
+        Some(slots) => {
+            let live: Vec<_> = slots.into_iter().filter(|s| !s.empty).collect();
+            let sum: u64 = live.iter().map(|s| s.value).sum();
+            (Some(sum.to_string()), Some(live.len() as u64))
+        }
+        None => (None, None),
+    };
+
     Ok(Json(AddressPage {
         address,
         page,
@@ -249,6 +279,8 @@ async fn get_address(
         total,
         transactions,
         balance,
+        live_balance_micronoid,
+        live_utxo_count,
     }))
 }
 
