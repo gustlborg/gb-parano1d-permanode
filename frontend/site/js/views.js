@@ -53,7 +53,7 @@ function wireSquare(canvas, getTxs, opts = {}) {
 }
 
 const STRIP_BLOCK_COUNT = 8;
-const LIVE_REFRESH_MS = 8000;
+const LIVE_REFRESH_MS = 1000;
 
 function stripTilesHtml(mempoolInfo, stripBlocks, stripSummaries) {
   return [
