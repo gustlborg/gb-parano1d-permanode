@@ -55,17 +55,8 @@ function wireSquare(canvas, getTxs, opts = {}) {
 const STRIP_BLOCK_COUNT = 8;
 const LIVE_REFRESH_MS = 8000;
 
-export async function homeView() {
-  const [summaries, mempoolInfo] = await Promise.all([
-    api.blocks(25),
-    api.mempool().catch(() => null),
-  ]);
-  const stripSummaries = summaries.slice(0, STRIP_BLOCK_COUNT);
-  const stripBlocks = await Promise.all(
-    stripSummaries.map((b) => api.blockByHeight(b.height).catch(() => null))
-  );
-
-  const tilesHtml = [
+function stripTilesHtml(mempoolInfo, stripBlocks, stripSummaries) {
+  return [
     `<div class="block-tile mempool" id="mempool-tile">
        <a class="square" href="/mempool" data-link><canvas id="mempool-canvas"></canvas></a>
        <div class="label"><strong>Mempool</strong><br>${mempoolInfo ? mempoolInfo.size : "-"} pending</div>
@@ -80,40 +71,82 @@ export async function homeView() {
         </div>`;
     }),
   ].join('<span class="chain-arrow">←</span>');
+}
+
+async function fetchStrip(summaries) {
+  const stripSummaries = summaries.slice(0, STRIP_BLOCK_COUNT);
+  const stripBlocks = await Promise.all(
+    stripSummaries.map((b) => api.blockByHeight(b.height).catch(() => null))
+  );
+  return { stripSummaries, stripBlocks };
+}
+
+export async function homeView() {
+  let summaries = await api.blocks(25);
+  let mempoolInfo = await api.mempool().catch(() => null);
+  let { stripSummaries, stripBlocks } = await fetchStrip(summaries);
 
   const html = `
-    <div class="chain-strip" id="chain-strip">${tilesHtml}</div>
+    <div class="chain-strip" id="chain-strip">${stripTilesHtml(mempoolInfo, stripBlocks, stripSummaries)}</div>
     <div class="panel">
       <h2>Recent blocks</h2>
-      ${blocksTable(summaries)}
+      <div id="recent-blocks-table">${blocksTable(summaries)}</div>
     </div>`;
 
   function mount(root) {
-    const disposers = [];
-    let liveMempool = mempoolInfo;
-    const mempoolCanvas = root.querySelector("#mempool-canvas");
-    if (mempoolCanvas) {
-      disposers.push(wireSquare(mempoolCanvas, () => liveMempool?.txs || [], { emptyLabel: "empty" }).dispose);
+    let blockDisposers = [];
+
+    function wireMempoolTile() {
+      const c = root.querySelector("#mempool-canvas");
+      return c ? wireSquare(c, () => mempoolInfo?.txs || [], { emptyLabel: "empty" }).dispose : () => {};
     }
-    for (const b of stripBlocks) {
-      if (!b) continue;
-      const c = root.querySelector(`#block-canvas-${b.height}`);
-      if (c) disposers.push(wireSquare(c, () => b.transactions).dispose);
+    function wireBlockTiles() {
+      blockDisposers.forEach((d) => d());
+      blockDisposers = stripBlocks
+        .filter(Boolean)
+        .map((b) => {
+          const c = root.querySelector(`#block-canvas-${b.height}`);
+          return c ? wireSquare(c, () => b.transactions).dispose : null;
+        })
+        .filter(Boolean);
     }
+
+    let mempoolDisposer = wireMempoolTile();
+    wireBlockTiles();
 
     const timer = setInterval(async () => {
       try {
-        liveMempool = await api.mempool();
-        if (mempoolCanvas) renderBlockSquare(mempoolCanvas, liveMempool.txs, { emptyLabel: "empty" });
-        const label = root.querySelector("#mempool-tile .label");
-        if (label) label.innerHTML = `<strong>Mempool</strong><br>${liveMempool.size} pending`;
+        const [newSummaries, newMempool] = await Promise.all([api.blocks(25), api.mempool()]);
+        const tipChanged = newSummaries[0]?.height !== summaries[0]?.height;
+        mempoolInfo = newMempool;
+
+        if (tipChanged) {
+          summaries = newSummaries;
+          ({ stripSummaries, stripBlocks } = await fetchStrip(summaries));
+
+          mempoolDisposer();
+          const strip = root.querySelector("#chain-strip");
+          if (strip) strip.innerHTML = stripTilesHtml(mempoolInfo, stripBlocks, stripSummaries);
+          mempoolDisposer = wireMempoolTile();
+          wireBlockTiles();
+
+          const table = root.querySelector("#recent-blocks-table");
+          if (table) table.innerHTML = blocksTable(summaries);
+        } else {
+          const c = root.querySelector("#mempool-canvas");
+          if (c) renderBlockSquare(c, mempoolInfo.txs, { emptyLabel: "empty" });
+          const label = root.querySelector("#mempool-tile .label");
+          if (label) label.innerHTML = `<strong>Mempool</strong><br>${mempoolInfo.size} pending`;
+        }
       } catch {
-        /* node/API momentarily unreachable - keep last known view */
+        /* node/API momentarily unreachable - keep last known view, try again next tick */
       }
     }, LIVE_REFRESH_MS);
+
     return () => {
       clearInterval(timer);
-      disposers.forEach((d) => d());
+      mempoolDisposer();
+      blockDisposers.forEach((d) => d());
     };
   }
 
