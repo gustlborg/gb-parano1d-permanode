@@ -1,1 +1,7 @@
 frontend/mempool-upstream/
+/target
+api.log
+nohup.out
+run/permanode.sqlite3
+run/permanode.sqlite3-*
+run/permanode.toml

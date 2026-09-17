@@ -1,6 +1,6 @@
 use crate::config::Config;
-use crate::db;
 use crate::rpc::{BlockDetailsInfo, RpcClient};
+use permanode_core::db;
 use anyhow::Result;
 use chrono::Utc;
 use log::{info, warn};

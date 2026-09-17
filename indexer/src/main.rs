@@ -1,11 +1,11 @@
 mod config;
-mod db;
 mod indexer;
 mod rpc;
 
 use anyhow::Result;
 use clap::Parser;
 use config::Config;
+use permanode_core::db;
 use rpc::RpcClient;
 use std::path::PathBuf;
 
