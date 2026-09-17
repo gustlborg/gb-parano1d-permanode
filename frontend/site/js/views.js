@@ -675,7 +675,7 @@ export async function richlistView() {
       const width = top > 0 ? Math.max(4, Math.round((Number(e.live_balance_micronoid) / top) * 90)) : 4;
       return `<div class="trow cols-rich">
         <span class="rank">${i + 1}</span>
-        <span>${link(`/address/${e.address}`, shortHash(e.address, 12, 8))}</span>
+        <span>${link(`/address/${e.address}`, e.address)}</span>
         <span class="bal"><span>${noid(e.live_balance_micronoid)}</span><span class="bar" style="width:${width}px"></span></span>
         <span>${int(e.live_utxo_count)}</span>
         <span class="dim"><span class="ago" data-ts="${isoToUnix(e.fetched_at)}"></span></span>
