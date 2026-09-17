@@ -44,3 +44,11 @@ decoder_selfcheck = true
 # every address this permanode has ever recorded (paranoid_getSlotsByOwner,
 # one call per known address - powers the rich list).
 refresh_addresses_every_cycles = 120
+
+# How often (in poll cycles) to sweep a range of the node's raw Live State
+# slot indices directly (paranoid_getSlot) to discover every address with a
+# balance, not just ones this permanode has recorded a transaction for.
+# Runs in its own background thread so it never blocks block ingestion, but
+# it's still a few hundred thousand individual RPC calls against the shared
+# node - kept infrequent by default. 0 disables the slot-range sweep.
+scan_slots_every_cycles = 4320

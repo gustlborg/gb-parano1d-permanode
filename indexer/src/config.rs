@@ -55,6 +55,16 @@ pub struct Config {
     /// keep it infrequent as that list grows.
     #[serde(default = "default_refresh_addresses_every_cycles")]
     pub refresh_addresses_every_cycles: u64,
+
+    /// How often (in poll cycles) to sweep a range of the node's raw Live
+    /// State slot indices (paranoid_getSlot) to discover every address
+    /// with a balance, not just ones this permanode has recorded a
+    /// transaction for. Runs in its own background thread so it never
+    /// blocks block ingestion, but it's still a few hundred thousand
+    /// individual RPC calls against the shared node - kept infrequent by
+    /// default. 0 disables it.
+    #[serde(default = "default_scan_slots_every_cycles")]
+    pub scan_slots_every_cycles: u64,
 }
 
 fn default_rpc_url() -> String {
@@ -81,6 +91,9 @@ fn default_true() -> bool {
 fn default_refresh_addresses_every_cycles() -> u64 {
     120 // ~10min at the default 5s poll interval
 }
+fn default_scan_slots_every_cycles() -> u64 {
+    4320 // ~6h at the default 5s poll interval
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -94,6 +107,7 @@ impl Default for Config {
             getblock_fallback: default_true(),
             decoder_selfcheck: default_true(),
             refresh_addresses_every_cycles: default_refresh_addresses_every_cycles(),
+            scan_slots_every_cycles: default_scan_slots_every_cycles(),
         }
     }
 }
@@ -116,7 +130,9 @@ impl Config {
                  prune_every_cycles = {}\n\
                  getblock_fallback = {}\n\
                  decoder_selfcheck = {}\n\
-                 refresh_addresses_every_cycles = {}\n",
+                 refresh_addresses_every_cycles = {}\n\
+                 # 0 disables the slot-range sweep\n\
+                 scan_slots_every_cycles = {}\n",
                 cfg.rpc_url,
                 cfg.db_path,
                 cfg.poll_interval_seconds,
@@ -126,6 +142,7 @@ impl Config {
                 cfg.getblock_fallback,
                 cfg.decoder_selfcheck,
                 cfg.refresh_addresses_every_cycles,
+                cfg.scan_slots_every_cycles,
             );
             std::fs::write(path, toml_str)?;
             return Ok(cfg);

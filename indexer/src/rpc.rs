@@ -8,6 +8,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+#[derive(Clone)]
 pub struct RpcClient {
     url: String,
     agent: ureq::Agent,
@@ -86,6 +87,14 @@ impl RpcClient {
     /// indexer has its own RPC client rather than depending on the API's).
     pub fn get_slots_by_owner(&self, address: &str) -> Result<Vec<SlotInfo>> {
         let v = self.call("paranoid_getSlotsByOwner", json!([address]))?;
+        Ok(serde_json::from_value(v)?)
+    }
+
+    /// A single slot by its raw index (0..2^log_slots), occupied or not.
+    /// Used to sweep a range of the state directly rather than needing to
+    /// already know an address - see indexer::scan_slot_range.
+    pub fn get_slot(&self, slot_index: u64) -> Result<SlotInfo> {
+        let v = self.call("paranoid_getSlot", json!([slot_index]))?;
         Ok(serde_json::from_value(v)?)
     }
 }
