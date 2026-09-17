@@ -86,7 +86,7 @@ a:hover { text-decoration: underline; }
 }
 .ticker strong { color: var(--text); }
 
-main { flex: 1; padding: 20px; max-width: 1600px; width: 100%; margin: 0 auto; }
+main { flex: 1; padding: 20px; max-width: 1300px; width: 100%; margin: 0 auto; }
 
 .chain-strip {
   display: flex;
