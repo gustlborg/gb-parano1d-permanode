@@ -296,10 +296,19 @@ export async function addressView(address, page = 1) {
   const result = await api.address(address, page, 25);
   const rows = result.transactions.map(addressTxRow).join("");
   const totalPages = Math.max(1, Math.ceil(result.total / result.page_size));
+  const b = result.balance;
+  const pendingHint = "The node's mempool data doesn't include sender/receiver addresses, only confirmed blocks do - pending amounts for a specific address can't be computed from it.";
   return `
     <div class="panel">
       <h2>Address</h2>
       <p class="mono">${address}</p>
+      <div class="mempool-stats">
+        <div class="stat"><div class="v">${noid(b.confirmed_balance_micronoid)}</div><div class="k">Confirmed balance</div></div>
+        <div class="stat"><div class="v">${b.confirmed_utxos}</div><div class="k">Confirmed UTXOs</div></div>
+        <div class="stat"><div class="v">${noid(b.total_received_micronoid)}</div><div class="k">Total received</div></div>
+        <div class="stat"><div class="v hint" title="${pendingHint}">n/a</div><div class="k">Pending</div></div>
+        <div class="stat"><div class="v hint" title="${pendingHint}">n/a</div><div class="k">Pending UTXOs</div></div>
+      </div>
       <p>${result.total} transaction(s) recorded involving this address.</p>
     </div>
     <div class="panel">
