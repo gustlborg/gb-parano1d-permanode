@@ -467,17 +467,29 @@ function addressTxRow(tx, viewedAddress) {
   } else if (incoming) {
     party = tx.input_owner ? addrLink(tx.input_owner) : "—";
   } else {
-    const extra = tx.n_outputs > 1 ? ` ${hint(`+${tx.n_outputs - 1}`, receiverHint(tx.n_outputs))}` : "";
-    party = (tx.receiver ? addrLink(tx.receiver) : "—") + extra;
+    // Outputs back to the viewed address are its own change, so the
+    // counterparty is the first output that went somewhere else.
+    const ownChange = tx.counterparty && tx.receiver !== tx.counterparty ? 1 : 0;
+    const others = tx.n_outputs - ownChange;
+    const extra = others > 1 ? ` ${hint(`+${others - 1}`, receiverHint(others))}` : "";
+    party = (tx.counterparty ? addrLink(tx.counterparty) : "—") + extra;
   }
-  const amount = incoming ? `+${noid(tx.output_sum_micronoid)}` : `−${noid(tx.output_sum_micronoid)}`;
+  // The net effect on this address (received minus spent, change cancels
+  // out) - not the transaction's total output, which on a 1 -> 2 send is
+  // mostly the sender's change.
+  const delta = tx.address_delta_micronoid != null ? BigInt(tx.address_delta_micronoid) : null;
+  const positive = delta != null ? delta >= 0n : incoming;
+  const amount =
+    delta != null
+      ? `${positive ? "+" : "−"}${noid((delta < 0n ? -delta : delta).toString())}`
+      : `${incoming ? "+" : "−"}${noid(tx.output_sum_micronoid)}`;
   return `<div class="trow cols-atx">
       <span class="with-tag">${link(`/tx/${tx.txid}`, shortHash(tx.txid))}${kindTag(tx)}</span>
       ${timeCell(tx.timestamp)}
       <span>${link(`/block/${tx.height}`, "#" + tx.height)}</span>
       <span class="dim">${party}</span>
       <span>${tx.n_inputs} → ${tx.n_outputs}</span>
-      <span class="${incoming ? "pos" : ""}">${amount}</span>
+      <span class="${positive ? "pos" : ""}">${amount}</span>
       <span class="dim">${noid(tx.fee_micronoid)}</span>
     </div>`;
 }
