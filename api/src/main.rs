@@ -7,7 +7,7 @@ use axum::{
     Router,
 };
 use clap::Parser;
-use permanode_core::{db, mempool, queries};
+use permanode_core::{db, live_rpc, queries};
 use rusqlite::Connection;
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -38,7 +38,7 @@ struct Args {
 
 struct AppState {
     conn: Mutex<Connection>,
-    rpc: mempool::RpcClient,
+    rpc: live_rpc::RpcClient,
 }
 
 type ApiResult<T> = Result<Json<T>, ApiError>;
@@ -71,7 +71,7 @@ async fn main() -> Result<()> {
     let conn = db::open(args.db_path.to_str().expect("db_path must be valid UTF-8"))?;
     let state = Arc::new(AppState {
         conn: Mutex::new(conn),
-        rpc: mempool::RpcClient::new(args.rpc_url.clone()),
+        rpc: live_rpc::RpcClient::new(args.rpc_url.clone()),
     });
 
     let index_file = args.site_dir.join("index.html");
@@ -96,9 +96,31 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn get_stats(State(state): State<Arc<AppState>>) -> ApiResult<queries::ChainStats> {
-    let conn = state.conn.lock().unwrap();
-    Ok(Json(queries::chain_stats(&conn)?))
+#[derive(serde::Serialize)]
+struct StatsResponse {
+    #[serde(flatten)]
+    chain: queries::ChainStats,
+    /// The node's own live UTXO count across its whole history, for
+    /// comparison against `chain.live_utxos` (which only reflects what
+    /// this permanode has itself recorded since it started). `null` if the
+    /// node couldn't be reached for this figure.
+    network_active_slots: Option<u64>,
+}
+
+async fn get_stats(State(state): State<Arc<AppState>>) -> ApiResult<StatsResponse> {
+    let chain = {
+        let conn = state.conn.lock().unwrap();
+        queries::chain_stats(&conn)?
+    };
+    let rpc_client = state.rpc.clone();
+    let network_active_slots = tokio::task::spawn_blocking(move || rpc_client.get_active_slot_count())
+        .await
+        .ok()
+        .and_then(|r| r.ok());
+    Ok(Json(StatsResponse {
+        chain,
+        network_active_slots,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -189,7 +211,7 @@ async fn get_gaps(State(state): State<Arc<AppState>>) -> ApiResult<Vec<queries::
     Ok(Json(queries::recent_gaps(&conn, 100)?))
 }
 
-async fn get_mempool(State(state): State<Arc<AppState>>) -> ApiResult<mempool::MempoolInfo> {
+async fn get_mempool(State(state): State<Arc<AppState>>) -> ApiResult<live_rpc::MempoolInfo> {
     // Runs the blocking RPC call on a blocking-safe thread so it can't
     // stall the async runtime's other requests.
     let rpc_client = state.rpc.clone();

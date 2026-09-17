@@ -1,7 +1,8 @@
-//! Minimal read-only client for the node's mempool RPC methods. Kept
-//! separate from `db`/`queries` because mempool contents are transient by
-//! nature - nothing here is persisted, the API just proxies live node
-//! state on request.
+//! Minimal read-only client for node RPC methods whose answers are never
+//! persisted: mempool contents (transient by nature) and other live-only
+//! figures like the network's true current UTXO count, which this
+//! permanode's own database cannot reconstruct from history it hasn't
+//! recorded. The API proxies these straight from the node on request.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -44,6 +45,18 @@ impl RpcClient {
     pub fn get_mempool_info(&self) -> Result<MempoolInfo> {
         let v = self.call("paranoid_getMempoolInfo", json!([]))?;
         Ok(serde_json::from_value(v)?)
+    }
+
+    /// The node's own count of currently-live (unspent) slots across the
+    /// entire chain, tracked natively since genesis. There is no RPC to
+    /// list them all - only this aggregate count, or per-address/per-index
+    /// lookups - so this permanode's own "how many UTXOs have I recorded
+    /// as unspent" figure (queries::ChainStats::live_utxos) will be far
+    /// smaller than this for as long as it has only been recording a
+    /// fraction of the chain's lifetime.
+    pub fn get_active_slot_count(&self) -> Result<u64> {
+        let v = self.call("paranoid_getActiveSlotCount", json!([]))?;
+        v.as_u64().context("getActiveSlotCount: result is not u64")
     }
 }
 
