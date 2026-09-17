@@ -84,6 +84,7 @@ async fn main() -> Result<()> {
         .route("/api/v1/block/hash/{hash}", get(get_block_by_hash))
         .route("/api/v1/tx/{txid}", get(get_tx))
         .route("/api/v1/address/{address}", get(get_address))
+        .route("/api/v1/address/{address}/utxos", get(get_address_utxos))
         .route("/api/v1/gaps", get(get_gaps))
         .route("/api/v1/mempool", get(get_mempool))
         .fallback_service(static_service)
@@ -237,9 +238,21 @@ struct AddressPage {
     /// reached for this.
     live_balance_micronoid: Option<String>,
     live_utxo_count: Option<u64>,
-    /// The individual unspent slots behind live_balance_micronoid, largest
-    /// first. Same source and same "always current" caveat.
-    live_utxos: Option<Vec<live_rpc::SlotInfo>>,
+}
+
+/// Fetches and sorts (largest first) an address's live slots. `None` if the
+/// node couldn't be reached - best-effort, callers treat that as "unknown"
+/// rather than failing the whole request.
+async fn fetch_live_slots(rpc: &live_rpc::RpcClient, address: &str) -> Option<Vec<live_rpc::SlotInfo>> {
+    let rpc_client = rpc.clone();
+    let addr_for_rpc = address.to_string();
+    let slots = tokio::task::spawn_blocking(move || rpc_client.get_slots_by_owner(&addr_for_rpc))
+        .await
+        .ok()?
+        .ok()?;
+    let mut live: Vec<_> = slots.into_iter().filter(|s| !s.empty).collect();
+    live.sort_by(|a, b| b.value.cmp(&a.value));
+    Some(live)
 }
 
 async fn get_address(
@@ -256,26 +269,12 @@ async fn get_address(
         (transactions, total, balance)
     };
 
-    // Read straight from the node's current Live State, independent of
-    // anything this permanode has itself recorded - correct even for an
-    // address with zero recorded history. Best-effort: a node hiccup here
-    // shouldn't fail the whole address page.
-    let rpc_client = state.rpc.clone();
-    let addr_for_rpc = address.clone();
-    let live_slots = tokio::task::spawn_blocking(move || rpc_client.get_slots_by_owner(&addr_for_rpc))
-        .await
-        .ok()
-        .and_then(|r| r.ok());
-    let (live_balance_micronoid, live_utxos) = match live_slots {
-        Some(slots) => {
-            let mut live: Vec<_> = slots.into_iter().filter(|s| !s.empty).collect();
-            live.sort_by(|a, b| b.value.cmp(&a.value));
-            let sum: u64 = live.iter().map(|s| s.value).sum();
-            (Some(sum.to_string()), Some(live))
-        }
-        None => (None, None),
-    };
-    let live_utxo_count = live_utxos.as_ref().map(|v| v.len() as u64);
+    // Just the summary here (balance + count) - the individual UTXOs are a
+    // separate, on-demand endpoint (GET .../utxos) so a plain address page
+    // view doesn't always pull and ship a potentially long slot list.
+    let live_slots = fetch_live_slots(&state.rpc, &address).await;
+    let live_balance_micronoid = live_slots.as_ref().map(|s| s.iter().map(|u| u.value).sum::<u64>().to_string());
+    let live_utxo_count = live_slots.as_ref().map(|s| s.len() as u64);
 
     Ok(Json(AddressPage {
         address,
@@ -286,8 +285,22 @@ async fn get_address(
         balance,
         live_balance_micronoid,
         live_utxo_count,
-        live_utxos,
     }))
+}
+
+async fn get_address_utxos(
+    State(state): State<Arc<AppState>>,
+    Path(address): Path<String>,
+) -> ApiResult<AddressUtxosPage> {
+    let live_utxos = fetch_live_slots(&state.rpc, &address).await;
+    Ok(Json(AddressUtxosPage { address, live_utxos }))
+}
+
+#[derive(serde::Serialize)]
+struct AddressUtxosPage {
+    address: String,
+    /// `null` only if the node couldn't be reached.
+    live_utxos: Option<Vec<live_rpc::SlotInfo>>,
 }
 
 async fn get_gaps(State(state): State<Arc<AppState>>) -> ApiResult<Vec<queries::GapEntry>> {
