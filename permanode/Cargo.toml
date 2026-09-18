@@ -1,6 +1,6 @@
 [package]
 name = "parano1d-permanode"
-version = "0.1.11"
+version = "0.1.12"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 description = "Permanent transaction history and block explorer for a Parano1d node"
