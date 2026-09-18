@@ -114,7 +114,7 @@ main { flex: 1; }
   white-space: nowrap;
 }
 .brand:hover { color: var(--text); }
-.brand .mark { width: 11px; height: 11px; background: var(--accent); transform: rotate(45deg); border-radius: 2px; }
+.brand .mark { width: 22px; height: 22px; border-radius: 50%; display: block; }
 .brand em { font-style: normal; color: var(--accent); }
 .nav { display: flex; gap: 8px 22px; flex: 0 1 auto; flex-wrap: wrap; font-size: 13px; letter-spacing: .02em; }
 .nav a, .nav span {
