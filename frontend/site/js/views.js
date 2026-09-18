@@ -317,15 +317,13 @@ export async function blocksView() {
 function donationHtml(address) {
   if (!address) return "";
   return `<span class="donate">${hint(
-    `Donations ${link(`/address/${address}`, shortHash(address, 10, 8))}`,
+    `<span class="hi">Donations</span> ${link(`/address/${address}`, shortHash(address, 10, 8), "addr")}`,
     `This explorer is run by its operator at their\nown expense and is developed independently\nof the Parano1d project. Donations to this\naddress help keep it running:\n${address}`
   )}</span>`;
 }
 
 export function tickerHtml(stats) {
-  // The connection note only appears after repeated failed polls (see
-  // health.js); there is no permanent "live" marker.
-  const live = `<span class="conn-lost" id="conn-lost"></span>`;
+  const live = `<span class="live" id="live"><span class="dot"></span>live</span><span class="conn-lost" id="conn-lost"></span>`;
   if (!stats) return live;
   const n = stats.network || {};
   const gaps =

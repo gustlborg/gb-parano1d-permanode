@@ -186,11 +186,15 @@ main { flex: 1; }
   color: var(--muted);
 }
 .ticker b { color: var(--text); font-weight: 400; }
+.live { color: var(--accent); display: flex; align-items: center; gap: 7px; }
+.live .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: noidPulse 1.6s infinite; }
+.live.degraded { color: var(--muted); }
+.live.degraded .dot { background: var(--muted); animation: none; }
 .conn-lost { color: var(--warn); }
 .conn-lost:empty { display: none; }
-.donate { margin-left: auto; color: var(--accent); }
-.donate .hint { border-bottom-color: var(--accent); }
-.donate a { color: var(--accent); }
+.donate { margin-left: auto; }
+.donate a.addr { color: var(--text); }
+.donate a.addr:hover { color: var(--accent-hover); }
 
 /* ---- layout ------------------------------------------------------- */
 .wrap { width: 100%; max-width: 1180px; margin: 0 auto; padding: 0 28px; }
@@ -558,6 +562,6 @@ h1.title em { font-style: normal; color: var(--accent); }
   .card.pad { padding: 18px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .scan { animation: none; }
+  .scan, .live .dot { animation: none; }
   .face { transition: none; }
 }
