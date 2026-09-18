@@ -1,0 +1,7 @@
+[Unit]
+Description=Daily consistent copy of the permanode database
+
+[Service]
+Type=oneshot
+User=permanode
+ExecStart=/usr/local/sbin/permanode-backup

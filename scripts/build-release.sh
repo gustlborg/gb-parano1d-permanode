@@ -26,6 +26,7 @@ docker run --rm \
     cp "$CARGO_TARGET_DIR/release/parano1d-permanode" /src/dist/parano1d-permanode
     chown "$(stat -c %u:%g /src/README.md)" /src/dist/parano1d-permanode
   '
-tar -C dist -czf "dist/parano1d-permanode-${version}-linux-x86_64.tar.gz" parano1d-permanode
-rm dist/parano1d-permanode
+cp permanode/permanode.example.toml dist/permanode.example.toml
+tar -C dist -czf "dist/parano1d-permanode-${version}-linux-x86_64.tar.gz" parano1d-permanode permanode.example.toml
+rm dist/parano1d-permanode dist/permanode.example.toml
 ls -la dist/

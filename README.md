@@ -9,27 +9,153 @@ serves a block explorer over that history.
 One binary, one config file, one SQLite database. Anyone running a
 Parano1d node can run it; it only talks to the node's local RPC.
 
-## Quick start
+## Requirements
 
-1. Have a Parano1d node running and fully synced, with its RPC on the
-   default `127.0.0.1:9601`.
-2. Download the latest `parano1d-permanode` binary from the releases page
-   (Linux x86_64) or build it yourself (see below).
-3. Run it in a directory of your choice:
+- A Parano1d node (v1.1.0 or later), fully synced, with its JSON-RPC on
+  the default `127.0.0.1:9601`. Install it first following the official
+  guide: <https://docs.parano1d.org/operate/node>. The permanode must run
+  on the same machine (or reach the RPC over a private, authenticated
+  channel - the node's RPC has no authentication and must never be
+  exposed publicly).
+- Linux x86_64 for the release binary (glibc 2.34 or newer: Ubuntu 22.04+,
+  Debian 12+). Other platforms: build from source, see below.
+- Almost no resources of its own: about 20 MB of memory and roughly
+  10 MB of disk per day at today's transaction volume.
 
-   ```sh
-   mkdir -p ~/permanode && cd ~/permanode
-   ./parano1d-permanode
-   ```
+## Install
 
-   The first start writes a commented `permanode.toml` next to the binary
-   and a `permanode.sqlite3` database, then starts indexing and serving.
+Replace `0.1.16` with the latest version from the
+[releases page](https://github.com/gustlborg/gb-parano1d-permanode/releases):
 
-4. Open `http://127.0.0.1:8420/`.
+```sh
+V=0.1.16
+curl -sSLO https://github.com/gustlborg/gb-parano1d-permanode/releases/download/v$V/parano1d-permanode-$V-linux-x86_64.tar.gz
+curl -sSLO https://github.com/gustlborg/gb-parano1d-permanode/releases/download/v$V/SHA256SUMS
+sha256sum --check SHA256SUMS          # must print: ... OK
+tar -xzf parano1d-permanode-$V-linux-x86_64.tar.gz
+sudo install -m 0755 parano1d-permanode /usr/local/bin/
+```
 
-Recording starts from the oldest block the node can still serve a body
-for (about 40 blocks back). History from before the first start is gone,
+Try it once in a directory of your choice:
+
+```sh
+mkdir -p ~/permanode && cd ~/permanode
+parano1d-permanode
+```
+
+The first start writes a commented `permanode.toml` and a
+`permanode.sqlite3` database into that directory, starts recording from
+the oldest block the node can still serve a body for (about 40 blocks
+back), sweeps every address's balance, and serves the explorer on
+<http://127.0.0.1:8420/>. Stop it with Ctrl+C and set it up as a service
+so it never stops again: history from before the first start is gone,
 the node itself no longer has it either.
+
+## Run as a service
+
+A dedicated system user, the data under `/var/lib/permanode`, and
+systemd keeping it alive:
+
+```sh
+sudo useradd --system --home-dir /var/lib/permanode --create-home --shell /usr/sbin/nologin permanode
+sudo install -d -o permanode -g permanode -m 0750 /var/lib/permanode
+cd /var/lib/permanode
+sudo -u permanode timeout 5 parano1d-permanode || true    # first run writes permanode.toml and the database here
+sudoedit -u permanode /var/lib/permanode/permanode.toml     # optional: listen, donation_address, retention_days ...
+```
+
+`/etc/systemd/system/parano1d-permanode.service`:
+
+```ini
+[Unit]
+Description=Parano1d permanode (indexer + explorer)
+Wants=network-online.target
+After=network-online.target parano1d.service
+
+[Service]
+Type=simple
+User=permanode
+Group=permanode
+WorkingDirectory=/var/lib/permanode
+ExecStart=/usr/local/bin/parano1d-permanode --config /var/lib/permanode/permanode.toml
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/permanode
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now parano1d-permanode
+sudo journalctl -u parano1d-permanode -f
+```
+
+The log shows every block as it is recorded, gaps, reorgs, and the sweep's
+check against the node ("exact match with the node at #…"). The indexer
+must not fall behind the node's pruning: an outage longer than roughly
+14 minutes leaves permanent gaps for that time (listed under
+`/api/v1/gaps` and counted in the status bar).
+
+## Configuration
+
+`permanode.toml` (see `permanode/permanode.example.toml` for every key):
+
+- `rpc_url` — the node's RPC, default `http://127.0.0.1:9601`.
+- `db_path` — the SQLite database, default `permanode.sqlite3` in the
+  working directory.
+- `listen` — where the explorer listens, default `127.0.0.1:8420`. Keep it
+  on loopback for a public instance and put a TLS reverse proxy in front.
+- `retention_days` — how long to keep transaction detail (0 = forever,
+  the default). Block headers are always kept.
+- `poll_interval_seconds` — how often to check the node (default 5).
+  Keep this well below the node's body window.
+- `scan_slots_every_cycles` — how often the UTXO sweep runs, in polls
+  (default 360, about 30 minutes; 0 disables it).
+- `donation_address` — shown in the status bar and on the About page
+  with a note that the instance is run at your own expense; leave empty
+  to show nothing.
+
+Subcommands: `parano1d-permanode index` runs only the indexer,
+`parano1d-permanode serve` only the explorer over an existing database.
+The default runs both in one process; if either half dies the process
+exits so systemd restarts both together.
+
+## Public instance
+
+Keep `listen` on loopback and publish it through a reverse proxy with TLS,
+e.g. Caddy (automatic Let's Encrypt certificates):
+
+```
+explorer.example.org {
+    reverse_proxy 127.0.0.1:8420
+}
+```
+
+Firewall everything except SSH, 80/443 and the node's P2P port 9600.
+The node's RPC port 9601 must stay on loopback. Consider a rate limit at
+the proxy or CDN for `/api/`; the API caps list sizes (200 blocks, 200
+transactions per address page) and validates every id, but a public
+endpoint still deserves one. If you put Cloudflare in front with Bot
+Fight Mode, note that it blocks default library user agents such as
+Python's; API clients then need a descriptive `User-Agent`.
+
+## Updating
+
+```sh
+# download and verify the new tarball as above, then:
+sudo systemctl stop parano1d-permanode
+sudo install -m 0755 parano1d-permanode /usr/local/bin/
+sudo systemctl start parano1d-permanode
+```
+
+Database migrations run automatically on start. Never delete the database
+during an update - it is the whole point.
 
 ## What you get
 
@@ -89,52 +215,6 @@ the node itself no longer has it either.
   They are listed under `/api/v1/gaps` and counted in the status bar;
   heights still inside the serving window are retried automatically.
 
-## Configuration
-
-`permanode.toml` (see `permanode/permanode.example.toml` for every key):
-
-- `rpc_url` — the node's RPC, default `http://127.0.0.1:9601`.
-- `listen` — where the explorer listens, default `127.0.0.1:8420`. Keep it
-  on loopback for a public instance and put a TLS reverse proxy in front.
-- `retention_days` — how long to keep transaction detail (0 = forever,
-  the default). Block headers are always kept.
-- `poll_interval_seconds` — how often to check the node (default 5).
-  Keep this well below the node's body window.
-- `scan_slots_every_cycles` — how often the UTXO sweep runs (0 disables it).
-
-Subcommands: `parano1d-permanode index` runs only the indexer,
-`parano1d-permanode serve` only the explorer over an existing database.
-The default runs both in one process.
-
-## Running as a service
-
-```ini
-[Unit]
-Description=Parano1d permanode (indexer + explorer)
-After=network-online.target
-
-[Service]
-WorkingDirectory=/home/you/permanode
-ExecStart=/home/you/permanode/parano1d-permanode
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-```
-
-The indexer must not fall behind the node's pruning: an outage longer
-than roughly 14 minutes leaves permanent gaps for that time (they are
-listed under `/api/v1/gaps` and counted in the status bar).
-
-For a public instance, a reverse proxy with TLS, e.g. Caddy:
-
-```
-explorer.example.org {
-    reverse_proxy 127.0.0.1:8420
-}
-```
-
 ## Building
 
 Rust (stable), a C compiler and libclang (`apt install clang`). The
@@ -183,13 +263,26 @@ the chat id, is in `contrib/watchdog/README.md`. An indexer that silently
 stops loses history the network will not hand out again, so run
 something like it.
 
-## Crash safety
+## Backups and crash safety
 
 SQLite in WAL mode with `synchronous=FULL`: every commit is fsynced, and
 each block is written in one transaction, so a power cut leaves either the
-whole block or nothing. For backups use
-`sqlite3 permanode.sqlite3 ".backup copy.sqlite3"` while it runs, or a
-filesystem snapshot of the directory.
+whole block or nothing. Back the database up regularly while it runs, e.g.
+`sqlite3 permanode.sqlite3 ".backup copy.sqlite3"` or with the daily
+systemd timer in `contrib/backup/` (Python stdlib, no CLI needed), and
+keep a copy off the machine: the database is the one thing that cannot be
+re-downloaded from the network.
+
+## Troubleshooting
+
+- `RPC call … failed to send`: the node is not running or `rpc_url` is
+  wrong. The indexer keeps retrying every poll.
+- Gaps right after installing: the node was still syncing, or synced from
+  a snapshot and only holds bodies from that point. Bodies inside the
+  node's window are retried automatically; older ones are gone.
+- `Address already in use`: something else listens on `listen`; change
+  the port or stop the other program.
+- Building from source fails in bindgen: see Building below.
 
 ## License
 
