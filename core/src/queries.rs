@@ -459,6 +459,12 @@ pub struct AddressBalance {
     pub confirmed_utxos: i64,
     pub total_received_micronoid: String,
     pub total_sent_micronoid: String,
+    /// Recorded outputs of this address that the node no longer holds
+    /// although no recorded transaction spent them - spent in blocks
+    /// this permanode has no body for. Excluded from the confirmed
+    /// figures above; shown so the gap is visible instead of silent.
+    pub spent_in_gap_micronoid: String,
+    pub spent_in_gap_utxos: i64,
 }
 
 /// Confirmed balance and UTXO count for `address`, computed from indexed
@@ -485,23 +491,25 @@ pub fn address_balance(conn: &Connection, address: &str) -> Result<AddressBalanc
     )?
     .to_string();
 
-    let (confirmed_utxos, confirmed_balance_micronoid): (i64, String) = conn.query_row(
-        &format!(
-            "SELECT COUNT(*), COALESCE(SUM(CAST(o.amount_micronoid AS INTEGER)), 0)
-             FROM tx_outputs o
-             JOIN transactions t ON t.id = o.tx_id
-             JOIN blocks b ON b.id = t.block_id
-             WHERE o.owner = ?1 AND {canonical_on_b}
-               AND NOT EXISTS (
-                 SELECT 1 FROM tx_inputs i
-                 JOIN transactions t2 ON t2.id = i.tx_id
-                 JOIN blocks b2 ON b2.id = t2.block_id
-                 WHERE i.creation_id = o.creation_id AND {canonical_on_b2}
-               )"
-        ),
-        params![address],
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?.to_string())),
-    )?;
+    // Unspent = no recorded input consumed it AND the sweep hasn't found it
+    // gone from the node's state (spent_in_gap, see db::migrate).
+    let unspent_sql = format!(
+        "SELECT COUNT(*), COALESCE(SUM(CAST(o.amount_micronoid AS INTEGER)), 0)
+         FROM tx_outputs o
+         JOIN transactions t ON t.id = o.tx_id
+         JOIN blocks b ON b.id = t.block_id
+         WHERE o.owner = ?1 AND {canonical_on_b} AND o.spent_in_gap = ?2
+           AND NOT EXISTS (
+             SELECT 1 FROM tx_inputs i
+             JOIN transactions t2 ON t2.id = i.tx_id
+             JOIN blocks b2 ON b2.id = t2.block_id
+             WHERE i.creation_id = o.creation_id AND {canonical_on_b2}
+           )"
+    );
+    let (confirmed_utxos, confirmed_balance_micronoid): (i64, String) =
+        conn.query_row(&unspent_sql, params![address, 0], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?.to_string())))?;
+    let (spent_in_gap_utxos, spent_in_gap_micronoid): (i64, String) =
+        conn.query_row(&unspent_sql, params![address, 1], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?.to_string())))?;
 
     let total_sent_micronoid: String = conn.query_row(
         &format!(
@@ -520,6 +528,8 @@ pub fn address_balance(conn: &Connection, address: &str) -> Result<AddressBalanc
         confirmed_utxos,
         total_received_micronoid,
         total_sent_micronoid,
+        spent_in_gap_micronoid,
+        spent_in_gap_utxos,
     })
 }
 
@@ -565,7 +575,7 @@ pub fn chain_stats(conn: &Connection) -> Result<ChainStats> {
              FROM tx_outputs o
              JOIN transactions t ON t.id = o.tx_id
              JOIN blocks b ON b.id = t.block_id
-             WHERE {canonical_on_b}
+             WHERE {canonical_on_b} AND o.spent_in_gap = 0
                AND NOT EXISTS (
                  SELECT 1 FROM tx_inputs i
                  JOIN transactions t2 ON t2.id = i.tx_id

@@ -6,7 +6,7 @@ use chrono::Utc;
 use log::{error, info, warn};
 use permanode_core::db;
 use rusqlite::{params, Connection};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -577,6 +577,7 @@ fn scan_live_state(conn: &Connection, rpc: &RpcClient) -> Result<usize> {
     );
 
     let mut owners: HashMap<String, (u128, u64)> = HashMap::new();
+    let mut live_creation_ids: HashSet<String> = HashSet::new();
     let mut queried = 0u64;
     let mut found = 0u64;
     for (segment, count) in &populated {
@@ -595,6 +596,7 @@ fn scan_live_state(conn: &Connection, rpc: &RpcClient) -> Result<usize> {
                 continue;
             }
             seg_found += 1;
+            live_creation_ids.insert(slot.creation_id.to_string());
             let entry = owners.entry(slot.owner).or_insert((0u128, 0u64));
             entry.0 += slot.value as u128;
             entry.1 += 1;
@@ -612,6 +614,23 @@ fn scan_live_state(conn: &Connection, rpc: &RpcClient) -> Result<usize> {
     }
     // Bounds from the earlier range-based sweep design; no longer read.
     tx.execute("DELETE FROM indexer_state WHERE key IN ('slot_scan_low', 'slot_scan_high')", [])?;
+    // Reconcile recorded history against the state just swept: a recorded
+    // output that is gone from the node although no recorded input spent
+    // it was spent in a block this permanode has no body for. Only
+    // outputs created at or before the sweep's starting tip are judged -
+    // anything younger may simply postdate the snapshot.
+    let gone: Vec<i64> = db::unspent_recorded_outputs(&tx, tip_before)?
+        .into_iter()
+        .filter(|(_, creation_id)| !live_creation_ids.contains(creation_id))
+        .map(|(rowid, _)| rowid)
+        .collect();
+    if !gone.is_empty() {
+        db::mark_spent_in_gap(&tx, &gone, &now)?;
+        info!(
+            "live state sweep: {} recorded output(s) are gone from the node's state without a recorded spend - marked as spent in a gap",
+            gone.len()
+        );
+    }
     tx.commit()?;
 
     let tip_after = rpc.block_count().unwrap_or(tip_before);

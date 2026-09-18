@@ -513,14 +513,20 @@ export async function addressView(address, pageNo = 1) {
   const b = result.balance;
   const liveKnown = result.live_balance_micronoid !== null && result.live_balance_micronoid !== undefined;
   const liveHint = "Read live from the node's current\nstate, independent of anything this\npermanode has recorded - the true\nbalance right now.";
-  const recHint = "From this permanode's own recorded\nhistory only - transactions it has\nitself seen since it started running.";
+  const recHint = "From this permanode's own recorded\nhistory only - transactions it has\nitself seen since it started running.\nOutputs the node no longer holds are\nexcluded even if the spend fell into a gap.";
 
+  const gapNote =
+    b.spent_in_gap_utxos > 0
+      ? `<p class="note warn">${int(b.spent_in_gap_utxos)} recorded output${b.spent_in_gap_utxos === 1 ? "" : "s"} (${noid(b.spent_in_gap_micronoid)})
+         of this address ${b.spent_in_gap_utxos === 1 ? "was" : "were"} spent in blocks this permanode has no body for. The spending
+         transactions are unknown here; the outputs are no longer counted in the recorded balance.</p>`
+      : "";
   const note =
     result.total === 0
       ? `<p class="note warn">This permanode has recorded no transaction activity for this address since it
          started running - the "recorded" figures are genuinely zero, not missing data. The live balance
          comes straight from the node's current state, so it is accurate even without a history to show.</p>`
-      : `<p class="note">${int(result.total)} transaction${result.total === 1 ? "" : "s"} recorded involving this address.</p>`;
+      : `<p class="note">${int(result.total)} transaction${result.total === 1 ? "" : "s"} recorded involving this address.</p>${gapNote}`;
 
   const html = page(`
     ${back()}

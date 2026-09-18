@@ -68,7 +68,11 @@ the node itself no longer has it either.
   polls (default 360, about 30 minutes), assigns each UTXO to its owner
   and stores balance and UTXO count per address. Every run checks its own
   total against the node's count and logs the result; a shortfall at an
-  unchanged tip is logged as a warning. This is what makes the rich list
+  unchanged tip is logged as a warning. The same pass reconciles the
+  recorded history: a recorded output the node no longer holds, with no
+  recorded transaction spending it, was spent in a block whose body this
+  permanode never had; it is flagged and dropped from the recorded
+  balance, and the address page says so. This is what makes the rich list
   and the address balances complete for addresses that never appear in
   the recorded history. The individual UTXOs are not stored; the address
   page loads them from the node on request.
