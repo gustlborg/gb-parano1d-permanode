@@ -334,6 +334,7 @@ export function tickerHtml(stats) {
         )
       : "";
   return `
+    ${live}
     <span>Tip <b>#${stats.last_processed_height ?? "-"}</b></span>
     ${hint(`Blocks <b>${int(stats.indexed_blocks)}</b>`, "Blocks this permanode has recorded since it\nstarted (see \"History since\") - not the\nchain's lifetime total.")}
     ${hint(`Transactions <b>${int(stats.indexed_transactions)}</b>`, "Transactions this permanode has recorded\nsince it started (see \"History since\") - not\nthe chain's lifetime total.")}
@@ -343,7 +344,6 @@ export function tickerHtml(stats) {
     ${gaps}
     <span>Avg block time <b>${seconds(n.avg_block_time_1h_seconds)}</b></span>
     ${stats.decoder_mismatches > 0 ? hint(`Decoder mismatches <b>${stats.decoder_mismatches}</b>`, "Times the fallback decoder's output disagreed with the node's own getBlockDetails for a block both could decode - should be 0.") : ""}
-    ${live}
     ${donationHtml(stats.donation_address)}`;
 }
 
