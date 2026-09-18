@@ -76,6 +76,12 @@ pub struct Config {
     /// built into the binary - only useful while editing the frontend.
     #[serde(default)]
     pub site_dir: Option<String>,
+
+    /// Shown in the explorer's status bar as the operator's donation
+    /// address (with a note that the instance is run at their own cost).
+    /// Empty or absent = nothing shown.
+    #[serde(default)]
+    pub donation_address: Option<String>,
 }
 
 fn default_rpc_url() -> String {
@@ -124,6 +130,7 @@ impl Default for Config {
             scan_slots_every_cycles: default_scan_slots_every_cycles(),
             listen: default_listen(),
             site_dir: None,
+            donation_address: None,
         }
     }
 }
@@ -150,7 +157,9 @@ impl Config {
                  # 0 disables the live-state sweep\n\
                  scan_slots_every_cycles = {}\n\
                  # explorer + API listen address (put a TLS reverse proxy in front for the public)\n\
-                 listen = {:?}\n",
+                 listen = {:?}\n\
+                 # your donation address, shown in the explorer's status bar (leave empty to show nothing)\n\
+                 donation_address = \"\"\n",
                 cfg.rpc_url,
                 cfg.db_path,
                 cfg.poll_interval_seconds,

@@ -61,3 +61,8 @@ listen = "127.0.0.1:8420"
 # Serve the explorer from a directory instead of the copy compiled into the
 # binary - only useful while editing the frontend.
 # site_dir = "frontend/site"
+
+# Your donation address, shown right-aligned in the explorer's status bar
+# together with a note that this instance is run at the operator's own cost.
+# Leave empty to show nothing.
+donation_address = ""

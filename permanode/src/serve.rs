@@ -42,6 +42,7 @@ struct AppState {
     /// How often addresses with recorded activity are additionally
     /// refreshed one by one.
     address_refresh_interval_seconds: u64,
+    donation_address: Option<String>,
 }
 
 impl AppState {
@@ -83,6 +84,7 @@ pub async fn run(cfg: &Config) -> Result<()> {
         balance_sweep_interval_seconds: (cfg.scan_slots_every_cycles > 0)
             .then(|| cfg.scan_slots_every_cycles.saturating_mul(cfg.poll_interval_seconds)),
         address_refresh_interval_seconds: cfg.refresh_addresses_every_cycles.saturating_mul(cfg.poll_interval_seconds),
+        donation_address: cfg.donation_address.as_deref().map(str::trim).filter(|a| !a.is_empty()).map(String::from),
     });
 
     let api = Router::new()
@@ -166,6 +168,8 @@ struct StatsResponse {
     /// the sweep is disabled.
     balance_sweep_interval_seconds: Option<u64>,
     address_refresh_interval_seconds: u64,
+    /// The operator's donation address from the config, if any.
+    donation_address: Option<String>,
 }
 
 #[derive(serde::Serialize, Default)]
@@ -236,6 +240,7 @@ async fn get_stats(State(state): State<Arc<AppState>>) -> ApiResult<StatsRespons
         network,
         balance_sweep_interval_seconds: state.balance_sweep_interval_seconds,
         address_refresh_interval_seconds: state.address_refresh_interval_seconds,
+        donation_address: state.donation_address.clone(),
     }))
 }
 
