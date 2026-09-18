@@ -465,6 +465,11 @@ pub struct AddressBalance {
     /// figures above; shown so the gap is visible instead of silent.
     pub spent_in_gap_micronoid: String,
     pub spent_in_gap_utxos: i64,
+    /// Part of `total_sent_micronoid` that came from outputs this permanode
+    /// never saw created - they predate its recording. Non-zero means the
+    /// address was active before the permanode started, so received/sent
+    /// totals cannot add up to the balance.
+    pub sent_from_unrecorded_micronoid: String,
 }
 
 /// Confirmed balance and UTXO count for `address`, computed from indexed
@@ -523,6 +528,21 @@ pub fn address_balance(conn: &Connection, address: &str) -> Result<AddressBalanc
     )?
     .to_string();
 
+    let sent_from_unrecorded_micronoid: String = conn
+        .query_row(
+            &format!(
+                "SELECT COALESCE(SUM(i.amount_micronoid), 0)
+                 FROM tx_inputs i
+                 JOIN transactions t ON t.id = i.tx_id
+                 JOIN blocks b ON b.id = t.block_id
+                 WHERE t.input_owner = ?1 AND {canonical_on_b}
+                   AND NOT EXISTS (SELECT 1 FROM tx_outputs o WHERE o.creation_id = i.creation_id)"
+            ),
+            params![address],
+            |row| row.get::<_, i64>(0),
+        )?
+        .to_string();
+
     Ok(AddressBalance {
         confirmed_balance_micronoid,
         confirmed_utxos,
@@ -530,6 +550,7 @@ pub fn address_balance(conn: &Connection, address: &str) -> Result<AddressBalanc
         total_sent_micronoid,
         spent_in_gap_micronoid,
         spent_in_gap_utxos,
+        sent_from_unrecorded_micronoid,
     })
 }
 
