@@ -518,20 +518,84 @@ function addressUrl(address, pageNo, pageSize) {
   return `/address/${address}?page=${pageNo}${pageSize !== 25 ? `&size=${pageSize}` : ""}`;
 }
 
-// "← newer · page [select] / N · older →" on the left, the page length on
-// the right. Both selects navigate on change (wired in the view's mount).
-function pagerHtml(address, pageNo, pageSize, totalPages) {
-  const pageOptions = Array.from({ length: totalPages }, (_, i) => i + 1)
-    .map((n) => `<option value="${n}"${n === pageNo ? " selected" : ""}>${n}</option>`)
+// A click-to-open menu (native <select> lists open on mousedown and pick
+// on mouseup in some browsers, which reads as "hold the button down").
+function menuHtml(id, current, values, opts = {}) {
+  const items = values
+    .map((v) => `<button type="button" data-value="${v}"${v === current ? ' class="current"' : ""}>${v}</button>`)
     .join("");
-  const sizeOptions = PAGE_SIZES.map((n) => `<option value="${n}"${n === pageSize ? " selected" : ""}>${n}</option>`).join("");
+  return `<span class="menu${opts.right ? " right" : ""}" id="${id}">
+      <button type="button" class="menu-btn" aria-haspopup="listbox" aria-expanded="false" aria-label="${escapeHtml(opts.label || "")}">${current} <span class="caret">▾</span></button>
+      <div class="menu-list" role="listbox">${items}</div>
+    </span>`;
+}
+
+// Wires every .menu under root: click opens/closes, clicking an item calls
+// onPick(menuId, value); a click elsewhere or Escape closes. Returns a
+// dispose function.
+function wireMenus(root, onPick) {
+  const close = () => root.querySelectorAll(".menu.open").forEach((m) => {
+    m.classList.remove("open");
+    m.querySelector(".menu-btn").setAttribute("aria-expanded", "false");
+  });
+  const onClick = (e) => {
+    const btn = e.target.closest(".menu-btn");
+    const item = e.target.closest(".menu-list button");
+    if (btn && root.contains(btn)) {
+      const menu = btn.closest(".menu");
+      const opening = !menu.classList.contains("open");
+      close();
+      if (opening) {
+        menu.classList.add("open");
+        btn.setAttribute("aria-expanded", "true");
+        // Fixed positioning so the list escapes the card's overflow clip;
+        // it opens upwards when there is no room below.
+        const list = menu.querySelector(".menu-list");
+        const r = btn.getBoundingClientRect();
+        const h = list.offsetHeight;
+        const below = r.bottom + 4 + h <= window.innerHeight - 8;
+        list.style.top = `${Math.round(below ? r.bottom + 4 : r.top - 4 - h)}px`;
+        list.style.left = menu.classList.contains("right") ? "auto" : `${Math.round(r.left)}px`;
+        list.style.right = menu.classList.contains("right") ? `${Math.round(window.innerWidth - r.right)}px` : "auto";
+        list.style.minWidth = `${Math.round(r.width)}px`;
+        list.querySelector("button.current")?.scrollIntoView({ block: "nearest" });
+      }
+      return;
+    }
+    if (item && root.contains(item)) {
+      const menu = item.closest(".menu");
+      close();
+      onPick(menu.id, Number(item.dataset.value));
+      return;
+    }
+    close();
+  };
+  const onKey = (e) => {
+    if (e.key === "Escape") close();
+  };
+  document.addEventListener("click", onClick);
+  document.addEventListener("keydown", onKey);
+  window.addEventListener("scroll", close);
+  window.addEventListener("resize", close);
+  return () => {
+    document.removeEventListener("click", onClick);
+    document.removeEventListener("keydown", onKey);
+    window.removeEventListener("scroll", close);
+    window.removeEventListener("resize", close);
+  };
+}
+
+// "← newer · page [menu] / N · older →" on the left, the page length on
+// the right. Both menus navigate on pick (wired in the view's mount).
+function pagerHtml(address, pageNo, pageSize, totalPages) {
+  const pages = Array.from({ length: totalPages }, (_, i) => i + 1);
   return `<div class="pager">
       <span class="pager-nav">
         ${pageNo > 1 ? link(addressUrl(address, pageNo - 1, pageSize), "← newer") : '<span class="dim">← newer</span>'}
-        <span>page <select class="select" id="page-select" aria-label="Page">${pageOptions}</select> / ${totalPages}</span>
+        <span>page ${menuHtml("page-menu", pageNo, pages, { label: "Page" })} / ${totalPages}</span>
         ${pageNo < totalPages ? link(addressUrl(address, pageNo + 1, pageSize), "older →") : '<span class="dim">older →</span>'}
       </span>
-      <label class="pager-size">per page <select class="select" id="size-select" aria-label="Transactions per page">${sizeOptions}</select></label>
+      <span class="pager-size">per page ${menuHtml("size-menu", pageSize, PAGE_SIZES, { label: "Transactions per page", right: true })}</span>
     </div>`;
 }
 
@@ -607,12 +671,10 @@ export async function addressView(address, pageNo = 1, pageSize = 25) {
 
   function mount(root) {
     const disposeTick = tickingMount(root);
-    const pageSelect = root.querySelector("#page-select");
-    const sizeSelect = root.querySelector("#size-select");
-    const onPage = () => go(addressUrl(address, Number(pageSelect.value), pageSize));
-    const onSize = () => go(addressUrl(address, 1, Number(sizeSelect.value)));
-    if (pageSelect) pageSelect.addEventListener("change", onPage);
-    if (sizeSelect) sizeSelect.addEventListener("change", onSize);
+    const disposeMenus = wireMenus(root, (menuId, value) => {
+      if (menuId === "page-menu") go(addressUrl(address, value, pageSize));
+      if (menuId === "size-menu") go(addressUrl(address, 1, value));
+    });
     const loadBtn = root.querySelector("#load-live-utxos");
     const body = root.querySelector("#live-utxos-body");
     const head = root.querySelector("#live-utxos .card-head h2");
@@ -638,8 +700,7 @@ export async function addressView(address, pageNo = 1, pageSize = 25) {
     return () => {
       disposeTick();
       loadBtn.removeEventListener("click", onLoad);
-      if (pageSelect) pageSelect.removeEventListener("change", onPage);
-      if (sizeSelect) sizeSelect.removeEventListener("change", onSize);
+      disposeMenus();
     };
   }
 
