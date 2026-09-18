@@ -358,7 +358,7 @@ async fn get_address(
         return Err(ApiErrorOr404::NotFound);
     }
     let page = q.page.unwrap_or(1).max(1);
-    let page_size = q.page_size.unwrap_or(25).clamp(1, 100);
+    let page_size = q.page_size.unwrap_or(25).clamp(1, 200);
     let (transactions, total, balance) = {
         let conn = state.db();
         let (transactions, total) = queries::txs_by_address(&conn, &address, page, page_size)?;
