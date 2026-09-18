@@ -512,7 +512,7 @@ export async function addressView(address, pageNo = 1) {
   const totalPages = Math.max(1, Math.ceil(result.total / result.page_size));
   const b = result.balance;
   const liveKnown = result.live_balance_micronoid !== null && result.live_balance_micronoid !== undefined;
-  const liveHint = "Read live from the node's current\nstate, independent of anything this\npermanode has recorded - the true\nbalance right now.";
+  const liveHint = "The sum of every UTXO this address holds\nright now, read live from the node's\nconsensus state - correct regardless of\nwhat this permanode has recorded.";
   const recHint = "From this permanode's own recorded\nhistory only - transactions it has\nitself seen since it started running.\nOutputs the node no longer holds are\nexcluded even if the spend fell into a gap.";
 
   // One notice whenever the recorded figures cannot be complete: the
@@ -554,8 +554,8 @@ export async function addressView(address, pageNo = 1) {
         <span class="addr-full">${escapeHtml(address)}</span>
       </div>
       <div class="stats inner">
-        <div class="stat"><span class="v pos hint" title="${escapeHtml(liveHint)}">${liveKnown ? noid(result.live_balance_micronoid, false) : "?"}</span><span class="k">Current balance (live)</span></div>
-        <div class="stat"><span class="v">${liveKnown ? int(result.live_utxo_count) : "?"}</span><span class="k">Current UTXOs (live)</span></div>
+        <div class="stat"><span class="v pos hint" title="${escapeHtml(liveHint)}">${liveKnown ? noid(result.live_balance_micronoid, false) : "?"}</span><span class="k">Current balance (live, all UTXOs)</span></div>
+        <div class="stat"><span class="v">${liveKnown ? int(result.live_utxo_count) : "?"}</span><span class="k">UTXOs (live, all)</span></div>
         <div class="stat"><span class="v hint" title="${escapeHtml(recHint)}">${noid(b.confirmed_balance_micronoid, false)}</span><span class="k">Recorded balance</span></div>
         <div class="stat"><span class="v">${int(b.confirmed_utxos)}</span><span class="k">Recorded UTXOs</span></div>
         <div class="stat"><span class="v hint" title="Sum of recorded outputs to this address\nsince this permanode began recording -\nnot the address's lifetime total.">${noid(b.total_received_micronoid, false)}</span><span class="k">Total received</span></div>
