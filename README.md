@@ -42,6 +42,9 @@ the node itself no longer has it either.
   transaction and address pages, live mempool, rich list. Plain
   HTML/CSS/JS, no build step, no third-party requests (fonts are bundled,
   SIL OFL). Compiled into the binary.
+- **Footer and `/about` page** on every instance: independent community
+  project, no warranty for accuracy or completeness, where the data comes
+  from, source and license, the operator's donation address if set.
 - **JSON API** under `/api/v1/` (`stats`, `blocks`, `block/height/{h}`,
   `block/hash/{h}`, `tx/{txid}`, `address/{a}`, `address/{a}/utxos`,
   `mempool`, `richlist`, `gaps`).

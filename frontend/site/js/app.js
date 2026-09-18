@@ -7,6 +7,7 @@ import {
   addressView,
   mempoolView,
   richlistView,
+  aboutView,
   tickerHtml,
   notFoundHtml,
 } from "./views.js";
@@ -99,6 +100,9 @@ async function render() {
     } else if (path === "/richlist") {
       currentView = "richlist";
       result = await richlistView();
+    } else if (path === "/about") {
+      currentView = "about";
+      result = await aboutView();
     } else if (path.startsWith("/block/")) {
       currentView = "block";
       let id = decodeURIComponent(path.slice("/block/".length));

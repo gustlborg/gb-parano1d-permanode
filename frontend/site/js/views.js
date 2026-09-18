@@ -858,6 +858,48 @@ export async function richlistView() {
   return { html, mount: tickingMount };
 }
 
+// ---- about ------------------------------------------------------------
+const SOURCE_URL = "https://github.com/gustlborg/gb-parano1d-permanode";
+
+export async function aboutView() {
+  const stats = await api.stats().catch(() => null);
+  const since = stats?.oldest_retained_timestamp ? fullTime(stats.oldest_retained_timestamp) : "its first start";
+  const gaps = stats ? int(stats.gaps) : "-";
+  const donation = stats?.donation_address;
+  const html = page(`
+    ${back()}
+    <div class="card pad prose">
+      <h1 class="title">About this explorer</h1>
+      <h2>Independent</h2>
+      <p>This site is an instance of <b>parano1d-permanode</b>, an independent, non-commercial community project.
+         It is run by its operator as a hobby, at their own expense, and is <b>not affiliated with, endorsed by or
+         maintained by the Parano1d project or its developers</b>.</p>
+      <h2>No warranty</h2>
+      <p>Everything shown here is provided as is, <b>without any warranty of accuracy, completeness or availability,
+         and without liability for any use made of it</b>. Do not rely on it for financial or legal decisions. The
+         authoritative record of the Parano1d network is the consensus state of the network itself, as verified by
+         your own node.</p>
+      <h2>Where the data comes from</h2>
+      <p>Block headers and transactions are recorded from the operator's own Parano1d node as blocks arrive. The
+         node itself discards transaction bodies after a few minutes, so the recorded history begins at
+         <b>${since}</b> and can contain gaps where a block's body was unavailable in time (currently
+         <b>${gaps}</b>). Recorded totals for an address only cover activity since then. Live balances, UTXOs
+         and mempool contents are read from the node's current state at the time of your request and are
+         independent of the recorded history.</p>
+      <h2>Source code</h2>
+      <p>parano1d-permanode is free software under the GNU AGPL-3.0-or-later. Source, releases and documentation:
+         <a href="${SOURCE_URL}" rel="noopener">${SOURCE_URL}</a>. Anyone running a Parano1d node can run their own
+         instance.</p>
+      ${
+        donation
+          ? `<h2>Support</h2>
+             <p>Donations help the operator keep this instance running:<br><span class="mono">${link(`/address/${donation}`, donation)}</span></p>`
+          : ""
+      }
+    </div>`);
+  return { html, mount: tickingMount };
+}
+
 export function notFoundHtml(msg) {
   return page(`${back()}<div class="card"><p class="error">${escapeHtml(msg || "Not found.")}</p></div>`);
 }
