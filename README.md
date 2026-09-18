@@ -62,6 +62,10 @@ the node itself no longer has it either.
   figures are computed from the transactions this permanode has stored,
   so they only cover activity since its first start. *Live* figures come
   straight from the node's current UTXO state and are always complete.
+  Whenever the recorded figures cannot be complete for an address (it
+  was active before the permanode started, or some of its outputs were
+  spent inside gaps), the address page says so and points out that the
+  live balance is authoritative regardless.
 - **The UTXO sweep** reads every live UTXO of the node (`getStateMap` to
   find the populated state segments, `getSlot` for each slot in them) on
   the first poll after start and then every `scan_slots_every_cycles`

@@ -507,7 +507,7 @@ function liveUtxosBody(utxos) {
 }
 
 export async function addressView(address, pageNo = 1) {
-  const result = await api.address(address, pageNo, 25);
+  const [result, stats] = await Promise.all([api.address(address, pageNo, 25), api.stats().catch(() => null)]);
   const rows = result.transactions.map((tx) => addressTxRow(tx, address)).join("");
   const totalPages = Math.max(1, Math.ceil(result.total / result.page_size));
   const b = result.balance;
@@ -515,18 +515,36 @@ export async function addressView(address, pageNo = 1) {
   const liveHint = "Read live from the node's current\nstate, independent of anything this\npermanode has recorded - the true\nbalance right now.";
   const recHint = "From this permanode's own recorded\nhistory only - transactions it has\nitself seen since it started running.\nOutputs the node no longer holds are\nexcluded even if the spend fell into a gap.";
 
-  const gapNote =
-    b.spent_in_gap_utxos > 0
-      ? `<p class="note warn">${int(b.spent_in_gap_utxos)} recorded output${b.spent_in_gap_utxos === 1 ? "" : "s"} (${noid(b.spent_in_gap_micronoid)})
-         of this address ${b.spent_in_gap_utxos === 1 ? "was" : "were"} spent in blocks this permanode has no body for. The spending
-         transactions are unknown here; the outputs are no longer counted in the recorded balance.</p>`
-      : "";
+  // One notice whenever the recorded figures cannot be complete: the
+  // address was active before this permanode started (inputs spent from
+  // outputs it never saw created, or live UTXOs older than its records),
+  // or some of its outputs were spent inside gaps.
+  const olderSpent = BigInt(b.sent_from_unrecorded_micronoid || "0");
+  const predates = olderSpent > 0n || (liveKnown && result.live_utxo_count > b.confirmed_utxos);
+  const inGaps = b.spent_in_gap_utxos > 0;
+  const since = stats?.oldest_retained_timestamp ? fullTime(stats.oldest_retained_timestamp) : "it started";
+  const reasons = [];
+  if (predates) reasons.push(`it was already active before this permanode began recording (${since})`);
+  if (olderSpent > 0n) reasons.push(`${noid(olderSpent.toString())} spent from here came from older outputs whose arrival is not on record`);
+  if (inGaps)
+    reasons.push(
+      `${int(b.spent_in_gap_utxos)} recorded output${b.spent_in_gap_utxos === 1 ? "" : "s"} (${noid(b.spent_in_gap_micronoid)}) ${
+        b.spent_in_gap_utxos === 1 ? "was" : "were"
+      } spent in blocks whose bodies this permanode never had, so the spending transactions are unknown here and those outputs are excluded from the recorded balance`
+    );
+  const historyNote = reasons.length
+    ? `<p class="note info"><b>This permanode does not hold this address's complete history:</b> ${reasons.join("; ")}.
+       "Total received", "Total sent" and the recorded figures cover recorded activity only and will not add up to the balance.
+       <b>The live balance and live UTXOs above are correct regardless.</b> They are read directly from the node's consensus
+       state, which every node in the network verifies and which admits no double spend or unbacked coin - no missing
+       history can change what an address holds right now.</p>`
+    : "";
   const note =
     result.total === 0
       ? `<p class="note warn">This permanode has recorded no transaction activity for this address since it
          started running - the "recorded" figures are genuinely zero, not missing data. The live balance
          comes straight from the node's current state, so it is accurate even without a history to show.</p>`
-      : `<p class="note">${int(result.total)} transaction${result.total === 1 ? "" : "s"} recorded involving this address.</p>${gapNote}`;
+      : `<p class="note">${int(result.total)} transaction${result.total === 1 ? "" : "s"} recorded involving this address.</p>${historyNote}`;
 
   const html = page(`
     ${back()}
@@ -540,8 +558,8 @@ export async function addressView(address, pageNo = 1) {
         <div class="stat"><span class="v">${liveKnown ? int(result.live_utxo_count) : "?"}</span><span class="k">Current UTXOs (live)</span></div>
         <div class="stat"><span class="v hint" title="${escapeHtml(recHint)}">${noid(b.confirmed_balance_micronoid, false)}</span><span class="k">Recorded balance</span></div>
         <div class="stat"><span class="v">${int(b.confirmed_utxos)}</span><span class="k">Recorded UTXOs</span></div>
-        <div class="stat"><span class="v">${noid(b.total_received_micronoid, false)}</span><span class="k">Total received</span></div>
-        <div class="stat"><span class="v">${noid(b.total_sent_micronoid, false)}</span><span class="k">Total sent</span></div>
+        <div class="stat"><span class="v hint" title="Sum of recorded outputs to this address\nsince this permanode began recording -\nnot the address's lifetime total.">${noid(b.total_received_micronoid, false)}</span><span class="k">Total received</span></div>
+        <div class="stat"><span class="v hint" title="Sum of the inputs this address spent in\nrecorded transactions since this permanode\nbegan recording - may include coins it\nreceived before that.">${noid(b.total_sent_micronoid, false)}</span><span class="k">Total sent</span></div>
       </div>
       ${note}
     </div>
