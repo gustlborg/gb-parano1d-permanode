@@ -11,6 +11,7 @@ import {
   notFoundHtml,
 } from "./views.js";
 import * as health from "./health.js";
+import "./tooltip.js";
 
 const app = document.getElementById("app");
 const ticker = document.getElementById("ticker");
