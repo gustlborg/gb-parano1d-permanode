@@ -314,8 +314,18 @@ export async function blocksView() {
 }
 
 // ---- status bar -------------------------------------------------------
+function donationHtml(address) {
+  if (!address) return "";
+  return `<span class="donate">${hint(
+    `Donations ${link(`/address/${address}`, shortHash(address, 10, 8))}`,
+    `This explorer is run by its operator at their\nown expense and is developed independently\nof the Parano1d project. Donations to this\naddress help keep it running:\n${address}`
+  )}</span>`;
+}
+
 export function tickerHtml(stats) {
-  const live = `<span class="live" id="live"><span class="dot"></span>live</span><span class="conn-lost" id="conn-lost"></span>`;
+  // The connection note only appears after repeated failed polls (see
+  // health.js); there is no permanent "live" marker.
+  const live = `<span class="conn-lost" id="conn-lost"></span>`;
   if (!stats) return live;
   const n = stats.network || {};
   const gaps =
@@ -335,7 +345,8 @@ export function tickerHtml(stats) {
     ${gaps}
     <span>Avg block time <b>${seconds(n.avg_block_time_1h_seconds)}</b></span>
     ${stats.decoder_mismatches > 0 ? hint(`Decoder mismatches <b>${stats.decoder_mismatches}</b>`, "Times the fallback decoder's output disagreed with the node's own getBlockDetails for a block both could decode - should be 0.") : ""}
-    ${live}`;
+    ${live}
+    ${donationHtml(stats.donation_address)}`;
 }
 
 // ---- block ------------------------------------------------------------

@@ -47,9 +47,7 @@ function renderNav() {
 }
 
 function renderLive(state) {
-  const live = document.getElementById("live");
   const lost = document.getElementById("conn-lost");
-  if (live) live.classList.toggle("degraded", state.degraded);
   if (lost) lost.textContent = state.lost ? "connection lost — retrying" : "";
 }
 
@@ -58,7 +56,7 @@ async function renderTicker() {
     ticker.innerHTML = tickerHtml(await api.stats());
     health.reportOk();
   } catch {
-    if (!document.getElementById("live")) ticker.innerHTML = tickerHtml(null);
+    if (!document.getElementById("conn-lost")) ticker.innerHTML = tickerHtml(null);
     health.reportFail();
   }
   renderLive(health.state());
