@@ -506,8 +506,38 @@ function liveUtxosBody(utxos) {
     </div>`;
 }
 
-export async function addressView(address, pageNo = 1) {
-  const [result, stats] = await Promise.all([api.address(address, pageNo, 25), api.stats().catch(() => null)]);
+const PAGE_SIZES = [25, 50, 100, 150, 200];
+
+// Navigates within the app (app.js re-renders on popstate).
+function go(path) {
+  history.pushState(null, "", path);
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
+function addressUrl(address, pageNo, pageSize) {
+  return `/address/${address}?page=${pageNo}${pageSize !== 25 ? `&size=${pageSize}` : ""}`;
+}
+
+// "← newer · page [select] / N · older →" on the left, the page length on
+// the right. Both selects navigate on change (wired in the view's mount).
+function pagerHtml(address, pageNo, pageSize, totalPages) {
+  const pageOptions = Array.from({ length: totalPages }, (_, i) => i + 1)
+    .map((n) => `<option value="${n}"${n === pageNo ? " selected" : ""}>${n}</option>`)
+    .join("");
+  const sizeOptions = PAGE_SIZES.map((n) => `<option value="${n}"${n === pageSize ? " selected" : ""}>${n}</option>`).join("");
+  return `<div class="pager">
+      <span class="pager-nav">
+        ${pageNo > 1 ? link(addressUrl(address, pageNo - 1, pageSize), "← newer") : '<span class="dim">← newer</span>'}
+        <span>page <select class="select" id="page-select" aria-label="Page">${pageOptions}</select> / ${totalPages}</span>
+        ${pageNo < totalPages ? link(addressUrl(address, pageNo + 1, pageSize), "older →") : '<span class="dim">older →</span>'}
+      </span>
+      <label class="pager-size">per page <select class="select" id="size-select" aria-label="Transactions per page">${sizeOptions}</select></label>
+    </div>`;
+}
+
+export async function addressView(address, pageNo = 1, pageSize = 25) {
+  if (!PAGE_SIZES.includes(pageSize)) pageSize = 25;
+  const [result, stats] = await Promise.all([api.address(address, pageNo, pageSize), api.stats().catch(() => null)]);
   const rows = result.transactions.map((tx) => addressTxRow(tx, address)).join("");
   const totalPages = Math.max(1, Math.ceil(result.total / result.page_size));
   const b = result.balance;
@@ -568,15 +598,7 @@ export async function addressView(address, pageNo = 1) {
         <div class="thead cols-atx"><span>Txid</span>${timeHeader()}<span>Block</span><span>Counterparty</span><span>In → out</span><span>Amount</span><span>Fee</span></div>
         ${rows || '<div class="trow cols-atx"><span class="empty">No transactions recorded.</span></div>'}
       </div>
-      ${
-        totalPages > 1
-          ? `<div class="pager">
-              ${pageNo > 1 ? link(`/address/${address}?page=${pageNo - 1}`, "← newer") : ""}
-              <span>page ${pageNo} / ${totalPages}</span>
-              ${pageNo < totalPages ? link(`/address/${address}?page=${pageNo + 1}`, "older →") : ""}
-            </div>`
-          : ""
-      }
+      ${result.total > PAGE_SIZES[0] ? pagerHtml(address, pageNo, pageSize, totalPages) : ""}
     </div>
     <div class="card" id="live-utxos">
       <div class="card-head"><h2>Live UTXOs</h2><button type="button" class="ghost" id="load-live-utxos">load from node →</button></div>
@@ -585,6 +607,12 @@ export async function addressView(address, pageNo = 1) {
 
   function mount(root) {
     const disposeTick = tickingMount(root);
+    const pageSelect = root.querySelector("#page-select");
+    const sizeSelect = root.querySelector("#size-select");
+    const onPage = () => go(addressUrl(address, Number(pageSelect.value), pageSize));
+    const onSize = () => go(addressUrl(address, 1, Number(sizeSelect.value)));
+    if (pageSelect) pageSelect.addEventListener("change", onPage);
+    if (sizeSelect) sizeSelect.addEventListener("change", onSize);
     const loadBtn = root.querySelector("#load-live-utxos");
     const body = root.querySelector("#live-utxos-body");
     const head = root.querySelector("#live-utxos .card-head h2");
@@ -610,6 +638,8 @@ export async function addressView(address, pageNo = 1) {
     return () => {
       disposeTick();
       loadBtn.removeEventListener("click", onLoad);
+      if (pageSelect) pageSelect.removeEventListener("change", onPage);
+      if (sizeSelect) sizeSelect.removeEventListener("change", onSize);
     };
   }
 

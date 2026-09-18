@@ -117,8 +117,9 @@ async function render() {
     } else if (path.startsWith("/address/")) {
       currentView = "address";
       const pageNo = parseInt(params.get("page") || "1", 10) || 1;
+      const pageSize = parseInt(params.get("size") || "25", 10) || 25;
       const address = decodeURIComponent(path.slice("/address/".length));
-      result = await addressView(address, pageNo);
+      result = await addressView(address, pageNo, pageSize);
       selected.address = address;
     } else {
       currentView = "";
