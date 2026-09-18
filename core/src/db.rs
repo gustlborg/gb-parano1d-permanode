@@ -52,9 +52,26 @@ pub fn write_tx(conn: &Connection) -> Result<rusqlite::Transaction<'_>> {
 /// PRAGMA table_info check so it's safe against the live systemd-managed
 /// database, not just a fresh one from init_schema.
 fn migrate(conn: &Connection) -> Result<()> {
+    // The indexer, the explorer and the sweep each open their own
+    // connection, often at the same moment. Taking the write lock up front
+    // makes the second opener wait and then see the columns the first one
+    // added, instead of both racing into "duplicate column name".
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    migrate_locked(&tx)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_locked(conn: &Connection) -> Result<()> {
     add_column_if_missing(conn, "blocks", "body_source", "TEXT")?;
     add_column_if_missing(conn, "ingest_gaps", "resolved_at", "TEXT")?;
     add_column_if_missing(conn, "ingest_gaps", "resolution", "TEXT")?;
+    // Set by the live-state sweep on outputs that are gone from the node's
+    // state although no recorded input spent them: the spend happened in
+    // a block this permanode has no body for. Balance queries treat them
+    // as spent, so "recorded balance" cannot drift above the live one.
+    add_column_if_missing(conn, "tx_outputs", "spent_in_gap", "INTEGER NOT NULL DEFAULT 0")?;
+    add_column_if_missing(conn, "tx_outputs", "spent_in_gap_at", "TEXT")?;
     // Unspent-output queries match outputs against inputs by creation_id;
     // without these every such query is outputs x inputs.
     conn.execute_batch(
@@ -366,5 +383,37 @@ pub fn upsert_address_balance_cache(
            fetched_at = excluded.fetched_at",
         params![address, live_balance_micronoid, live_utxo_count, fetched_at],
     )?;
+    Ok(())
+}
+
+/// Recorded outputs on canonical blocks up to `max_height` that no
+/// recorded input has spent and that aren't flagged yet - the candidates
+/// for the sweep's spent-in-gap reconciliation. Returns (rowid, creation_id).
+pub fn unspent_recorded_outputs(conn: &Connection, max_height: u64) -> Result<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT o.rowid, o.creation_id
+         FROM tx_outputs o
+         JOIN transactions t ON t.id = o.tx_id
+         JOIN blocks b ON b.id = t.block_id
+         WHERE b.height <= ?1
+           AND o.spent_in_gap = 0
+           AND (SELECT s.status FROM block_status_log s WHERE s.block_id = b.id ORDER BY s.id DESC LIMIT 1) = 'canonical'
+           AND NOT EXISTS (
+             SELECT 1 FROM tx_inputs i
+             JOIN transactions t2 ON t2.id = i.tx_id
+             JOIN blocks b2 ON b2.id = t2.block_id
+             WHERE i.creation_id = o.creation_id
+               AND (SELECT s.status FROM block_status_log s WHERE s.block_id = b2.id ORDER BY s.id DESC LIMIT 1) = 'canonical'
+           )",
+    )?;
+    let rows = stmt.query_map(params![max_height as i64], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub fn mark_spent_in_gap(conn: &Connection, rowids: &[i64], now: &str) -> Result<()> {
+    let mut stmt = conn.prepare("UPDATE tx_outputs SET spent_in_gap = 1, spent_in_gap_at = ?2 WHERE rowid = ?1")?;
+    for id in rowids {
+        stmt.execute(params![id, now])?;
+    }
     Ok(())
 }
