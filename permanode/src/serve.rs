@@ -36,6 +36,12 @@ fn etag_of(bytes: &[u8]) -> String {
 struct AppState {
     conn: Mutex<Connection>,
     rpc: live_rpc::RpcClient,
+    /// How often the indexer refreshes every address's live balance
+    /// (the UTXO sweep), so the rich list can say how fresh it is.
+    balance_sweep_interval_seconds: Option<u64>,
+    /// How often addresses with recorded activity are additionally
+    /// refreshed one by one.
+    address_refresh_interval_seconds: u64,
 }
 
 impl AppState {
@@ -74,6 +80,9 @@ pub async fn run(cfg: &Config) -> Result<()> {
     let state = Arc::new(AppState {
         conn: Mutex::new(conn),
         rpc: live_rpc::RpcClient::new(cfg.rpc_url.clone()),
+        balance_sweep_interval_seconds: (cfg.scan_slots_every_cycles > 0)
+            .then(|| cfg.scan_slots_every_cycles.saturating_mul(cfg.poll_interval_seconds)),
+        address_refresh_interval_seconds: cfg.refresh_addresses_every_cycles.saturating_mul(cfg.poll_interval_seconds),
     });
 
     let api = Router::new()
@@ -153,6 +162,10 @@ struct StatsResponse {
     #[serde(flatten)]
     chain: queries::ChainStats,
     network: NetworkMetrics,
+    /// Interval of the live-balance sweep behind the rich list, `null` if
+    /// the sweep is disabled.
+    balance_sweep_interval_seconds: Option<u64>,
+    address_refresh_interval_seconds: u64,
 }
 
 #[derive(serde::Serialize, Default)]
@@ -218,7 +231,12 @@ async fn get_stats(State(state): State<Arc<AppState>>) -> ApiResult<StatsRespons
         avg_block_time_24h_seconds: avg_24h,
     };
 
-    Ok(Json(StatsResponse { chain, network }))
+    Ok(Json(StatsResponse {
+        chain,
+        network,
+        balance_sweep_interval_seconds: state.balance_sweep_interval_seconds,
+        address_refresh_interval_seconds: state.address_refresh_interval_seconds,
+    }))
 }
 
 /// Confirmations at which a block can no longer be reorganized away (the

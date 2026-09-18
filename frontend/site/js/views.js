@@ -327,11 +327,11 @@ export function tickerHtml(stats) {
       : "";
   return `
     <span>Tip <b>#${stats.last_processed_height ?? "-"}</b></span>
-    <span>Blocks <b>${int(stats.indexed_blocks)}</b></span>
-    <span>Transactions <b>${int(stats.indexed_transactions)}</b></span>
+    ${hint(`Blocks <b>${int(stats.indexed_blocks)}</b>`, "Blocks this permanode has recorded since it\nstarted (see \"History since\") - not the\nchain's lifetime total.")}
+    ${hint(`Transactions <b>${int(stats.indexed_transactions)}</b>`, "Transactions this permanode has recorded\nsince it started (see \"History since\") - not\nthe chain's lifetime total.")}
     ${hint(`Live UTXOs <b>${int(stats.live_utxos)}</b>`, "Only what this permanode has itself recorded\nas created and still unspent since it started\nindexing - not the network-wide total.")}
     ${n.active_slots != null ? hint(`Network UTXOs <b>${int(n.active_slots)}</b>`, "The node's own count across its entire\nhistory since genesis, for comparison.") : ""}
-    <span>History since <b>${stats.oldest_retained_timestamp ? fullTime(stats.oldest_retained_timestamp) : "-"}</b></span>
+    ${hint(`History since <b>${stats.oldest_retained_timestamp ? fullTime(stats.oldest_retained_timestamp) : "-"}</b>`, "Oldest block with a recorded body - where\nthis permanode's transaction history begins.")}
     ${gaps}
     <span>Avg block time <b>${seconds(n.avg_block_time_1h_seconds)}</b></span>
     ${stats.decoder_mismatches > 0 ? hint(`Decoder mismatches <b>${stats.decoder_mismatches}</b>`, "Times the fallback decoder's output disagreed with the node's own getBlockDetails for a block both could decode - should be 0.") : ""}
@@ -524,7 +524,7 @@ function menuHtml(id, current, values, opts = {}) {
   const items = values
     .map((v) => `<button type="button" data-value="${v}"${v === current ? ' class="current"' : ""}>${v}</button>`)
     .join("");
-  return `<span class="menu${opts.right ? " right" : ""}" id="${id}">
+  return `<span class="menu" id="${id}">
       <button type="button" class="menu-btn" aria-haspopup="listbox" aria-expanded="false" aria-label="${escapeHtml(opts.label || "")}">${current} <span class="caret">▾</span></button>
       <div class="menu-list" role="listbox">${items}</div>
     </span>`;
@@ -555,8 +555,7 @@ function wireMenus(root, onPick) {
         const h = list.offsetHeight;
         const below = r.bottom + 4 + h <= window.innerHeight - 8;
         list.style.top = `${Math.round(below ? r.bottom + 4 : r.top - 4 - h)}px`;
-        list.style.left = menu.classList.contains("right") ? "auto" : `${Math.round(r.left)}px`;
-        list.style.right = menu.classList.contains("right") ? `${Math.round(window.innerWidth - r.right)}px` : "auto";
+        list.style.left = `${Math.round(Math.min(r.left, window.innerWidth - list.offsetWidth - 8))}px`;
         list.style.minWidth = `${Math.round(r.width)}px`;
         list.querySelector("button.current")?.scrollIntoView({ block: "nearest" });
       }
@@ -595,7 +594,7 @@ function pagerHtml(address, pageNo, pageSize, totalPages) {
         <span>page ${menuHtml("page-menu", pageNo, pages, { label: "Page" })} / ${totalPages}</span>
         ${pageNo < totalPages ? link(addressUrl(address, pageNo + 1, pageSize), "older →") : '<span class="dim">older →</span>'}
       </span>
-      <span class="pager-size">per page ${menuHtml("size-menu", pageSize, PAGE_SIZES, { label: "Transactions per page", right: true })}</span>
+      <span class="pager-size">per page ${menuHtml("size-menu", pageSize, PAGE_SIZES, { label: "Transactions per page" })}</span>
     </div>`;
 }
 
@@ -807,8 +806,17 @@ export async function mempoolView() {
 }
 
 // ---- rich list --------------------------------------------------------
+function everyText(seconds) {
+  if (!seconds) return "";
+  if (seconds % 3600 === 0) return `every ${seconds / 3600}h`;
+  if (seconds % 60 === 0) return `every ${seconds / 60}m`;
+  return `every ${seconds}s`;
+}
+
 export async function richlistView() {
-  const entries = await api.richlist();
+  const [entries, stats] = await Promise.all([api.richlist(), api.stats().catch(() => null)]);
+  const every = everyText(stats?.balance_sweep_interval_seconds);
+  const refresh = everyText(stats?.address_refresh_interval_seconds);
   const top = entries.length ? Number(entries[0].live_balance_micronoid) : 0;
   const rows = entries
     .map((e, i) => {
@@ -832,7 +840,9 @@ export async function richlistView() {
           Found by sweeping the node's UTXO set directly and refreshed periodically in the background, not on every page view.</p>
       </div>
       <div class="tbl-scroll">
-        <div class="thead cols-rich"><span>#</span><span>Address</span><span>Balance</span><span>UTXOs</span><span>Updated</span></div>
+        <div class="thead cols-rich"><span>#</span><span>Address</span><span>Balance</span><span>UTXOs</span><span>Updated${
+          every ? ` <span class="hint" title="Every address is re-read from the node's UTXO state ${every}${refresh ? `; addresses with recorded activity also ${refresh}` : ""}.">(${every})</span>` : ""
+        }</span></div>
         ${rows || '<div class="trow cols-rich"><span class="empty">No addresses known yet.</span></div>'}
       </div>
     </div>`);
