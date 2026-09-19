@@ -84,13 +84,6 @@ impl RpcClient {
         Ok(serde_json::from_value(v)?)
     }
 
-    /// Peers this node is currently connected to (not the network's node
-    /// count, which a P2P network does not know).
-    pub fn get_peer_count(&self) -> Result<u64> {
-        let v = self.call("paranoid_getPeerCount", json!([]))?;
-        v.as_u64().context("getPeerCount: result is not u64")
-    }
-
     /// Live State dimensions: capacity, fill and how many more live slots
     /// until the state expands - which is also when the block reward halves.
     pub fn get_state_info(&self) -> Result<StateInfo> {

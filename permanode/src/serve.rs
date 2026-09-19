@@ -198,8 +198,6 @@ struct NetworkMetrics {
     state_capacity: Option<u64>,
     slots_until_halving: Option<u64>,
     halving_trigger_pct: Option<u64>,
-    /// Peers the operator's node is connected to right now.
-    peer_count: Option<u64>,
 }
 
 async fn get_stats(State(state): State<Arc<AppState>>) -> ApiResult<StatsResponse> {
@@ -219,17 +217,16 @@ async fn get_stats(State(state): State<Arc<AppState>>) -> ApiResult<StatsRespons
     };
 
     let rpc_client = state.rpc.clone();
-    let (active_slots, chain_info, mining_info, state_info, peer_count) = tokio::task::spawn_blocking(move || {
+    let (active_slots, chain_info, mining_info, state_info) = tokio::task::spawn_blocking(move || {
         (
             rpc_client.get_active_slot_count().ok(),
             rpc_client.get_chain_info().ok(),
             rpc_client.get_mining_info().ok(),
             rpc_client.get_state_info().ok(),
-            rpc_client.get_peer_count().ok(),
         )
     })
     .await
-    .unwrap_or((None, None, None, None, None));
+    .unwrap_or((None, None, None, None));
 
     let estimated_hashrate_hs = mining_info
         .as_ref()
@@ -248,7 +245,6 @@ async fn get_stats(State(state): State<Arc<AppState>>) -> ApiResult<StatsRespons
         state_capacity: state_info.as_ref().map(|i| i.capacity),
         slots_until_halving: state_info.as_ref().map(|i| i.slots_until_expand),
         halving_trigger_pct: state_info.as_ref().map(|i| i.expand_trigger_pct),
-        peer_count,
     };
 
     Ok(Json(StatsResponse {

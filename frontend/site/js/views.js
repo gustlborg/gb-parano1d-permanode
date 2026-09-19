@@ -174,9 +174,6 @@ ${int(n.state_capacity)} slots. Live UTXOs now:
 ${int(n.active_slots)} (${((n.active_slots / n.state_capacity) * 100).toFixed(2)}%).`
           : "Not available from the node.",
     }),
-    statCard(n.peer_count != null ? int(n.peer_count) : "-", "Peers (this node)", {
-      hint: "Peers the operator's node is connected\nto right now. A P2P network has no\nregistry, so the total number of nodes\nis not known to anyone.",
-    }),
   ].join("");
 }
 
