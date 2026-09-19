@@ -81,6 +81,10 @@ pub fn import_bodies(conn: &Connection, source_path: &Path) -> Result<ImportRepo
     // whose spending transaction is now on record are ordinary spent
     // outputs again.
     report.flags_cleared = db::clear_spent_in_gap_with_recorded_spend(conn)?;
+    let closed = db::resolve_gaps_with_bodies(conn, &Utc::now().to_rfc3339())?;
+    if closed > 0 {
+        info!("{closed} gap entr{} closed: the block has a body on record", if closed == 1 { "y" } else { "ies" });
+    }
     Ok(report)
 }
 

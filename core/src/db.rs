@@ -419,11 +419,35 @@ pub fn unspent_recorded_outputs(conn: &Connection, max_height: u64) -> Result<Ve
 /// judged it), so they count as ordinary spent outputs again. Returns how
 /// many were cleared.
 pub fn clear_spent_in_gap_with_recorded_spend(conn: &Connection) -> Result<usize> {
+    // Only a spend in a canonical block counts; orphaned blocks keep their
+    // transactions on record and may well spend the same output.
     Ok(conn.execute(
         "UPDATE tx_outputs SET spent_in_gap = 0, spent_in_gap_at = NULL
          WHERE spent_in_gap = 1
-           AND EXISTS (SELECT 1 FROM tx_inputs i WHERE i.creation_id = tx_outputs.creation_id)",
+           AND EXISTS (
+             SELECT 1 FROM tx_inputs i
+             JOIN transactions t ON t.id = i.tx_id
+             JOIN blocks b ON b.id = t.block_id
+             WHERE i.creation_id = tx_outputs.creation_id
+               AND (SELECT s.status FROM block_status_log s WHERE s.block_id = b.id ORDER BY s.id DESC LIMIT 1) = 'canonical'
+           )",
         [],
+    )?)
+}
+
+/// Closes gap entries whose canonical block does have a body after all
+/// (recorded through a path that didn't touch `ingest_gaps`, such as a
+/// re-ingest after a reorg). Returns how many were closed.
+pub fn resolve_gaps_with_bodies(conn: &Connection, now: &str) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE ingest_gaps SET resolved_at = ?1, resolution = 'body on record'
+         WHERE resolved_at IS NULL
+           AND EXISTS (
+             SELECT 1 FROM blocks b
+             WHERE b.height = ingest_gaps.height AND b.body_captured = 1
+               AND (SELECT s.status FROM block_status_log s WHERE s.block_id = b.id ORDER BY s.id DESC LIMIT 1) = 'canonical'
+           )",
+        params![now],
     )?)
 }
 

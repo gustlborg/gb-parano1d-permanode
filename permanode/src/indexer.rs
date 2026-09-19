@@ -21,6 +21,10 @@ const GETBLOCK_SERVING_WINDOW: u64 = 42;
 
 pub fn run(conn: &Connection, rpc: &RpcClient, cfg: &Config) -> Result<()> {
     let mut cycles: u64 = 0;
+    let closed = db::resolve_gaps_with_bodies(conn, &Utc::now().to_rfc3339())?;
+    if closed > 0 {
+        info!("{closed} gap entr{} closed: the block has a body on record", if closed == 1 { "y" } else { "ies" });
+    }
     // Guards against two live-state sweeps overlapping if one is still
     // running (tens of thousands of RPC calls per populated segment) when
     // its next trigger comes around - the flag lives for the whole run().
