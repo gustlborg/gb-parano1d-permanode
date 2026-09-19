@@ -72,6 +72,10 @@ fn migrate_locked(conn: &Connection) -> Result<()> {
     // as spent, so "recorded balance" cannot drift above the live one.
     add_column_if_missing(conn, "tx_outputs", "spent_in_gap", "INTEGER NOT NULL DEFAULT 0")?;
     add_column_if_missing(conn, "tx_outputs", "spent_in_gap_at", "TEXT")?;
+    // State size at each block, for the emission schedule (subsidy halves
+    // per expansion). NULL on rows recorded before this column existed;
+    // readers treat that as the genesis value, which every block so far has.
+    add_column_if_missing(conn, "blocks", "log_slots", "INTEGER")?;
     // Unspent-output queries match outputs against inputs by creation_id;
     // without these every such query is outputs x inputs.
     conn.execute_batch(

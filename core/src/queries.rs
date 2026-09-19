@@ -142,6 +142,15 @@ pub struct ChainStats {
     /// indexer's `decoder_selfcheck` config option. Should stay 0.
     pub decoder_mismatches: i64,
     pub oldest_retained_timestamp: Option<i64>,
+    /// Transactions in canonical blocks of the last 24 hours (recorded
+    /// bodies only).
+    pub transactions_24h: i64,
+    /// Fees burned by consensus in the last 24 hours, from recorded
+    /// blocks: total fees minus what the coinbase claimed on top of the
+    /// subsidy. `None` if no block with a body falls into the window.
+    pub burned_fees_24h_micronoid: Option<String>,
+    /// Addresses holding at least one live UTXO per the last sweep.
+    pub addresses_with_balance: i64,
     /// Outputs recorded on a canonical block whose creation_id has not
     /// (yet) been consumed by any recorded input - the live UTXO set as
     /// far as this permanode's own indexed history can tell. Same caveat
@@ -446,6 +455,13 @@ pub fn txs_by_address(
     Ok((items, total))
 }
 
+fn chrono_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 fn canonical_filter_on(block_alias: &str) -> String {
     format!(
         "(SELECT s.status FROM block_status_log s WHERE s.block_id = {block_alias}.id \
@@ -588,6 +604,45 @@ pub fn chain_stats(conn: &Connection) -> Result<ChainStats> {
         |r| r.get(0),
     )?;
 
+    let now_unix = chrono_now();
+    let day_ago = now_unix - 86_400;
+    let transactions_24h: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM transactions t JOIN blocks b ON b.id = t.block_id
+             WHERE b.timestamp >= ?1 AND {}",
+            canonical_filter_on("b")
+        ),
+        params![day_ago],
+        |r| r.get(0),
+    )?;
+    let burned_fees_24h_micronoid = {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT height, reward_micronoid, CAST(total_fees_micronoid AS INTEGER), log_slots
+             FROM blocks WHERE timestamp >= ?1 AND body_captured = 1 AND reward_micronoid IS NOT NULL
+               AND {CANONICAL_BLOCK_FILTER}"
+        ))?;
+        let rows = stmt.query_map(params![day_ago], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })?;
+        let mut any = false;
+        let mut burned: i128 = 0;
+        for row in rows {
+            let (height, reward, fees, log_slots) = row?;
+            any = true;
+            let subsidy = crate::emission::miner_subsidy(height as u64, log_slots.unwrap_or(24) as u32) as i128;
+            let claimed = reward as i128 - subsidy;
+            burned += (fees as i128 - claimed).max(0);
+        }
+        any.then(|| burned.to_string())
+    };
+    let addresses_with_balance: i64 =
+        conn.query_row("SELECT COUNT(*) FROM address_balance_cache WHERE live_utxo_count > 0", [], |r| r.get(0))?;
+
     let canonical_on_b = canonical_filter_on("b");
     let canonical_on_b2 = canonical_filter_on("b2");
     let live_utxos: i64 = conn.query_row(
@@ -616,6 +671,9 @@ pub fn chain_stats(conn: &Connection) -> Result<ChainStats> {
         gaps_resolved,
         decoder_mismatches,
         oldest_retained_timestamp,
+        transactions_24h,
+        burned_fees_24h_micronoid,
+        addresses_with_balance,
         live_utxos,
     })
 }

@@ -84,6 +84,15 @@ impl RpcClient {
         Ok(serde_json::from_value(v)?)
     }
 
+    /// Permanent block header by height (`None` above the tip).
+    pub fn get_block_header(&self, height: u64) -> Result<Option<BlockHeaderInfo>> {
+        let v = self.call("paranoid_getBlockHeader", json!([height]))?;
+        if v.is_null() {
+            return Ok(None);
+        }
+        Ok(serde_json::from_value(v)?)
+    }
+
     /// Live State dimensions: capacity, fill and how many more live slots
     /// until the state expands - which is also when the block reward halves.
     pub fn get_state_info(&self) -> Result<StateInfo> {
@@ -122,6 +131,16 @@ pub struct ChainInfo {
     pub active_slot_count: u64,
     pub log_slots: u32,
     pub circulating_supply_micronoid: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockHeaderInfo {
+    pub height: u64,
+    pub hash: String,
+    pub timestamp: u64,
+    pub log_slots: u32,
+    pub active_slot_count: u64,
+    pub alloc_counter: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

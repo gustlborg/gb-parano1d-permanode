@@ -149,12 +149,36 @@ function statCard(v, k, opts = {}) {
   return `<div class="stat"${opts.id ? ` id="${opts.id}"` : ""}><span class="${cls}"${title}>${v}</span><span class="k">${k}</span></div>`;
 }
 
+function bytesText(b) {
+  if (b == null) return "-";
+  if (b >= 1024 ** 3) return `${(b / 1024 ** 3).toFixed(2)} GB`;
+  if (b >= 1024 ** 2) return `${(b / 1024 ** 2).toFixed(1)} MB`;
+  return `${Math.round(b / 1024)} KB`;
+}
+
+function daysText(seconds) {
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} min`;
+  if (seconds < 86400) return `${(seconds / 3600).toFixed(1)} h`;
+  return `${(seconds / 86400).toFixed(1)} days`;
+}
+
 function dashboardStatsHtml(stats, mempool) {
   const n = stats?.network || {};
+  const now = Date.now() / 1000;
+  const recordedFor = stats?.oldest_retained_timestamp ? now - stats.oldest_retained_timestamp : null;
   const blockTimes = `10 min: ${seconds(n.avg_block_time_10m_seconds)} · 24 h: ${seconds(n.avg_block_time_24h_seconds)}
 From this permanode's own recorded
 blocks, not the node - a fresh install
 won't have a 24h figure yet.`;
+  const burnedTotal =
+    n.burned_total_micronoid != null && n.emitted_total_micronoid != null
+      ? `Since genesis: ${noid(n.burned_total_micronoid)} of
+${noid(n.emitted_total_micronoid)} minted
+(${((Number(n.burned_total_micronoid) / Number(n.emitted_total_micronoid)) * 100).toFixed(4)}%), from the emission
+schedule minus the circulating supply.`
+      : "";
+  const perDay =
+    stats?.db_bytes != null && recordedFor > 3600 ? `\n≈ ${bytesText((stats.db_bytes / recordedFor) * 86400)} per day at the current rate.` : "";
   return [
     statCard(supply(n.circulating_supply_micronoid), "Circulating supply", { hint: "in NOID" }),
     statCard(noid(n.block_reward_micronoid), "Block reward"),
@@ -173,6 +197,27 @@ happens at ${n.halving_trigger_pct}% of its capacity of
 ${int(n.state_capacity)} slots. Live UTXOs now:
 ${int(n.active_slots)} (${((n.active_slots / n.state_capacity) * 100).toFixed(2)}%).`
           : "Not available from the node.",
+    }),
+    statCard(stats?.burned_fees_24h_micronoid != null ? noid(stats.burned_fees_24h_micronoid) : "-", "Burned fees (24h)", {
+      hint: `Fees destroyed by consensus in the last
+24 hours (0.0025 NOID per net-new UTXO
+slot at today's occupancy; miners only
+claim the rest), from recorded blocks.
+${burnedTotal}`,
+    }),
+    statCard(stats ? int(stats.transactions_24h) : "-", "Transactions (24h)", {
+      hint: "Transactions in the blocks of the last\n24 hours, from this permanode's records.",
+    }),
+    statCard(stats ? int(stats.addresses_with_balance) : "-", "Addresses with NOID", {
+      hint: "Addresses holding at least one live UTXO,\nfrom the last sweep of the node's UTXO state.",
+    }),
+    statCard(bytesText(stats?.db_bytes), "Permanode storage", {
+      hint: `This permanode's database on disk,\nincluding the write-ahead log.${perDay}`,
+    }),
+    statCard(recordedFor != null ? daysText(recordedFor) : "-", "Recorded history", {
+      hint: stats?.oldest_retained_timestamp
+        ? `Every block since ${fullTime(stats.oldest_retained_timestamp)}\nis on record here.`
+        : "Nothing recorded yet.",
     }),
   ].join("");
 }
