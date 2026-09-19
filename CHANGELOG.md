@@ -15,6 +15,13 @@ Notable changes per release. Commit history has the details.
 - Explanations on stat cards moved from a dotted underline on the value
   to a round "i" in the card's corner; hover it for the tooltip.
 - `ROADMAP.md`.
+- **Halving page** (`/halving`, in the nav between Block and
+  Transaction): live-state occupancy against the 75 % expansion
+  threshold, chart of live UTXOs over block height with a projection
+  from recent growth (recent window or full scale), the finalized
+  18-header trigger window as it stands on chain, reward tiers per state
+  domain and the consensus rules behind them. Backed by a new
+  `/api/v1/halving` endpoint that samples block headers incrementally.
 
 ## 0.1.16 - 2026-09-18
 

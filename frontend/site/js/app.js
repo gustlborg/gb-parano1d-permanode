@@ -11,6 +11,7 @@ import {
   tickerHtml,
   notFoundHtml,
 } from "./views.js";
+import { halvingView } from "./halving.js";
 import * as health from "./health.js";
 import "./tooltip.js";
 
@@ -29,6 +30,7 @@ function navItems() {
   return [
     { key: "home", label: "Dashboard", href: "/" },
     { key: "block", label: "Block", href: selected.block ? `/block/${selected.block}` : "/block/latest" },
+    { key: "halving", label: "Halving", href: "/halving" },
     { key: "tx", label: "Transaction", href: selected.tx ? `/tx/${selected.tx}` : null },
     { key: "address", label: "Address", href: selected.address ? `/address/${selected.address}` : null },
     { key: "mempool", label: "Mempool", href: "/mempool" },
@@ -100,6 +102,9 @@ async function render() {
     } else if (path === "/richlist") {
       currentView = "richlist";
       result = await richlistView();
+    } else if (path === "/halving") {
+      currentView = "halving";
+      result = await halvingView();
     } else if (path === "/about") {
       currentView = "about";
       result = await aboutView();

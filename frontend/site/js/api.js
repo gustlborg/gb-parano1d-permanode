@@ -19,4 +19,5 @@ export const api = {
   gaps: () => getJson("/gaps"),
   richlist: () => getJson("/richlist"),
   mempool: () => getJson("/mempool"),
+  halving: () => getJson("/halving"),
 };
