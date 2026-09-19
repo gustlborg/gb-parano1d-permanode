@@ -12,8 +12,10 @@ Notable changes per release. Commit history has the details.
   this instance has been recording.
 - Blocks store `log_slots` so subsidies stay right across future
   expansions.
-- Explanations on stat cards moved from a dotted underline on the value
-  to a round "i" in the card's corner; hover it for the tooltip.
+- Stat cards follow the design update: equal height across both rows,
+  a little taller, and every card carries a round "i" in its corner
+  (hover it for the explanation) instead of a dotted underline on the
+  value.
 - `ROADMAP.md`.
 - **Halving page** (`/halving`, in the nav between Block and
   Transaction): live-state occupancy against the 75 % expansion
