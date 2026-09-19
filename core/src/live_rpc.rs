@@ -84,6 +84,20 @@ impl RpcClient {
         Ok(serde_json::from_value(v)?)
     }
 
+    /// Peers this node is currently connected to (not the network's node
+    /// count, which a P2P network does not know).
+    pub fn get_peer_count(&self) -> Result<u64> {
+        let v = self.call("paranoid_getPeerCount", json!([]))?;
+        v.as_u64().context("getPeerCount: result is not u64")
+    }
+
+    /// Live State dimensions: capacity, fill and how many more live slots
+    /// until the state expands - which is also when the block reward halves.
+    pub fn get_state_info(&self) -> Result<StateInfo> {
+        let v = self.call("paranoid_getStateInfo", json!([]))?;
+        Ok(serde_json::from_value(v)?)
+    }
+
     /// Every currently-live (unspent) slot owned by `address`, read
     /// straight from the node's Live State - not reconstructed from
     /// transaction history at all, so it's correct regardless of whether
@@ -115,6 +129,15 @@ pub struct ChainInfo {
     pub active_slot_count: u64,
     pub log_slots: u32,
     pub circulating_supply_micronoid: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateInfo {
+    pub log_slots: u32,
+    pub capacity: u64,
+    pub active_slots: u64,
+    pub slots_until_expand: u64,
+    pub expand_trigger_pct: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
