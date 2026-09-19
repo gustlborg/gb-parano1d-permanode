@@ -3,7 +3,7 @@ name = "parano1d-permanode"
 version = "0.2.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
-description = "Permanent transaction history and block explorer for a Parano1d node"
+description = "Permanent transaction history and JSON API for a Parano1d node"
 
 [lib]
 name = "parano1d_permanode"

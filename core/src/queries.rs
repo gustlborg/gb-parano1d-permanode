@@ -1,7 +1,7 @@
 //! Read-only queries for the API server. All of these only ever return the
 //! currently-canonical version of a block: a block's latest
 //! `block_status_log` entry must be `canonical`. Orphaned history is kept
-//! in the database but is not what a normal explorer view should show.
+//! in the database but is not what a normal API response should show.
 
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};

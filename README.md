@@ -142,7 +142,7 @@ Keep `listen` on loopback and publish it through a reverse proxy with TLS,
 e.g. Caddy (automatic Let's Encrypt certificates):
 
 ```
-explorer.example.org {
+permanode.example.org {
     reverse_proxy 127.0.0.1:8420
 }
 ```

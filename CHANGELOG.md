@@ -42,23 +42,19 @@ The public instance at noidexplorer.org runs its explorer that way.
 
 ## 0.1.16 - 2026-09-18
 
-Everything since the first release, consolidated:
+Everything since the first release, consolidated. These versions also
+shipped an explorer frontend compiled into the binary; it has since
+moved to its own project and is not part of this repository.
 
-- **One binary.** Indexer and explorer run in a single process (`index`
-  and `serve` subcommands to run either alone); the frontend is compiled
-  in; `listen` and the new `donation_address` live in `permanode.toml`.
-- **Explorer redesign.** Dashboard with the animated block chain and
-  mempool faces (one cell per page, shaded by fee rate), block,
-  transaction, address, live mempool and rich list pages, instant
-  tooltips, favicon, footer and an `/about` page (independent community
-  project, no warranty, data sources, license, donation address).
-- **Address pages.** Net amount per transaction for the viewed address
-  (not the transaction's total output), real counterparty instead of the
-  address's own change, confirmations with a "final" mark from 18 on,
-  page selector and 25/50/100/150/200 per page, full timestamps when the
-  time column is switched to absolute, and a notice whenever the recorded
-  figures cannot be complete - with the live balance from the node stated
-  as authoritative regardless.
+- **One binary.** Indexer and API run in a single process (`index` and
+  `serve` subcommands to run either alone); `listen` and the new
+  `donation_address` live in `permanode.toml`.
+- **Address data.** Net amount per transaction for the viewed address
+  (not the transaction's total output), the real counterparty instead of
+  the address's own change, confirmations (final from 18 on), bounded
+  pagination up to 200 per page, and a notice whenever the recorded
+  figures cannot be complete - with the live balance from the node
+  authoritative regardless.
 - **Complete live balances.** A sweep over the node's UTXO state
   (`getStateMap` + `getSlot`) on start and every 30 minutes assigns every
   UTXO to its owner, verifies its totals against the node, and flags
@@ -76,5 +72,5 @@ Everything since the first release, consolidated:
 
 ## 0.1.0 - 2026-09-17
 
-First public release: indexer with the `getBlock` fallback decoder for the
-node's marker-block RPC bug, explorer, JSON API, rich list.
+First release: indexer with the `getBlock` fallback decoder for the
+node's marker-block RPC bug, JSON API, rich list.

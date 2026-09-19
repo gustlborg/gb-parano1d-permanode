@@ -1,4 +1,4 @@
-//! The consensus fee model, mirrored so the explorer can split a paid fee
+//! The consensus fee model, mirrored so the API can split a paid fee
 //! into what the miner claimed and what consensus burned.
 //!
 //! Required fee = base + per-input + per-output + state-growth, where the

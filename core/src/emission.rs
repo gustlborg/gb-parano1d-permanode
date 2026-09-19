@@ -9,7 +9,7 @@
 //! - genesis mints nothing.
 //!
 //! Everything the node ever issued minus what is in circulation is what
-//! fees have burned, so `emitted_up_to` lets the explorer report the total
+//! fees have burned, so `emitted_up_to` lets the API report the total
 //! burn since genesis without needing bodies it never had.
 
 pub const MICRONOID_PER_NOID: u64 = 1_000_000;

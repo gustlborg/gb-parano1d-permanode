@@ -52,7 +52,7 @@ pub fn write_tx(conn: &Connection) -> Result<rusqlite::Transaction<'_>> {
 /// PRAGMA table_info check so it's safe against the live systemd-managed
 /// database, not just a fresh one from init_schema.
 fn migrate(conn: &Connection) -> Result<()> {
-    // The indexer, the explorer and the sweep each open their own
+    // The indexer, the API server and the sweep each open their own
     // connection, often at the same moment. Taking the write lock up front
     // makes the second opener wait and then see the columns the first one
     // added, instead of both racing into "duplicate column name".
