@@ -165,15 +165,20 @@ during an update - it is the whole point.
   inclusion receipts) and logs chain reorganizations instead of
   overwriting them.
 - **Explorer**: dashboard with the live block chain and mempool, block,
-  transaction and address pages, live mempool, rich list. Plain
+  transaction and address pages, live mempool, rich list, a halving page
+  (live-state occupancy against the expansion threshold, the finalized
+  trigger window, reward tiers) and an economics page (issued vs burned,
+  state pressure and burn tiers, fee composition, state creation vs
+  consolidation, supply model, development allocation). Plain
   HTML/CSS/JS, no build step, no third-party requests (fonts are bundled,
   SIL OFL). Compiled into the binary.
 - **Footer and `/about` page** on every instance: independent community
   project, no warranty for accuracy or completeness, where the data comes
   from, source and license, the operator's donation address if set.
 - **JSON API** under `/api/v1/` (`stats`, `blocks`, `block/height/{h}`,
-  `block/hash/{h}`, `tx/{txid}`, `address/{a}`, `address/{a}/utxos`,
-  `mempool`, `richlist`, `gaps`).
+  `block/hash/{h}`, `tx/{txid}` with the fee split into miner share and
+  burn, `address/{a}`, `address/{a}/utxos`, `mempool`, `richlist`,
+  `gaps`, `halving`, `economics`).
 - **Live balances for every address**: the node's UTXO state is swept
   periodically (`paranoid_getStateMap` + `paranoid_getSlot`), so the rich
   list and address balances are complete and verified against the node's

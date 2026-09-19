@@ -54,7 +54,21 @@ pub fn development_payout(height: u64, log_slots: u32) -> u64 {
 /// first height at which log_slots reached 25, 26, ... (ascending); empty
 /// while the state has never expanded.
 pub fn emitted_up_to(height: u64, expansions: &[u64]) -> u128 {
-    let mut total: u128 = 0;
+    let split = emitted_split_up_to(height, expansions);
+    split.miner + split.development
+}
+
+/// What has been minted for heights 1..=height, by recipient: the miners'
+/// coinbases and the development payouts (both funds together, half
+/// each).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EmissionSplit {
+    pub miner: u128,
+    pub development: u128,
+}
+
+pub fn emitted_split_up_to(height: u64, expansions: &[u64]) -> EmissionSplit {
+    let mut total = EmissionSplit::default();
     let mut start = 1u64;
     let mut log_slots = LOG_SLOTS_GENESIS;
     let mut bounds: Vec<u64> = expansions.iter().copied().filter(|h| *h <= height).collect();
@@ -62,7 +76,9 @@ pub fn emitted_up_to(height: u64, expansions: &[u64]) -> u128 {
     for next in bounds {
         // heights start..next-1 all have this log_slots
         if next > start {
-            total += emitted_range(start, next - 1, log_slots);
+            let range = emitted_range(start, next - 1, log_slots);
+            total.miner += range.miner;
+            total.development += range.development;
         }
         start = next;
         log_slots += 1;
@@ -70,9 +86,9 @@ pub fn emitted_up_to(height: u64, expansions: &[u64]) -> u128 {
     total
 }
 
-fn emitted_range(from: u64, to: u64, log_slots: u32) -> u128 {
+fn emitted_range(from: u64, to: u64, log_slots: u32) -> EmissionSplit {
     if to < from {
-        return 0;
+        return EmissionSplit::default();
     }
     let subsidy = block_reward(log_slots) as u128;
     let share = (block_reward(log_slots) / DEVELOPMENT_SHARE_DENOMINATOR) as u128;
@@ -86,7 +102,17 @@ fn emitted_range(from: u64, to: u64, log_slots: u32) -> u128 {
     } else {
         0
     } as u128;
-    dev_n * (subsidy - 2 * share) + payout_blocks * 2 * share * BLOCKS_PER_DAY as u128 + plain_n * subsidy
+    EmissionSplit {
+        miner: dev_n * (subsidy - 2 * share) + plain_n * subsidy,
+        development: payout_blocks * 2 * share * BLOCKS_PER_DAY as u128,
+    }
+}
+
+/// The next height at which a development payout is minted after
+/// `height`, or `None` once the allocation has ended.
+pub fn next_development_payout_height(height: u64) -> Option<u64> {
+    let next = (height / BLOCKS_PER_DAY + 1) * BLOCKS_PER_DAY;
+    (next <= DEVELOPMENT_ALLOCATION_END_HEIGHT).then_some(next)
 }
 
 #[cfg(test)]
@@ -124,5 +150,26 @@ mod tests {
             }
             assert_eq!(emitted_up_to(h, &[]), expected_plain, "height {h} without expansions");
         }
+    }
+
+    #[test]
+    fn split_matches_block_by_block() {
+        let mut miner: u128 = 0;
+        let mut dev: u128 = 0;
+        for height in 1..=9000u64 {
+            miner += miner_subsidy(height, 24) as u128;
+            dev += development_payout(height, 24) as u128;
+        }
+        assert_eq!(emitted_split_up_to(9000, &[]), EmissionSplit { miner, development: dev });
+        assert_eq!(dev, 2 * 21_600_000_000);
+    }
+
+    #[test]
+    fn next_payout() {
+        assert_eq!(next_development_payout_height(0), Some(4320));
+        assert_eq!(next_development_payout_height(4319), Some(4320));
+        assert_eq!(next_development_payout_height(4320), Some(8640));
+        assert_eq!(next_development_payout_height(DEVELOPMENT_ALLOCATION_END_HEIGHT - 1), Some(DEVELOPMENT_ALLOCATION_END_HEIGHT));
+        assert_eq!(next_development_payout_height(DEVELOPMENT_ALLOCATION_END_HEIGHT), None);
     }
 }

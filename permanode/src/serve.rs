@@ -53,6 +53,9 @@ struct AppState {
     /// the halving page's growth curve; extended incrementally as the tip
     /// advances, so only the first request pays for the full walk.
     state_history: Mutex<StateHistory>,
+    /// The finalized expansion window for the tip it was computed at;
+    /// headers are permanent, so it only changes when the tip moves.
+    window_cache: Mutex<Option<(u64, Vec<WindowHeader>)>>,
 }
 
 #[derive(Default)]
@@ -104,6 +107,7 @@ pub async fn run(cfg: &Config) -> Result<()> {
         db_path: cfg.db_path.clone(),
         expansions: Mutex::new(None),
         state_history: Mutex::new(StateHistory::default()),
+        window_cache: Mutex::new(None),
     });
 
     let api = Router::new()
@@ -117,7 +121,8 @@ pub async fn run(cfg: &Config) -> Result<()> {
         .route("/api/v1/gaps", get(get_gaps))
         .route("/api/v1/richlist", get(get_richlist))
         .route("/api/v1/mempool", get(get_mempool))
-        .route("/api/v1/halving", get(get_halving));
+        .route("/api/v1/halving", get(get_halving))
+        .route("/api/v1/economics", get(get_economics));
 
     let app = match &cfg.site_dir {
         Some(dir) => {
@@ -587,9 +592,12 @@ struct HalvingResponse {
     history_step: u64,
     history: Vec<[u64; 2]>,
     block_reward_micronoid: u64,
+    multiplier: u64,
+    burn_per_new_slot_micronoid: u64,
+    pressure_thresholds: Vec<PressureThreshold>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Clone)]
 struct WindowHeader {
     height: u64,
     active_slot_count: u64,
@@ -611,45 +619,8 @@ async fn get_halving(State(state): State<Arc<AppState>>) -> ApiResult<HalvingRes
         let capacity = 1u64 << chain.log_slots;
         let threshold = capacity / 4 * 3;
 
-        // finalized window deciding the child of `tip`
-        let mut window = Vec::new();
-        if let Some(end) = tip.checked_sub(CONSENSUS_FINALITY_DEPTH) {
-            if let Some(start) = end.checked_sub(EXPANSION_WINDOW - 1) {
-                for h in start..=end {
-                    if let Some(header) = rpc.get_block_header(h)? {
-                        let qualifies = header.active_slot_count.saturating_mul(4) >= capacity.saturating_mul(3);
-                        window.push(WindowHeader { height: h, active_slot_count: header.active_slot_count, qualifies });
-                    }
-                }
-            }
-        }
-
-        // sampled history, extended incrementally
-        let (history_step, history) = {
-            let mut cache = st.state_history.lock().unwrap_or_else(|e| e.into_inner());
-            if cache.step == 0 {
-                cache.step = HISTORY_STEP;
-            }
-            while (tip / cache.step) as usize > HISTORY_MAX_POINTS {
-                cache.step *= 2;
-                let step = cache.step;
-                cache.points.retain(|(h, _)| h % step == 0);
-            }
-            let step = cache.step;
-            let mut next = cache.points.last().map_or(0, |(h, _)| h + step);
-            while next <= tip {
-                match rpc.get_block_header(next)? {
-                    Some(header) => cache.points.push((next, header.active_slot_count)),
-                    None => break,
-                }
-                next += step;
-            }
-            let mut points: Vec<[u64; 2]> = cache.points.iter().map(|(h, a)| [*h, *a]).collect();
-            if points.last().map_or(true, |p| p[0] != tip) {
-                points.push([tip, chain.active_slot_count]);
-            }
-            (step, points)
-        };
+        let window = finalized_window(&st, tip, capacity)?;
+        let (history_step, history) = sampled_state_history(&st, tip, chain.active_slot_count)?;
 
         Ok(HalvingResponse {
             tip,
@@ -664,12 +635,248 @@ async fn get_halving(State(state): State<Arc<AppState>>) -> ApiResult<HalvingRes
             history_step,
             history,
             block_reward_micronoid: permanode_core::emission::block_reward(chain.log_slots),
+            multiplier: permanode_core::fees::pressure_multiplier(chain.active_slot_count, chain.log_slots),
+            burn_per_new_slot_micronoid: permanode_core::fees::state_growth_fee_per_slot(chain.active_slot_count, chain.log_slots),
+            pressure_thresholds: pressure_thresholds(capacity),
         })
     })
     .await
     .map_err(anyhow::Error::from)??;
     Ok(Json(resp))
 }
+
+/// The 18 hard-finalized headers `tip-35 ..= tip-18` that decide whether
+/// the child of `tip` expands, cached per tip.
+fn finalized_window(st: &AppState, tip: u64, capacity: u64) -> anyhow::Result<Vec<WindowHeader>> {
+    if let Some((cached_tip, window)) = st.window_cache.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        if *cached_tip == tip {
+            return Ok(window.clone());
+        }
+    }
+    let mut window = Vec::new();
+    if let Some(end) = tip.checked_sub(CONSENSUS_FINALITY_DEPTH) {
+        if let Some(start) = end.checked_sub(EXPANSION_WINDOW - 1) {
+            for h in start..=end {
+                if let Some(header) = st.rpc.get_block_header(h)? {
+                    let qualifies = header.active_slot_count.saturating_mul(4) >= capacity.saturating_mul(3);
+                    window.push(WindowHeader { height: h, active_slot_count: header.active_slot_count, qualifies });
+                }
+            }
+        }
+    }
+    *st.window_cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((tip, window.clone()));
+    Ok(window)
+}
+
+/// `(step, [height, active_slot_count])` sampled from the permanent
+/// headers every `step` blocks plus the tip itself; extended
+/// incrementally from the cache.
+fn sampled_state_history(st: &AppState, tip: u64, active_at_tip: u64) -> anyhow::Result<(u64, Vec<[u64; 2]>)> {
+    let mut cache = st.state_history.lock().unwrap_or_else(|e| e.into_inner());
+    if cache.step == 0 {
+        cache.step = HISTORY_STEP;
+    }
+    while (tip / cache.step) as usize > HISTORY_MAX_POINTS {
+        cache.step *= 2;
+        let step = cache.step;
+        cache.points.retain(|(h, _)| h % step == 0);
+    }
+    let step = cache.step;
+    let mut next = cache.points.last().map_or(0, |(h, _)| h + step);
+    while next <= tip {
+        match st.rpc.get_block_header(next)? {
+            Some(header) => cache.points.push((next, header.active_slot_count)),
+            None => break,
+        }
+        next += step;
+    }
+    let mut points: Vec<[u64; 2]> = cache.points.iter().map(|(h, a)| [*h, *a]).collect();
+    if points.last().map_or(true, |p| p[0] != tip) {
+        points.push([tip, active_at_tip]);
+    }
+    Ok((step, points))
+}
+
+#[derive(serde::Serialize, Clone)]
+struct PressureThreshold {
+    pct: u64,
+    /// Live UTXOs at which the tier starts (integer occupancy in basis
+    /// points, as the node computes it).
+    slots: u64,
+    multiplier: u64,
+}
+
+fn pressure_thresholds(capacity: u64) -> Vec<PressureThreshold> {
+    use permanode_core::fees::{PRESSURE_EXTREME_BPS, PRESSURE_HIGH_BPS, PRESSURE_LOW_BPS};
+    [(PRESSURE_LOW_BPS, 2), (PRESSURE_HIGH_BPS, 4), (PRESSURE_EXTREME_BPS, 8)]
+        .into_iter()
+        .map(|(bps, multiplier)| PressureThreshold {
+            pct: bps / 100,
+            slots: ((capacity as u128 * bps as u128).div_ceil(10_000)) as u64,
+            multiplier,
+        })
+        .collect()
+}
+
+/// The economics page: supply, burn, state pressure, development
+/// allocation and the recorded state activity.
+#[derive(serde::Serialize)]
+struct EconomicsResponse {
+    tip: u64,
+    log_slots: u32,
+    capacity: u64,
+    active_slots: u64,
+    occupancy_bps: u64,
+    multiplier: u64,
+    burn_per_new_slot_micronoid: u64,
+    block_reward_micronoid: u64,
+    next_block_reward_micronoid: u64,
+    threshold: u64,
+    trigger_pct: u64,
+    pressure_thresholds: Vec<PressureThreshold>,
+    window_size: u64,
+    window_required: u64,
+    window_qualifying: u64,
+    /// Mirrored emission schedule up to the tip, and what consensus has
+    /// burned of it (issued minus the node's supply).
+    total_issued_micronoid: String,
+    total_burned_micronoid: String,
+    net_supply_micronoid: String,
+    blocks_per_year: u64,
+    /// Current reward times the target blocks per year - a projection at
+    /// target block time, not a guaranteed figure.
+    annualized_issuance_micronoid: String,
+    development: DevelopmentAllocation,
+    history_step: u64,
+    /// `[height, issued]` from genesis, plus `burned` where this
+    /// permanode's records allow it: the exact total at the tip, walked
+    /// backwards through the recorded blocks.
+    history: Vec<EconomicsPoint>,
+    /// Recorded state activity over the last 24 hours, 7 days, 30 days.
+    periods: Vec<PeriodActivity>,
+}
+
+#[derive(serde::Serialize)]
+struct DevelopmentAllocation {
+    end_height: u64,
+    payout_interval: u64,
+    active: bool,
+    next_payout_height: Option<u64>,
+    /// Per fund, at the current reward.
+    payout_per_fund_micronoid: u64,
+    cumulative_miner_micronoid: String,
+    /// Each of the two funds has received this much so far.
+    cumulative_per_fund_micronoid: String,
+}
+
+#[derive(serde::Serialize)]
+struct EconomicsPoint {
+    height: u64,
+    issued_micronoid: String,
+    burned_micronoid: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct PeriodActivity {
+    label: &'static str,
+    seconds: i64,
+    #[serde(flatten)]
+    activity: queries::StateActivity,
+}
+
+async fn get_economics(State(state): State<Arc<AppState>>) -> ApiResult<EconomicsResponse> {
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let (burn_by_block, periods) = {
+        let conn = state.db();
+        let mut periods = Vec::new();
+        for (label, seconds) in [("24h", 86_400i64), ("7d", 7 * 86_400), ("30d", 30 * 86_400)] {
+            periods.push(PeriodActivity { label, seconds, activity: queries::state_activity(&conn, now_unix - seconds)? });
+        }
+        (queries::burn_by_block(&conn)?, periods)
+    };
+
+    let st = Arc::clone(&state);
+    let resp = tokio::task::spawn_blocking(move || -> anyhow::Result<EconomicsResponse> {
+        use permanode_core::{emission, fees};
+        let rpc = &st.rpc;
+        let chain = rpc.get_chain_info()?;
+        let info = rpc.get_state_info()?;
+        let tip = chain.height;
+        let capacity = 1u64 << chain.log_slots;
+        let expansions = expansion_heights(&st, chain.log_slots, tip).unwrap_or_default();
+        let split = emission::emitted_split_up_to(tip, &expansions);
+        let issued = split.miner + split.development;
+        let supply: u128 = chain.circulating_supply_micronoid.parse().unwrap_or(0);
+        let burned = issued.saturating_sub(supply);
+        let reward = emission::block_reward(chain.log_slots);
+        let window = finalized_window(&st, tip, capacity)?;
+        let (history_step, samples) = sampled_state_history(&st, tip, chain.active_slot_count)?;
+
+        // burned(h) = burned(tip) - burn of every recorded block above h
+        let first_recorded = burn_by_block.first().map(|(h, _)| *h);
+        let mut history = Vec::with_capacity(samples.len());
+        let mut remaining = burned;
+        let mut idx = burn_by_block.len();
+        for [height, _] in samples.iter().rev() {
+            while idx > 0 && burn_by_block[idx - 1].0 > *height {
+                idx -= 1;
+                remaining = remaining.saturating_sub(burn_by_block[idx].1);
+            }
+            let known = first_recorded.is_some_and(|f| *height >= f) || *height == tip;
+            history.push(EconomicsPoint {
+                height: *height,
+                issued_micronoid: emission::emitted_up_to(*height, &expansions).to_string(),
+                burned_micronoid: known.then(|| remaining.to_string()),
+            });
+        }
+        history.reverse();
+
+        let dev_active = emission::development_allocation_active(tip + 1);
+        Ok(EconomicsResponse {
+            tip,
+            log_slots: chain.log_slots,
+            capacity,
+            active_slots: chain.active_slot_count,
+            occupancy_bps: fees::occupancy_bps(chain.active_slot_count, chain.log_slots),
+            multiplier: fees::pressure_multiplier(chain.active_slot_count, chain.log_slots),
+            burn_per_new_slot_micronoid: fees::state_growth_fee_per_slot(chain.active_slot_count, chain.log_slots),
+            block_reward_micronoid: reward,
+            next_block_reward_micronoid: emission::block_reward(chain.log_slots + 1),
+            threshold: capacity / 4 * 3,
+            trigger_pct: info.expand_trigger_pct,
+            pressure_thresholds: pressure_thresholds(capacity),
+            window_size: EXPANSION_WINDOW,
+            window_required: EXPANSION_WINDOW / 2 + 1,
+            window_qualifying: window.iter().filter(|w| w.qualifies).count() as u64,
+            total_issued_micronoid: issued.to_string(),
+            total_burned_micronoid: burned.to_string(),
+            net_supply_micronoid: supply.to_string(),
+            blocks_per_year: BLOCKS_PER_YEAR,
+            annualized_issuance_micronoid: (reward as u128 * BLOCKS_PER_YEAR as u128).to_string(),
+            development: DevelopmentAllocation {
+                end_height: emission::DEVELOPMENT_ALLOCATION_END_HEIGHT,
+                payout_interval: emission::BLOCKS_PER_DAY,
+                active: dev_active,
+                next_payout_height: emission::next_development_payout_height(tip),
+                payout_per_fund_micronoid: emission::development_payout(emission::BLOCKS_PER_DAY, chain.log_slots) / 2,
+                cumulative_miner_micronoid: split.miner.to_string(),
+                cumulative_per_fund_micronoid: (split.development / 2).to_string(),
+            },
+            history_step,
+            history,
+            periods,
+        })
+    })
+    .await
+    .map_err(anyhow::Error::from)??;
+    Ok(Json(resp))
+}
+
+/// Target blocks per year at the 20 s block target.
+const BLOCKS_PER_YEAR: u64 = 365 * permanode_core::emission::BLOCKS_PER_DAY;
 
 enum ApiErrorOr404 {
     Error(ApiError),

@@ -17,6 +17,23 @@ Notable changes per release. Commit history has the details.
   (hover it for the explanation) instead of a dotted underline on the
   value.
 - `ROADMAP.md`.
+- **Economics page** (`/economics`, nav entry after Halving): twelve
+  cards (net supply, total issued and burned, current reward, annualized
+  issuance and inflation as labelled projections, live UTXOs, occupancy,
+  growth multiplier, next expansion, qualifying headers, next
+  development payout), an issued-vs-burned chart over block height on
+  one NOID axis (log or linear; burned exact at the tip and walked back
+  through the recorded blocks), state pressure and burn tiers, fee
+  composition, state creation vs consolidation over 24 h / 7 d / 30 d
+  from the records, the supply model and the development allocation
+  with cumulative amounts per recipient. Backed by `/api/v1/economics`.
+- Halving page: ten cards (growth multiplier, burn per net-new UTXO,
+  next pressure threshold, a labelled estimate to the threshold added),
+  a "How the halving works" explanation and the pressure tiers and
+  consolidation rule in the consensus list.
+- Transaction pages: a fee-breakdown card (total, miner-claimable,
+  burned with a split bar and the components) replaces the two fee rows;
+  the type row states the shape and net state change.
 - `import-bodies --from-db FILE` fills gaps from another permanode's
   database or backup while this one keeps running; accepted only for
   blocks whose hash the own node reported and whose transactions add up.

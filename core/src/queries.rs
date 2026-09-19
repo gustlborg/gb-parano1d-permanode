@@ -634,9 +634,7 @@ pub fn chain_stats(conn: &Connection) -> Result<ChainStats> {
         for row in rows {
             let (height, reward, fees, log_slots) = row?;
             any = true;
-            let subsidy = crate::emission::miner_subsidy(height as u64, log_slots.unwrap_or(24) as u32) as i128;
-            let claimed = reward as i128 - subsidy;
-            burned += (fees as i128 - claimed).max(0);
+            burned += burned_in_block(height, reward, fees, log_slots);
         }
         any.then(|| burned.to_string())
     };
@@ -749,4 +747,102 @@ pub fn recent_gaps(conn: &Connection, limit: i64) -> Result<Vec<GapEntry>> {
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Fees burned by consensus in one recorded block: what the transactions
+/// paid minus what the coinbase claimed on top of the subsidy.
+fn burned_in_block(height: i64, reward: i64, fees: i64, log_slots: Option<i64>) -> i128 {
+    let subsidy = crate::emission::miner_subsidy(height as u64, log_slots.unwrap_or(24) as u32) as i128;
+    (fees as i128 - (reward as i128 - subsidy)).max(0)
+}
+
+/// Burn per recorded canonical block, ascending by height. Blocks without
+/// a body are absent (their burn is unknown).
+pub fn burn_by_block(conn: &Connection) -> Result<Vec<(u64, u128)>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT height, reward_micronoid, CAST(total_fees_micronoid AS INTEGER), log_slots
+         FROM blocks WHERE body_captured = 1 AND reward_micronoid IS NOT NULL AND {CANONICAL_BLOCK_FILTER}
+         ORDER BY height"
+    ))?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+            row.get::<_, Option<i64>>(3)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (height, reward, fees, log_slots) = row?;
+        out.push((height as u64, burned_in_block(height, reward, fees, log_slots) as u128));
+    }
+    Ok(out)
+}
+
+/// What the recorded blocks since `since_unix` did to the live state.
+#[derive(Debug, Serialize, Default)]
+pub struct StateActivity {
+    /// Recorded canonical blocks with a body in the period.
+    pub blocks: u64,
+    pub from_height: Option<u64>,
+    pub to_height: Option<u64>,
+    /// Whether the records reach back to the start of the period; if
+    /// not, the figures only cover the part since this permanode began
+    /// recording.
+    pub complete: bool,
+    /// Live outputs created (coinbase and development payouts included -
+    /// they occupy slots too).
+    pub utxos_created: u64,
+    /// Live inputs consumed.
+    pub utxos_consumed: u64,
+    /// Slots given back by transactions with more inputs than outputs.
+    pub slots_freed: u64,
+    pub burned_micronoid: String,
+}
+
+pub fn state_activity(conn: &Connection, since_unix: i64) -> Result<StateActivity> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT height, reward_micronoid, CAST(total_fees_micronoid AS INTEGER), log_slots,
+                (SELECT COUNT(*) FROM tx_outputs o JOIN transactions t ON t.id = o.tx_id WHERE t.block_id = blocks.id),
+                (SELECT COUNT(*) FROM tx_inputs i JOIN transactions t ON t.id = i.tx_id WHERE t.block_id = blocks.id),
+                (SELECT COALESCE(SUM(MAX(0,
+                     (SELECT COUNT(*) FROM tx_inputs i WHERE i.tx_id = t.id)
+                   - (SELECT COUNT(*) FROM tx_outputs o WHERE o.tx_id = t.id))), 0)
+                 FROM transactions t WHERE t.block_id = blocks.id)
+         FROM blocks
+         WHERE timestamp >= ?1 AND body_captured = 1 AND reward_micronoid IS NOT NULL AND {CANONICAL_BLOCK_FILTER}
+         ORDER BY height"
+    ))?;
+    let rows = stmt.query_map(params![since_unix], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+            row.get::<_, Option<i64>>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, i64>(6)?,
+        ))
+    })?;
+    let mut a = StateActivity::default();
+    let mut burned: i128 = 0;
+    for row in rows {
+        let (height, reward, fees, log_slots, created, consumed, freed) = row?;
+        a.blocks += 1;
+        a.from_height.get_or_insert(height as u64);
+        a.to_height = Some(height as u64);
+        a.utxos_created += created as u64;
+        a.utxos_consumed += consumed as u64;
+        a.slots_freed += freed as u64;
+        burned += burned_in_block(height, reward, fees, log_slots);
+    }
+    a.burned_micronoid = burned.to_string();
+    let oldest: Option<i64> = conn.query_row(
+        &format!("SELECT MIN(timestamp) FROM blocks WHERE body_captured = 1 AND {CANONICAL_BLOCK_FILTER}"),
+        [],
+        |r| r.get(0),
+    )?;
+    a.complete = oldest.is_some_and(|t| t <= since_unix);
+    Ok(a)
 }
