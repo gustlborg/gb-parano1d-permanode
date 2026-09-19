@@ -61,7 +61,16 @@ struct AppState {
 #[derive(Default)]
 struct StateHistory {
     step: u64,
-    points: Vec<(u64, u64)>,
+    points: Vec<HeaderSample>,
+}
+
+/// The two permanent header fields the charts are built from.
+#[derive(Clone, Copy)]
+struct HeaderSample {
+    height: u64,
+    active_slot_count: u64,
+    /// Mints so far (every live output ever created, coinbases included).
+    alloc_counter: u64,
 }
 
 impl AppState {
@@ -620,7 +629,11 @@ async fn get_halving(State(state): State<Arc<AppState>>) -> ApiResult<HalvingRes
         let threshold = capacity / 4 * 3;
 
         let window = finalized_window(&st, tip, capacity)?;
-        let (history_step, history) = sampled_state_history(&st, tip, chain.active_slot_count)?;
+        let (history_step, samples) = sampled_state_history(&st, tip)?;
+        let mut history: Vec<[u64; 2]> = samples.iter().map(|p| [p.height, p.active_slot_count]).collect();
+        if history.last().map_or(true, |p| p[0] != tip) {
+            history.push([tip, chain.active_slot_count]);
+        }
 
         Ok(HalvingResponse {
             tip,
@@ -668,10 +681,10 @@ fn finalized_window(st: &AppState, tip: u64, capacity: u64) -> anyhow::Result<Ve
     Ok(window)
 }
 
-/// `(step, [height, active_slot_count])` sampled from the permanent
-/// headers every `step` blocks plus the tip itself; extended
-/// incrementally from the cache.
-fn sampled_state_history(st: &AppState, tip: u64, active_at_tip: u64) -> anyhow::Result<(u64, Vec<[u64; 2]>)> {
+/// Header samples every `step` blocks from genesis up to `tip` (the tip
+/// itself only when it falls on the step), extended incrementally from
+/// the cache so only the first request pays for the full walk.
+fn sampled_state_history(st: &AppState, tip: u64) -> anyhow::Result<(u64, Vec<HeaderSample>)> {
     let mut cache = st.state_history.lock().unwrap_or_else(|e| e.into_inner());
     if cache.step == 0 {
         cache.step = HISTORY_STEP;
@@ -679,22 +692,30 @@ fn sampled_state_history(st: &AppState, tip: u64, active_at_tip: u64) -> anyhow:
     while (tip / cache.step) as usize > HISTORY_MAX_POINTS {
         cache.step *= 2;
         let step = cache.step;
-        cache.points.retain(|(h, _)| h % step == 0);
+        cache.points.retain(|p| p.height % step == 0);
     }
     let step = cache.step;
-    let mut next = cache.points.last().map_or(0, |(h, _)| h + step);
+    let mut next = cache.points.last().map_or(0, |p| p.height + step);
     while next <= tip {
         match st.rpc.get_block_header(next)? {
-            Some(header) => cache.points.push((next, header.active_slot_count)),
+            Some(header) => cache.points.push(HeaderSample {
+                height: next,
+                active_slot_count: header.active_slot_count,
+                alloc_counter: header.alloc_counter,
+            }),
             None => break,
         }
         next += step;
     }
-    let mut points: Vec<[u64; 2]> = cache.points.iter().map(|(h, a)| [*h, *a]).collect();
-    if points.last().map_or(true, |p| p[0] != tip) {
-        points.push([tip, active_at_tip]);
-    }
-    Ok((step, points))
+    Ok((step, cache.points.clone()))
+}
+
+/// Live outputs created by transactions (not by coinbases or development
+/// payouts) up to `height`, from the header's mint counter: every block
+/// mints one coinbase output, every payout block two more.
+fn user_mints(sample: &HeaderSample) -> u64 {
+    let minted_by_consensus = sample.height + 2 * (sample.height / permanode_core::emission::BLOCKS_PER_DAY);
+    sample.alloc_counter.saturating_sub(minted_by_consensus)
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -748,9 +769,10 @@ struct EconomicsResponse {
     annualized_issuance_micronoid: String,
     development: DevelopmentAllocation,
     history_step: u64,
-    /// `[height, issued]` from genesis, plus `burned` where this
-    /// permanode's records allow it: the exact total at the tip, walked
-    /// backwards through the recorded blocks.
+    /// Issued from genesis at every sample; burned exact where the
+    /// records allow it (the total at the tip walked backwards through
+    /// the recorded blocks) and estimated from the headers' mint counter
+    /// before that, see `EconomicsPoint`.
     history: Vec<EconomicsPoint>,
     /// Recorded state activity over the last 24 hours, 7 days, 30 days.
     periods: Vec<PeriodActivity>,
@@ -773,7 +795,11 @@ struct DevelopmentAllocation {
 struct EconomicsPoint {
     height: u64,
     issued_micronoid: String,
+    /// Exact, where this permanode's records reach (and at the tip).
     burned_micronoid: Option<String>,
+    /// Before the records begin: scaled from the headers' mint counter so
+    /// the curve runs from zero at genesis to the first measured value.
+    burned_estimate_micronoid: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -813,26 +839,47 @@ async fn get_economics(State(state): State<Arc<AppState>>) -> ApiResult<Economic
         let burned = issued.saturating_sub(supply);
         let reward = emission::block_reward(chain.log_slots);
         let window = finalized_window(&st, tip, capacity)?;
-        let (history_step, samples) = sampled_state_history(&st, tip, chain.active_slot_count)?;
+        let (history_step, mut samples) = sampled_state_history(&st, tip)?;
+        if samples.last().map_or(true, |p| p.height != tip) {
+            // the tip only needs its exact burn; its mint counter is unused
+            samples.push(HeaderSample { height: tip, active_slot_count: chain.active_slot_count, alloc_counter: 0 });
+        }
 
-        // burned(h) = burned(tip) - burn of every recorded block above h
+        // Measured: burned(h) = burned(tip) - burn of every recorded block
+        // above h, exact wherever the records reach.
         let first_recorded = burn_by_block.first().map(|(h, _)| *h);
         let mut history = Vec::with_capacity(samples.len());
         let mut remaining = burned;
         let mut idx = burn_by_block.len();
-        for [height, _] in samples.iter().rev() {
-            while idx > 0 && burn_by_block[idx - 1].0 > *height {
+        for sample in samples.iter().rev() {
+            let height = sample.height;
+            while idx > 0 && burn_by_block[idx - 1].0 > height {
                 idx -= 1;
                 remaining = remaining.saturating_sub(burn_by_block[idx].1);
             }
-            let known = first_recorded.is_some_and(|f| *height >= f) || *height == tip;
+            let known = first_recorded.is_some_and(|f| height >= f) || height == tip;
             history.push(EconomicsPoint {
-                height: *height,
-                issued_micronoid: emission::emitted_up_to(*height, &expansions).to_string(),
+                height,
+                issued_micronoid: emission::emitted_up_to(height, &expansions).to_string(),
                 burned_micronoid: known.then(|| remaining.to_string()),
+                burned_estimate_micronoid: None,
             });
         }
         history.reverse();
+        // Estimated before the records begin: the burn is charged per
+        // net-new slot, so it grows with the outputs transactions create -
+        // a count the headers carry exactly. Scale that curve so it meets
+        // the first measured value; genesis minted nothing, so it starts
+        // at zero.
+        if let Some(anchor) = history.iter().position(|p| p.burned_micronoid.is_some()) {
+            let anchor_burn: u128 = history[anchor].burned_micronoid.as_deref().and_then(|b| b.parse().ok()).unwrap_or(0);
+            let anchor_mints = user_mints(&samples[anchor]);
+            for i in 0..anchor {
+                let est = if anchor_mints > 0 { anchor_burn * user_mints(&samples[i]) as u128 / anchor_mints as u128 } else { 0 };
+                history[i].burned_estimate_micronoid = Some(est.to_string());
+            }
+            history[anchor].burned_estimate_micronoid = Some(anchor_burn.to_string());
+        }
 
         let dev_active = emission::development_allocation_active(tip + 1);
         Ok(EconomicsResponse {
