@@ -8,8 +8,8 @@ Ideas and requests, roughly in order. Nothing here is a promise.
 - **Network node count.** A P2P network has no registry, so the number
   of nodes is unknown. A crawler that periodically contacts every peer
   the node has ever seen (`peers.json`) and counts the ones that answer
-  would give an estimate, the way Bitcoin's public node counters work.
-  Until then the dashboard shows this node's connected peers.
+  would give an estimate (a lower bound: nodes behind NAT without a port
+  forward do not answer), the way Bitcoin's public node counters work.
 - **Permanode count.** Only possible if permanodes opt in to announce
   themselves somewhere; would need a small registry and an explicit
   `announce = true` config switch. Undecided.
