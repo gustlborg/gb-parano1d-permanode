@@ -17,11 +17,10 @@ Notable changes per release. Commit history has the details.
   (hover it for the explanation) instead of a dotted underline on the
   value.
 - `ROADMAP.md`.
-- **Economics page** (`/economics`, nav entry after Halving): twelve
+- **Economics page** (`/economics`, nav entry after Halving): ten
   cards (net supply, total issued and burned, current reward, annualized
   issuance and inflation as labelled projections, live UTXOs, occupancy,
-  growth multiplier, next expansion, qualifying headers, next
-  development payout), an issued-vs-burned chart over block height on
+  growth multiplier, next development payout), an issued-vs-burned chart over block height on
   one NOID axis (log or linear; burned exact at the tip and walked back
   through the recorded blocks), state pressure and burn tiers, fee
   composition, state creation vs consolidation over 24 h / 7 d / 30 d
