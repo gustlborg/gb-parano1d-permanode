@@ -183,13 +183,24 @@ minted so far`
     stats?.db_bytes != null && recordedFor > 3600 ? `\n≈ ${bytesText((stats.db_bytes / recordedFor) * 86400)} per day at the current rate.` : "";
   return [
     statCard(supply(n.circulating_supply_micronoid), "Circulating supply", { hint: "in NOID" }),
-    statCard(noid(n.block_reward_micronoid), "Block reward"),
+    statCard(noid(n.block_reward_micronoid), "Block reward", {
+      hint: `Minted with every block while the live UTXO
+set fits in ${n.state_capacity != null ? int(n.state_capacity) : "the current"} slots. It halves
+with the next state expansion, not at
+a fixed block height.`,
+    }),
     statCard(hashrate(n.estimated_hashrate_hs), "Network hashrate", {
       hint: "Rough estimate derived from the\ncurrent PoW target, not a\nmeasured network figure.",
     }),
     statCard(seconds(n.avg_block_time_1h_seconds), "Avg block time (1h)", { hint: blockTimes }),
-    statCard(mempool ? int(mempool.size) : "-", "Mempool pending", { id: "stat-mempool" }),
-    statCard(mempool ? noid(mempool.fee_floor) : "-", "Fee floor", { id: "stat-floor" }),
+    statCard(mempool ? int(mempool.size) : "-", "Mempool pending", {
+      id: "stat-mempool",
+      hint: "Transactions the node has accepted\nbut that are not in a block yet.",
+    }),
+    statCard(mempool ? noid(mempool.fee_floor) : "-", "Fee floor", {
+      id: "stat-floor",
+      hint: "Lowest fee the node's mempool\naccepts right now.",
+    }),
     statCard(n.slots_until_halving != null ? int(n.slots_until_halving) : "-", "UTXOs until halving", {
       hint:
         n.slots_until_halving != null
