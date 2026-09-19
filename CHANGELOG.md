@@ -25,8 +25,11 @@ Notable changes per release. Commit history has the details.
   one NOID axis (log or linear; burned exact at the tip and walked back
   through the recorded blocks), state pressure and burn tiers, fee
   composition, state creation vs consolidation over 24 h / 7 d / 30 d
-  from the records, the supply model and the development allocation
-  with cumulative amounts per recipient. Backed by `/api/v1/economics`.
+  from the records, the minimum burn until the next halving (the
+  missing slots split into the pressure bands they fall into - a lower
+  bound, consolidation raises it), the supply model and the development
+  allocation with cumulative amounts per recipient. Backed by
+  `/api/v1/economics`.
 - Halving page: ten cards (growth multiplier, burn per net-new UTXO,
   next pressure threshold, a labelled estimate to the threshold added),
   a "How the halving works" explanation and the pressure tiers and

@@ -776,6 +776,47 @@ struct EconomicsResponse {
     history: Vec<EconomicsPoint>,
     /// Recorded state activity over the last 24 hours, 7 days, 30 days.
     periods: Vec<PeriodActivity>,
+    /// The least that reaching the expansion threshold can burn: every
+    /// missing slot created exactly once, charged at the multiplier of
+    /// the occupancy band it falls into (the multiplier rises on the way).
+    min_burn_to_expansion_micronoid: String,
+    min_burn_bands: Vec<BurnBand>,
+}
+
+#[derive(serde::Serialize)]
+struct BurnBand {
+    from_pct: u64,
+    to_pct: u64,
+    multiplier: u64,
+    /// Slots still to be filled inside this band from the current
+    /// occupancy; zero once the band has been passed.
+    slots_to_fill: u64,
+    per_slot_micronoid: u64,
+    burn_micronoid: String,
+}
+
+/// Splits the slots between the current occupancy and the expansion
+/// threshold into the pressure bands they fall into.
+fn min_burn_bands(active: u64, log_slots: u32, thresholds: &[PressureThreshold], expansion_threshold: u64) -> Vec<BurnBand> {
+    let mut bounds: Vec<(u64, u64)> = vec![(0, 0)];
+    bounds.extend(thresholds.iter().filter(|t| t.slots < expansion_threshold).map(|t| (t.pct, t.slots)));
+    let mut bands = Vec::new();
+    for (i, &(from_pct, from_slots)) in bounds.iter().enumerate() {
+        let (to_pct, to_slots) = bounds.get(i + 1).copied().unwrap_or((permanode_core::fees::PRESSURE_HIGH_BPS / 100, expansion_threshold));
+        let lo = active.max(from_slots);
+        let slots_to_fill = to_slots.saturating_sub(lo);
+        // the multiplier in force while filling this band: that of its lower edge
+        let per_slot = permanode_core::fees::state_growth_fee_per_slot(from_slots, log_slots);
+        bands.push(BurnBand {
+            from_pct,
+            to_pct,
+            multiplier: permanode_core::fees::pressure_multiplier(from_slots, log_slots),
+            slots_to_fill,
+            per_slot_micronoid: per_slot,
+            burn_micronoid: (slots_to_fill as u128 * per_slot as u128).to_string(),
+        });
+    }
+    bands
 }
 
 #[derive(serde::Serialize)]
@@ -882,6 +923,10 @@ async fn get_economics(State(state): State<Arc<AppState>>) -> ApiResult<Economic
         }
 
         let dev_active = emission::development_allocation_active(tip + 1);
+        let thresholds = pressure_thresholds(capacity);
+        let expansion_threshold = capacity / 4 * 3;
+        let min_burn_bands = min_burn_bands(chain.active_slot_count, chain.log_slots, &thresholds, expansion_threshold);
+        let min_burn_total: u128 = min_burn_bands.iter().map(|b| b.burn_micronoid.parse::<u128>().unwrap_or(0)).sum();
         Ok(EconomicsResponse {
             tip,
             log_slots: chain.log_slots,
@@ -892,12 +937,14 @@ async fn get_economics(State(state): State<Arc<AppState>>) -> ApiResult<Economic
             burn_per_new_slot_micronoid: fees::state_growth_fee_per_slot(chain.active_slot_count, chain.log_slots),
             block_reward_micronoid: reward,
             next_block_reward_micronoid: emission::block_reward(chain.log_slots + 1),
-            threshold: capacity / 4 * 3,
+            threshold: expansion_threshold,
             trigger_pct: info.expand_trigger_pct,
-            pressure_thresholds: pressure_thresholds(capacity),
+            pressure_thresholds: thresholds,
             window_size: EXPANSION_WINDOW,
             window_required: EXPANSION_WINDOW / 2 + 1,
             window_qualifying: window.iter().filter(|w| w.qualifies).count() as u64,
+            min_burn_to_expansion_micronoid: min_burn_total.to_string(),
+            min_burn_bands,
             total_issued_micronoid: issued.to_string(),
             total_burned_micronoid: burned.to_string(),
             net_supply_micronoid: supply.to_string(),
