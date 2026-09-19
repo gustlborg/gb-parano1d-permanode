@@ -49,6 +49,16 @@ struct AppState {
     /// log_slots, so the emission total needs no RPC calls in the common
     /// case where the state has never expanded.
     expansions: Mutex<Option<(u32, Vec<u64>)>>,
+    /// Sampled `(height, active_slot_count)` from the permanent headers for
+    /// the halving page's growth curve; extended incrementally as the tip
+    /// advances, so only the first request pays for the full walk.
+    state_history: Mutex<StateHistory>,
+}
+
+#[derive(Default)]
+struct StateHistory {
+    step: u64,
+    points: Vec<(u64, u64)>,
 }
 
 impl AppState {
@@ -93,6 +103,7 @@ pub async fn run(cfg: &Config) -> Result<()> {
         donation_address: cfg.donation_address.as_deref().map(str::trim).filter(|a| !a.is_empty()).map(String::from),
         db_path: cfg.db_path.clone(),
         expansions: Mutex::new(None),
+        state_history: Mutex::new(StateHistory::default()),
     });
 
     let api = Router::new()
@@ -105,7 +116,8 @@ pub async fn run(cfg: &Config) -> Result<()> {
         .route("/api/v1/address/{address}/utxos", get(get_address_utxos))
         .route("/api/v1/gaps", get(get_gaps))
         .route("/api/v1/richlist", get(get_richlist))
-        .route("/api/v1/mempool", get(get_mempool));
+        .route("/api/v1/mempool", get(get_mempool))
+        .route("/api/v1/halving", get(get_halving));
 
     let app = match &cfg.site_dir {
         Some(dir) => {
@@ -525,6 +537,111 @@ async fn get_mempool(State(state): State<Arc<AppState>>) -> ApiResult<live_rpc::
         .await
         .map_err(anyhow::Error::from)??;
     Ok(Json(info))
+}
+
+/// Everything the halving page needs: where the live state stands
+/// against the expansion threshold, the finalized window that decides
+/// it, and a sampled history of the live-UTXO count from the permanent
+/// headers. Mirrors `noid_chain::consensus::slot_expansion` (v1.1.0):
+/// the child of `tip` expands when a strict majority of the 18
+/// hard-finalized headers `tip-35 ..= tip-18` report at least 75%
+/// occupancy.
+#[derive(serde::Serialize)]
+struct HalvingResponse {
+    tip: u64,
+    log_slots: u32,
+    capacity: u64,
+    active_slots: u64,
+    threshold: u64,
+    trigger_pct: u64,
+    window_size: u64,
+    window_required: u64,
+    window: Vec<WindowHeader>,
+    history_step: u64,
+    history: Vec<[u64; 2]>,
+    block_reward_micronoid: u64,
+}
+
+#[derive(serde::Serialize)]
+struct WindowHeader {
+    height: u64,
+    active_slot_count: u64,
+    qualifies: bool,
+}
+
+const EXPANSION_WINDOW: u64 = 18;
+const CONSENSUS_FINALITY_DEPTH: u64 = 18;
+const HISTORY_STEP: u64 = 512;
+const HISTORY_MAX_POINTS: usize = 2400;
+
+async fn get_halving(State(state): State<Arc<AppState>>) -> ApiResult<HalvingResponse> {
+    let st = Arc::clone(&state);
+    let resp = tokio::task::spawn_blocking(move || -> anyhow::Result<HalvingResponse> {
+        let rpc = &st.rpc;
+        let chain = rpc.get_chain_info()?;
+        let info = rpc.get_state_info()?;
+        let tip = chain.height;
+        let capacity = 1u64 << chain.log_slots;
+        let threshold = capacity / 4 * 3;
+
+        // finalized window deciding the child of `tip`
+        let mut window = Vec::new();
+        if let Some(end) = tip.checked_sub(CONSENSUS_FINALITY_DEPTH) {
+            if let Some(start) = end.checked_sub(EXPANSION_WINDOW - 1) {
+                for h in start..=end {
+                    if let Some(header) = rpc.get_block_header(h)? {
+                        let qualifies = header.active_slot_count.saturating_mul(4) >= capacity.saturating_mul(3);
+                        window.push(WindowHeader { height: h, active_slot_count: header.active_slot_count, qualifies });
+                    }
+                }
+            }
+        }
+
+        // sampled history, extended incrementally
+        let (history_step, history) = {
+            let mut cache = st.state_history.lock().unwrap_or_else(|e| e.into_inner());
+            if cache.step == 0 {
+                cache.step = HISTORY_STEP;
+            }
+            while (tip / cache.step) as usize > HISTORY_MAX_POINTS {
+                cache.step *= 2;
+                let step = cache.step;
+                cache.points.retain(|(h, _)| h % step == 0);
+            }
+            let step = cache.step;
+            let mut next = cache.points.last().map_or(0, |(h, _)| h + step);
+            while next <= tip {
+                match rpc.get_block_header(next)? {
+                    Some(header) => cache.points.push((next, header.active_slot_count)),
+                    None => break,
+                }
+                next += step;
+            }
+            let mut points: Vec<[u64; 2]> = cache.points.iter().map(|(h, a)| [*h, *a]).collect();
+            if points.last().map_or(true, |p| p[0] != tip) {
+                points.push([tip, chain.active_slot_count]);
+            }
+            (step, points)
+        };
+
+        Ok(HalvingResponse {
+            tip,
+            log_slots: chain.log_slots,
+            capacity,
+            active_slots: chain.active_slot_count,
+            threshold,
+            trigger_pct: info.expand_trigger_pct,
+            window_size: EXPANSION_WINDOW,
+            window_required: EXPANSION_WINDOW / 2 + 1,
+            window,
+            history_step,
+            history,
+            block_reward_micronoid: permanode_core::emission::block_reward(chain.log_slots),
+        })
+    })
+    .await
+    .map_err(anyhow::Error::from)??;
+    Ok(Json(resp))
 }
 
 enum ApiErrorOr404 {
