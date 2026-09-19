@@ -2,6 +2,13 @@
 
 Notable changes per release. Commit history has the details.
 
+## Unreleased
+
+- Dashboard cards "UTXOs until halving" (live UTXOs until the state
+  expands and the reward halves, from `getStateInfo`) and "Peers (this
+  node)"; the cards sit in a fixed four-column grid.
+- `ROADMAP.md`.
+
 ## 0.1.16 - 2026-09-18
 
 Everything since the first release, consolidated:

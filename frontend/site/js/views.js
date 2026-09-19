@@ -164,6 +164,19 @@ won't have a 24h figure yet.`;
     statCard(seconds(n.avg_block_time_1h_seconds), "Avg block time (1h)", { hint: blockTimes }),
     statCard(mempool ? int(mempool.size) : "-", "Mempool pending", { id: "stat-mempool" }),
     statCard(mempool ? noid(mempool.fee_floor) : "-", "Fee floor", { id: "stat-floor" }),
+    statCard(n.slots_until_halving != null ? int(n.slots_until_halving) : "-", "UTXOs until halving", {
+      hint:
+        n.slots_until_halving != null
+          ? `The block reward halves (${noid(n.block_reward_micronoid)} → ${noid(Math.floor(n.block_reward_micronoid / 2))})
+when the live UTXO set expands, which
+happens at ${n.halving_trigger_pct}% of its capacity of
+${int(n.state_capacity)} slots. Live UTXOs now:
+${int(n.active_slots)} (${((n.active_slots / n.state_capacity) * 100).toFixed(2)}%).`
+          : "Not available from the node.",
+    }),
+    statCard(n.peer_count != null ? int(n.peer_count) : "-", "Peers (this node)", {
+      hint: "Peers the operator's node is connected\nto right now. A P2P network has no\nregistry, so the total number of nodes\nis not known to anyone.",
+    }),
   ].join("");
 }
 
