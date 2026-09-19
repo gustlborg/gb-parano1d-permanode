@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use parano1d_permanode::config::Config;
 use parano1d_permanode::rpc::RpcClient;
-use parano1d_permanode::{indexer, serve};
+use parano1d_permanode::{import, indexer, serve};
 use permanode_core::db;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -29,6 +29,14 @@ enum Command {
     Index,
     /// Only serve the explorer + API over an existing database.
     Serve,
+    /// Fill gaps (blocks recorded without a body) from another
+    /// permanode's database or a backup of it. Safe to run while this
+    /// permanode is running.
+    ImportBodies {
+        /// Path to the other permanode's SQLite database.
+        #[arg(long, value_name = "FILE")]
+        from_db: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -52,7 +60,25 @@ fn main() -> Result<()> {
         Command::Index => run_indexer(&cfg),
         Command::Serve => run_server(&cfg),
         Command::Run => run_both(cfg),
+        Command::ImportBodies { from_db } => run_import(&cfg, &from_db),
     }
+}
+
+fn run_import(cfg: &Config, from_db: &std::path::Path) -> Result<()> {
+    let conn = db::open(&cfg.db_path)?;
+    let r = import::import_bodies(&conn, from_db)?;
+    log::info!(
+        "import finished: {} gap(s), {} imported, {} not in source, {} rejected, {} spent-in-gap flag(s) cleared",
+        r.gaps,
+        r.imported,
+        r.not_in_source,
+        r.rejected,
+        r.flags_cleared
+    );
+    if r.rejected > 0 {
+        bail!("{} block(s) rejected, see warnings above", r.rejected);
+    }
+    Ok(())
 }
 
 fn run_indexer(cfg: &Config) -> Result<()> {

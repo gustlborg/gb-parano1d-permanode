@@ -414,6 +414,19 @@ pub fn unspent_recorded_outputs(conn: &Connection, max_height: u64) -> Result<Ve
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// Undoes `mark_spent_in_gap` for outputs whose spending transaction has
+/// since been recorded (a gap backfilled or imported after the sweep had
+/// judged it), so they count as ordinary spent outputs again. Returns how
+/// many were cleared.
+pub fn clear_spent_in_gap_with_recorded_spend(conn: &Connection) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE tx_outputs SET spent_in_gap = 0, spent_in_gap_at = NULL
+         WHERE spent_in_gap = 1
+           AND EXISTS (SELECT 1 FROM tx_inputs i WHERE i.creation_id = tx_outputs.creation_id)",
+        [],
+    )?)
+}
+
 pub fn mark_spent_in_gap(conn: &Connection, rowids: &[i64], now: &str) -> Result<()> {
     let mut stmt = conn.prepare("UPDATE tx_outputs SET spent_in_gap = 1, spent_in_gap_at = ?2 WHERE rowid = ?1")?;
     for id in rowids {

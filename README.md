@@ -214,6 +214,22 @@ during an update - it is the whole point.
   node's serving window, or on a node that just synced from a snapshot).
   They are listed under `/api/v1/gaps` and counted in the status bar;
   heights still inside the serving window are retried automatically.
+  Older ones can be filled from another permanode, see below.
+
+## Filling gaps from another permanode
+
+Any permanode that stayed online has the bodies yours missed. Copy its
+database (or one of its backups - same format), then:
+
+```
+parano1d-permanode -c permanode.toml import-bodies --from-db other-permanode.sqlite3
+```
+
+This can run while your permanode is running. Only gaps are touched, and
+a body is accepted only for a block whose hash your own node reported and
+whose transactions add up (inputs, outputs, fees, coinbase). Imported
+blocks show `body_source = import` in the database and are logged as
+"recovered via import".
 
 ## Building
 
@@ -279,7 +295,8 @@ re-downloaded from the network.
   wrong. The indexer keeps retrying every poll.
 - Gaps right after installing: the node was still syncing, or synced from
   a snapshot and only holds bodies from that point. Bodies inside the
-  node's window are retried automatically; older ones are gone.
+  node's window are retried automatically; older ones can be imported
+  from another permanode's database (`import-bodies`, see above).
 - `Address already in use`: something else listens on `listen`; change
   the port or stop the other program.
 - Building from source fails in bindgen: see Building below.

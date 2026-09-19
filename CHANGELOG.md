@@ -17,6 +17,11 @@ Notable changes per release. Commit history has the details.
   (hover it for the explanation) instead of a dotted underline on the
   value.
 - `ROADMAP.md`.
+- `import-bodies --from-db FILE` fills gaps from another permanode's
+  database or backup while this one keeps running; accepted only for
+  blocks whose hash the own node reported and whose transactions add up.
+  Outputs the sweep had marked as "spent in a gap" become ordinary spent
+  outputs once their spend is on record, from an import or a backfill.
 - Transaction pages split the fee into what the miner claimed and what
   consensus burned (base + per-input + per-output + tip vs. the
   state-growth fee on net-new UTXO slots at the parent block's state

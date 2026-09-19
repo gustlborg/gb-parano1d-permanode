@@ -446,7 +446,7 @@ fn insert_block_header_row(
     Ok(block_id)
 }
 
-fn insert_transactions(conn: &Connection, block_id: i64, retained: &RetainedBlockInfo) -> Result<()> {
+pub(crate) fn insert_transactions(conn: &Connection, block_id: i64, retained: &RetainedBlockInfo) -> Result<()> {
     conn.execute(
         "UPDATE blocks SET proof_class = ?2, reward_micronoid = ?3, total_fees_micronoid = ?4 WHERE id = ?1",
         params![
@@ -631,6 +631,10 @@ fn scan_live_state(conn: &Connection, rpc: &RpcClient) -> Result<usize> {
             "live state sweep: {} recorded output(s) are gone from the node's state without a recorded spend - marked as spent in a gap",
             gone.len()
         );
+    }
+    let cleared = db::clear_spent_in_gap_with_recorded_spend(&tx)?;
+    if cleared > 0 {
+        info!("live state sweep: {cleared} output(s) marked as spent in a gap now have their spend on record");
     }
     tx.commit()?;
 
