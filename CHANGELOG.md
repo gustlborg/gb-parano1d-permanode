@@ -5,10 +5,9 @@ Notable changes per release. Commit history has the details.
 ## Unreleased
 
 - Dashboard grows to twelve cards in two rows of six: UTXOs until
-  halving (from `getStateInfo`), burned fees in the last 24 hours (from
-  recorded blocks: fees minus what the coinbase claimed) with the burn
-  since genesis in the tooltip (mirrored emission schedule minus the
-  circulating supply), transactions in the last 24 hours, addresses with
+  halving (from `getStateInfo`), fees burned since genesis (mirrored
+  emission schedule minus the circulating supply) with the last 24 hours
+  from recorded blocks in the tooltip, transactions in the last 24 hours, addresses with
   a balance, database size on disk with the growth rate, and how long
   this instance has been recording.
 - Blocks store `log_slots` so subsidies stay right across future

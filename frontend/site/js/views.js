@@ -170,12 +170,10 @@ function dashboardStatsHtml(stats, mempool) {
 From this permanode's own recorded
 blocks, not the node - a fresh install
 won't have a 24h figure yet.`;
-  const burnedTotal =
+  const burnedShare =
     n.burned_total_micronoid != null && n.emitted_total_micronoid != null
-      ? `Since genesis: ${noid(n.burned_total_micronoid)} of
-${noid(n.emitted_total_micronoid)} minted
-(${((Number(n.burned_total_micronoid) / Number(n.emitted_total_micronoid)) * 100).toFixed(4)}%), from the emission
-schedule minus the circulating supply.`
+      ? `${((Number(n.burned_total_micronoid) / Number(n.emitted_total_micronoid)) * 100).toFixed(4)}% of the ${noid(n.emitted_total_micronoid)}
+minted so far`
       : "";
   const perDay =
     stats?.db_bytes != null && recordedFor > 3600 ? `\n≈ ${bytesText((stats.db_bytes / recordedFor) * 86400)} per day at the current rate.` : "";
@@ -198,12 +196,13 @@ ${int(n.state_capacity)} slots. Live UTXOs now:
 ${int(n.active_slots)} (${((n.active_slots / n.state_capacity) * 100).toFixed(2)}%).`
           : "Not available from the node.",
     }),
-    statCard(stats?.burned_fees_24h_micronoid != null ? noid(stats.burned_fees_24h_micronoid) : "-", "Burned fees (24h)", {
-      hint: `Fees destroyed by consensus in the last
-24 hours (0.0025 NOID per net-new UTXO
-slot at today's occupancy; miners only
-claim the rest), from recorded blocks.
-${burnedTotal}`,
+    statCard(n.burned_total_micronoid != null ? noid(n.burned_total_micronoid) : "-", "Burned since genesis", {
+      hint: `Fees destroyed by consensus: 0.0025 NOID
+per net-new UTXO slot at today's occupancy,
+miners only claim the rest. Computed as the
+emission schedule minus the circulating
+supply${burnedShare ? `, ${burnedShare}` : ""}.
+Last 24 hours: ${stats?.burned_fees_24h_micronoid != null ? noid(stats.burned_fees_24h_micronoid) : "-"} (from recorded blocks).`,
     }),
     statCard(stats ? int(stats.transactions_24h) : "-", "Transactions (24h)", {
       hint: "Transactions in the blocks of the last\n24 hours, from this permanode's records.",
