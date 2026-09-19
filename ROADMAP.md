@@ -13,10 +13,13 @@ Ideas and requests, roughly in order. Nothing here is a promise.
 - **Permanode count.** Only possible if permanodes opt in to announce
   themselves somewhere; would need a small registry and an explicit
   `announce = true` config switch. Undecided.
-- **Chain statistics over time.** Charts for hashrate, block time, fees,
-  transaction volume and UTXO growth from the recorded history.
-- **Search improvements.** Prefix search and suggestions for addresses
-  and txids.
+- **Time series in the API.** Hashrate, block time, fees, burn,
+  transaction volume and UTXO creation vs consumption per day from the
+  recorded history, for charts in frontends.
+- **Peer backfill over the API.** An export endpoint with the full
+  recorded body so a permanode can fill its gaps from another one over
+  HTTPS instead of from a database copy.
+- **Search.** Prefix lookup for addresses and txids.
 - **Receipts.** Reconstruct the protocol's Merkle inclusion receipts for
   any recorded transaction from the stored page hashes (combination rule
   still to be derived from the node source).

@@ -4,10 +4,15 @@ A Parano1d node keeps full transaction bodies only for a short window
 (a few minutes) before pruning them. Headers stay forever, the actual
 transaction history does not. This program runs next to your own node,
 records every transaction permanently before the node discards it, and
-serves a block explorer over that history.
+serves that history - together with live figures from the node - as a
+JSON API that a block explorer or any other tool can be built on.
 
 One binary, one config file, one SQLite database. Anyone running a
-Parano1d node can run it; it only talks to the node's local RPC.
+Parano1d node can run it; it only talks to the node's local RPC. The
+explorer frontend at <https://noidexplorer.org> is a separate, private
+project that runs on top of this API; the permanode itself ships with a
+plain index page of the API and can serve any static frontend you point
+it at (`site_dir`).
 
 ## Requirements
 
@@ -24,11 +29,11 @@ Parano1d node can run it; it only talks to the node's local RPC.
 
 ## Install
 
-Replace `0.1.16` with the latest version from the
+Replace `0.2.0` with the latest version from the
 [releases page](https://github.com/gustlborg/gb-parano1d-permanode/releases):
 
 ```sh
-V=0.1.16
+V=0.2.0
 curl -sSLO https://github.com/gustlborg/gb-parano1d-permanode/releases/download/v$V/parano1d-permanode-$V-linux-x86_64.tar.gz
 curl -sSLO https://github.com/gustlborg/gb-parano1d-permanode/releases/download/v$V/SHA256SUMS
 sha256sum --check SHA256SUMS          # must print: ... OK
@@ -46,7 +51,7 @@ parano1d-permanode
 The first start writes a commented `permanode.toml` and a
 `permanode.sqlite3` database into that directory, starts recording from
 the oldest block the node can still serve a body for (about 40 blocks
-back), sweeps every address's balance, and serves the explorer on
+back), sweeps every address's balance, and serves the API on
 <http://127.0.0.1:8420/>. Stop it with Ctrl+C and set it up as a service
 so it never stops again: history from before the first start is gone,
 the node itself no longer has it either.
@@ -68,7 +73,7 @@ sudoedit -u permanode /var/lib/permanode/permanode.toml     # optional: listen, 
 
 ```ini
 [Unit]
-Description=Parano1d permanode (indexer + explorer)
+Description=Parano1d permanode (indexer + API)
 Wants=network-online.target
 After=network-online.target parano1d.service
 
@@ -100,7 +105,7 @@ The log shows every block as it is recorded, gaps, reorgs, and the sweep's
 check against the node ("exact match with the node at #…"). The indexer
 must not fall behind the node's pruning: an outage longer than roughly
 14 minutes leaves permanent gaps for that time (listed under
-`/api/v1/gaps` and counted in the status bar).
+`/api/v1/gaps` and counted in `stats`).
 
 ## Configuration
 
@@ -109,20 +114,25 @@ must not fall behind the node's pruning: an outage longer than roughly
 - `rpc_url` — the node's RPC, default `http://127.0.0.1:9601`.
 - `db_path` — the SQLite database, default `permanode.sqlite3` in the
   working directory.
-- `listen` — where the explorer listens, default `127.0.0.1:8420`. Keep it
+- `listen` — where the API listens, default `127.0.0.1:8420`. Keep it
   on loopback for a public instance and put a TLS reverse proxy in front.
+- `site_dir` — a directory with a static frontend (`index.html` plus
+  assets) to serve in place of the built-in API index. Unknown paths get
+  `index.html`, so a client-side router works; scripts and styles are
+  sent with `no-cache` plus an ETag and fonts and images with a one-day
+  lifetime, so an updated frontend shows up immediately even behind a
+  CDN. Leave it unset to serve the API only.
 - `retention_days` — how long to keep transaction detail (0 = forever,
   the default). Block headers are always kept.
 - `poll_interval_seconds` — how often to check the node (default 5).
   Keep this well below the node's body window.
 - `scan_slots_every_cycles` — how often the UTXO sweep runs, in polls
   (default 360, about 30 minutes; 0 disables it).
-- `donation_address` — shown in the status bar and on the About page
-  with a note that the instance is run at your own expense; leave empty
-  to show nothing.
+- `donation_address` — returned by `/api/v1/stats` for a frontend to
+  show; leave empty for none.
 
 Subcommands: `parano1d-permanode index` runs only the indexer,
-`parano1d-permanode serve` only the explorer over an existing database.
+`parano1d-permanode serve` only the API over an existing database.
 The default runs both in one process; if either half dies the process
 exits so systemd restarts both together.
 
@@ -164,21 +174,22 @@ during an update - it is the whole point.
   development-payout flags, the Merkle-path data for the protocol's
   inclusion receipts) and logs chain reorganizations instead of
   overwriting them.
-- **Explorer**: dashboard with the live block chain and mempool, block,
-  transaction and address pages, live mempool, rich list, a halving page
-  (live-state occupancy against the expansion threshold, the finalized
-  trigger window, reward tiers) and an economics page (issued vs burned,
-  state pressure and burn tiers, fee composition, state creation vs
-  consolidation, supply model, development allocation). Plain
-  HTML/CSS/JS, no build step, no third-party requests (fonts are bundled,
-  SIL OFL). Compiled into the binary.
-- **Footer and `/about` page** on every instance: independent community
-  project, no warranty for accuracy or completeness, where the data comes
-  from, source and license, the operator's donation address if set.
-- **JSON API** under `/api/v1/` (`stats`, `blocks`, `block/height/{h}`,
-  `block/hash/{h}`, `tx/{txid}` with the fee split into miner share and
-  burn, `address/{a}`, `address/{a}/utxos`, `mempool`, `richlist`,
-  `gaps`, `halving`, `economics`).
+- **JSON API** under `/api/v1/`: `stats` (indexer state, chain and
+  network figures, emission and burn totals), `blocks`,
+  `block/height/{h}`, `block/hash/{h}`, `tx/{txid}` with the fee split
+  into miner share and consensus burn, `address/{a}` (recorded and live
+  balance, transactions, notices when the recorded figures cannot be
+  complete), `address/{a}/utxos`, `mempool`, `richlist`, `gaps`,
+  `halving` (live-state occupancy against the expansion threshold, the
+  finalized trigger window, sampled header history) and `economics`
+  (issued vs burned over height, state pressure and burn tiers, minimum
+  burn to the next expansion, development allocation, recorded state
+  activity). Amounts are µNOID; totals that can exceed 2^53 are decimal
+  strings. The root page lists the endpoints.
+- **Frontend of your choice**: none is built in; `site_dir` serves any
+  static site over the API with sensible caching. Final data (blocks and
+  transactions 18 confirmations deep) is served with a one-hour cache
+  lifetime, everything else uncached.
 - **Live balances for every address**: the node's UTXO state is swept
   periodically (`paranoid_getStateMap` + `paranoid_getSlot`), so the rich
   list and address balances are complete and verified against the node's
@@ -191,15 +202,15 @@ during an update - it is the whole point.
   block is written as one transaction; reorgs mark the old block orphaned
   and store the replacement, nothing is overwritten. Blocks and
   transactions are final at 18 confirmations (the protocol's maximum
-  reorg depth is 17); the pages show the count and a "final" mark.
+  reorg depth is 17); responses carry the confirmation count.
 - **Balances** come from two sources, shown side by side. *Recorded*
   figures are computed from the transactions this permanode has stored,
   so they only cover activity since its first start. *Live* figures come
   straight from the node's current UTXO state and are always complete.
   Whenever the recorded figures cannot be complete for an address (it
   was active before the permanode started, or some of its outputs were
-  spent inside gaps), the address page says so and points out that the
-  live balance is authoritative regardless.
+  spent inside gaps), the address response says so; the live balance is
+  authoritative regardless.
 - **The UTXO sweep** reads every live UTXO of the node (`getStateMap` to
   find the populated state segments, `getSlot` for each slot in them) on
   the first poll after start and then every `scan_slots_every_cycles`
@@ -210,15 +221,15 @@ during an update - it is the whole point.
   recorded history: a recorded output the node no longer holds, with no
   recorded transaction spending it, was spent in a block whose body this
   permanode never had; it is flagged and dropped from the recorded
-  balance, and the address page says so. This is what makes the rich list
-  and the address balances complete for addresses that never appear in
-  the recorded history. The individual UTXOs are not stored; the address
-  page loads them from the node on request.
+  balance, and the address response says so. This is what makes the rich
+  list and the address balances complete for addresses that never appear
+  in the recorded history. The individual UTXOs are not stored;
+  `address/{a}/utxos` loads them from the node on request.
 - **Gaps** are heights whose body the node had already pruned when the
   indexer got to them (for example after an outage longer than the
   node's serving window, or on a node that just synced from a snapshot).
-  They are listed under `/api/v1/gaps` and counted in the status bar;
-  heights still inside the serving window are retried automatically.
+  They are listed under `/api/v1/gaps` and counted in `stats`; heights
+  still inside the serving window are retried automatically.
   Older ones can be filled from another permanode, see below.
 
 ## Filling gaps from another permanode
@@ -253,9 +264,11 @@ GCC's resource headers:
 `BINDGEN_EXTRA_CLANG_ARGS="-I/usr/lib/gcc/x86_64-linux-gnu/13/include" cargo build --release`
 (adjust the GCC version to what `ls /usr/lib/gcc/x86_64-linux-gnu/*/include/stdarg.h` shows).
 
-Layout: `core/` is the SQLite schema and queries, `permanode/` the binary
-(indexer, node RPC client, block decoder, explorer server), `frontend/site/`
-the explorer UI, `docs/` design notes and the node bug report below.
+Layout: `core/` is the SQLite schema, queries and the mirrored consensus
+rules (emission schedule, fee model), `permanode/` the binary (indexer,
+node RPC client, block decoder, API server), `frontend/site/` the
+built-in index page (replace it before building to compile a frontend
+into the binary), `docs/` the node bug report below.
 
 ## Working around a node RPC bug
 
@@ -276,7 +289,7 @@ wire format.
 `contrib/watchdog/` has a small stdlib-only Python watchdog with systemd
 units: every two minutes it checks that the services are active, the
 node answers, the indexer is not lagging behind the node, blocks keep
-arriving, the public site is reachable and in sync, and disk and memory
+arriving, the public instance is reachable and in sync, and disk and memory
 have headroom. It reports every change (new problem, resolved problem)
 and one daily heartbeat over Telegram, or only to the journal if no bot
 is configured. Setup, including how to create the Telegram bot and find

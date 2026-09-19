@@ -54,15 +54,15 @@ refresh_addresses_every_cycles = 120
 # the shared node (a few seconds over loopback). 0 disables the sweep.
 scan_slots_every_cycles = 360
 
-# Where the explorer + JSON API listen. Keep this on loopback for a public
-# instance and put a reverse proxy with TLS in front of it.
+# Where the JSON API listens. Keep this on loopback for a public instance
+# and put a reverse proxy with TLS in front of it.
 listen = "127.0.0.1:8420"
 
-# Serve the explorer from a directory instead of the copy compiled into the
-# binary - only useful while editing the frontend.
-# site_dir = "frontend/site"
+# A directory with a static frontend (index.html plus assets) to serve in
+# place of the built-in API index. Unknown paths get index.html so a
+# client-side router works. Unset = API only.
+# site_dir = "/var/lib/permanode/site"
 
-# Your donation address, shown right-aligned in the explorer's status bar
-# together with a note that this instance is run at the operator's own cost.
-# Leave empty to show nothing.
+# Your donation address, returned by /api/v1/stats for a frontend to show.
+# Leave empty for none.
 donation_address = ""

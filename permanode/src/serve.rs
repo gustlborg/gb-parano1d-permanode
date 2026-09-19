@@ -1,7 +1,7 @@
-//! The explorer: JSON API over the indexer's database plus the static
-//! frontend, which is compiled into the binary so a self-hoster only ever
-//! deals with one file. Runs in the same process as the indexer by
-//! default (see main.rs), on its own database connection.
+//! The JSON API over the indexer's database and the node, plus the
+//! static page in front of it: the built-in API index, or a frontend
+//! from `site_dir`. Runs in the same process as the indexer by default
+//! (see main.rs), on its own database connection.
 
 use crate::config::Config;
 use anyhow::Result;
@@ -18,7 +18,6 @@ use rusqlite::Connection;
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use tower_http::cors::CorsLayer;
-use tower_http::services::{ServeDir, ServeFile};
 
 static SITE: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../frontend/site");
 
@@ -135,25 +134,26 @@ pub async fn run(cfg: &Config) -> Result<()> {
 
     let app = match &cfg.site_dir {
         Some(dir) => {
-            log::info!("serving frontend from {dir} instead of the built-in copy");
-            let index_file = std::path::Path::new(dir).join("index.html");
-            api.fallback_service(ServeDir::new(dir).fallback(ServeFile::new(index_file)))
+            let dir = std::path::PathBuf::from(dir);
+            anyhow::ensure!(dir.join("index.html").is_file(), "site_dir {} has no index.html", dir.display());
+            log::info!("serving the frontend from {}", dir.display());
+            let dir = Arc::new(dir);
+            api.fallback(move |uri: Uri, headers: axum::http::HeaderMap| site_dir_file(Arc::clone(&dir), uri, headers))
         }
         None => api.fallback(embedded_site),
     }
     .layer(CorsLayer::permissive())
     .with_state(state);
 
-    log::info!("explorer listening on http://{}", cfg.listen);
+    log::info!("api listening on http://{}", cfg.listen);
     let listener = tokio::net::TcpListener::bind(&cfg.listen).await?;
     axum::serve(listener, app).await?;
     Ok(())
 }
 
-/// Serves the frontend compiled into the binary. Unknown paths get
-/// index.html so the client-side router can take over (block/tx/address
-/// URLs are all handled there), the same fallback ServeDir does in
-/// `site_dir` mode.
+/// Serves the page compiled into the binary (an index of the API unless
+/// a frontend was placed in `frontend/site` at build time). Unknown
+/// paths get index.html so a client-side router can take over.
 async fn embedded_site(uri: Uri, headers: axum::http::HeaderMap) -> Response {
     let path = uri.path().trim_start_matches('/');
     let (file, spa) = match SITE.get_file(path) {
@@ -163,18 +163,41 @@ async fn embedded_site(uri: Uri, headers: axum::http::HeaderMap) -> Response {
             None => return (StatusCode::NOT_FOUND, "not found").into_response(),
         },
     };
-    let mime = if spa {
-        mime_guess::mime::TEXT_HTML_UTF_8
-    } else {
-        mime_guess::from_path(file.path()).first_or_octet_stream()
-    };
-    // Fonts and icons practically never change and may sit in caches for
-    // a day. Everything else (HTML, scripts, styles) is revalidated on
-    // every load via the ETag, so a new build shows up immediately at the
-    // cost of a 304 round trip.
+    let mime = if spa { mime_guess::mime::TEXT_HTML_UTF_8 } else { mime_guess::from_path(file.path()).first_or_octet_stream() };
+    static_response(mime, file.contents().to_vec(), &headers)
+}
+
+/// Serves a frontend from `site_dir` with the same caching rules as the
+/// built-in page. Files are read per request (they are small and the
+/// directory may be updated while running); anything that would leave
+/// the directory is refused, and unknown paths fall back to index.html
+/// for the client-side router.
+async fn site_dir_file(dir: Arc<std::path::PathBuf>, uri: Uri, headers: axum::http::HeaderMap) -> Response {
+    use std::path::Component;
+    let rel = std::path::Path::new(uri.path().trim_start_matches('/'));
+    if rel.components().any(|c| !matches!(c, Component::Normal(_))) {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    let candidate = dir.join(rel);
+    let (path, spa) = if !rel.as_os_str().is_empty() && candidate.is_file() { (candidate, false) } else { (dir.join("index.html"), true) };
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => {
+            let mime = if spa { mime_guess::mime::TEXT_HTML_UTF_8 } else { mime_guess::from_path(&path).first_or_octet_stream() };
+            static_response(mime, bytes, &headers)
+        }
+        Err(_) => (StatusCode::NOT_FOUND, "not found").into_response(),
+    }
+}
+
+/// Fonts and icons practically never change and may sit in caches for a
+/// day. Everything else (HTML, scripts, styles) is revalidated on every
+/// load via the ETag, so an update shows up immediately at the cost of a
+/// 304 round trip - also through a CDN, which would otherwise cache
+/// scripts for hours on its own.
+fn static_response(mime: mime_guess::Mime, bytes: Vec<u8>, headers: &axum::http::HeaderMap) -> Response {
     let long_lived = matches!(mime.type_().as_str(), "font" | "image");
     let cache = if long_lived { "public, max-age=86400" } else { "no-cache" };
-    let etag = etag_of(file.contents());
+    let etag = etag_of(&bytes);
     if headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
@@ -188,7 +211,7 @@ async fn embedded_site(uri: Uri, headers: axum::http::HeaderMap) -> Response {
             (header::CACHE_CONTROL, cache.to_string()),
             (header::ETAG, etag),
         ],
-        file.contents(),
+        bytes,
     )
         .into_response()
 }

@@ -8,7 +8,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// Records the transaction history a Parano1d node itself only keeps for
-/// a few minutes, and serves a block explorer over it.
+/// a few minutes, and serves it as a JSON API (plus a static frontend if
+/// one is configured).
 #[derive(Parser, Debug)]
 #[command(version)]
 struct Args {
@@ -23,11 +24,11 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Index the node and serve the explorer, in one process (the default).
+    /// Index the node and serve the API, in one process (the default).
     Run,
     /// Only index the node into the database.
     Index,
-    /// Only serve the explorer + API over an existing database.
+    /// Only serve the API over an existing database.
     Serve,
     /// Fill gaps (blocks recorded without a body) from another
     /// permanode's database or a backup of it. Safe to run while this
@@ -91,7 +92,7 @@ fn run_server(cfg: &Config) -> Result<()> {
     tokio::runtime::Runtime::new()?.block_on(serve::run(cfg))
 }
 
-/// Indexer on its own thread, explorer on this one. Either half dying
+/// Indexer on its own thread, API server on this one. Either half dying
 /// ends the process so a supervisor (systemd) restarts both together;
 /// half a permanode silently limping on is worse than a clean restart.
 fn run_both(cfg: Config) -> Result<()> {
@@ -101,7 +102,7 @@ fn run_both(cfg: Config) -> Result<()> {
         .spawn(move || run_indexer(&indexer_cfg))?;
 
     let server_thread = std::thread::Builder::new()
-        .name("explorer".into())
+        .name("api".into())
         .spawn(move || run_server(&cfg))?;
 
     loop {
@@ -113,8 +114,8 @@ fn run_both(cfg: Config) -> Result<()> {
         }
         if server_thread.is_finished() {
             return match server_thread.join() {
-                Ok(r) => r.and_then(|()| bail!("explorer stopped")),
-                Err(_) => bail!("explorer thread panicked"),
+                Ok(r) => r.and_then(|()| bail!("api server stopped")),
+                Err(_) => bail!("api server thread panicked"),
             };
         }
         std::thread::sleep(Duration::from_secs(1));

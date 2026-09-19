@@ -1,10 +1,6 @@
 /target
 # Local instance: config, database, logs
 /run/
-# Design tool exports and screenshots kept locally
-/design/
-/frontend/screenshots/
-/frontend/mempool-upstream/
 /dist/
 # TLS material for the public instance - never commit
 /security/

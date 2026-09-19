@@ -66,20 +66,19 @@ pub struct Config {
     #[serde(default = "default_scan_slots_every_cycles")]
     pub scan_slots_every_cycles: u64,
 
-    /// Address the explorer + JSON API listen on. Loopback by default;
+    /// Address the JSON API listens on. Loopback by default;
     /// put a reverse proxy with TLS in front for a public instance rather
     /// than exposing this port directly.
     #[serde(default = "default_listen")]
     pub listen: String,
 
-    /// Serve the explorer frontend from this directory instead of the copy
-    /// built into the binary - only useful while editing the frontend.
+    /// A static frontend to serve in place of the built-in API index:
+    /// a directory with index.html plus assets.
     #[serde(default)]
     pub site_dir: Option<String>,
 
-    /// Shown in the explorer's status bar as the operator's donation
-    /// address (with a note that the instance is run at their own cost).
-    /// Empty or absent = nothing shown.
+    /// The operator's donation address, returned by /api/v1/stats for a
+    /// frontend to show. Empty or absent = none.
     #[serde(default)]
     pub donation_address: Option<String>,
 }
@@ -156,9 +155,9 @@ impl Config {
                  refresh_addresses_every_cycles = {}\n\
                  # 0 disables the live-state sweep\n\
                  scan_slots_every_cycles = {}\n\
-                 # explorer + API listen address (put a TLS reverse proxy in front for the public)\n\
+                 # API listen address (put a TLS reverse proxy in front for the public)\n\
                  listen = {:?}\n\
-                 # your donation address, shown in the explorer's status bar (leave empty to show nothing)\n\
+                 # your donation address, returned by /api/v1/stats for a frontend to show (leave empty for none)\n\
                  donation_address = \"\"\n",
                 cfg.rpc_url,
                 cfg.db_path,

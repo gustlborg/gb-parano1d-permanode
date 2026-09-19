@@ -1,6 +1,6 @@
 [package]
 name = "parano1d-permanode"
-version = "0.1.16"
+version = "0.2.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 description = "Permanent transaction history and block explorer for a Parano1d node"
@@ -32,7 +32,7 @@ permanode-core = { path = "../core" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "fs"] }
 toml = "1.1.6"
-tower-http = { version = "0.6", features = ["fs", "cors"] }
+tower-http = { version = "0.6", features = ["cors"] }
 ureq = { version = "3.4.2", features = ["json"] }

@@ -2,64 +2,43 @@
 
 Notable changes per release. Commit history has the details.
 
-## Unreleased
+## 0.2.0 - 2026-09-20
 
-- Dashboard grows to twelve cards in two rows of six: UTXOs until
-  halving (from `getStateInfo`), fees burned since genesis (mirrored
-  emission schedule minus the circulating supply) with the last 24 hours
-  from recorded blocks in the tooltip, transactions in the last 24 hours, addresses with
-  a balance, database size on disk with the growth rate, and how long
-  this instance has been recording.
-- Blocks store `log_slots` so subsidies stay right across future
-  expansions.
-- Stat cards follow the design update: equal height across both rows,
-  a little taller, and every card carries a round "i" in its corner
-  (hover it for the explanation) instead of a dotted underline on the
-  value.
-- `ROADMAP.md`.
-- **Economics page** (`/economics`, nav entry after Halving): ten
-  cards (net supply, total issued and burned, current reward, annualized
-  issuance and inflation as labelled projections, live UTXOs, occupancy,
-  growth multiplier, next development payout), an issued-vs-burned chart over block height on
-  one NOID axis (log or linear; burned exact at the tip and walked back
-  through the recorded blocks), state pressure and burn tiers, fee
-  composition, state creation vs consolidation over 24 h / 7 d / 30 d
-  from the records, the minimum burn until the next halving (the
-  missing slots split into the pressure bands they fall into - a lower
-  bound, consolidation raises it), the supply model and the development
-  allocation with cumulative amounts per recipient. Backed by
-  `/api/v1/economics`.
-- Halving page: ten cards (growth multiplier, burn per net-new UTXO,
-  next pressure threshold, a labelled estimate to the threshold added),
-  a "How the halving works" explanation and the pressure tiers and
-  consolidation rule in the consensus list.
-- Transaction pages: a fee-breakdown card (total, miner-claimable,
-  burned with a split bar and the components) replaces the two fee rows;
-  the type row states the shape and net state change.
+The explorer frontend is no longer part of this repository: the
+permanode is the indexer and the JSON API, and the built-in page at `/`
+is an index of that API. A frontend of your own goes into `site_dir`
+(any static site; unknown paths fall back to `index.html`, scripts and
+styles are served `no-cache` with an ETag and fonts and images with a
+one-day lifetime, paths that would leave the directory are refused).
+The public instance at noidexplorer.org runs its explorer that way.
+
 - `import-bodies --from-db FILE` fills gaps from another permanode's
   database or backup while this one keeps running; accepted only for
   blocks whose hash the own node reported and whose transactions add up.
   Outputs the sweep had marked as "spent in a gap" become ordinary spent
-  outputs once their spend is on record, from an import or a backfill.
-- Transaction pages split the fee into what the miner claimed and what
-  consensus burned (base + per-input + per-output + tip vs. the
-  state-growth fee on net-new UTXO slots at the parent block's state
-  pressure), via `fee_breakdown` on `/api/v1/tx/{txid}`.
-- Dashboard wording aligned with the protocol's economics: "Net supply"
-  (issued minus burned, the node's figure) instead of "Circulating
-  supply"; the burn tooltip lists the 1x/2x/4x/8x pressure tiers; the
-  halving tooltip states the 12 582 912-UTXO threshold and the 10-of-18
-  finalized-header rule; block reward explains the 90/5/5 split with the
-  O(1) Network Fund and Parano1d Lab; fee floor is labelled as the node's
-  relay policy, not the consensus minimum. Every dashboard card now has a
-  tooltip.
-- **Halving page** (`/halving`, in the nav between Block and
-  Transaction): live-state occupancy against the 75 % expansion
-  threshold, chart of live UTXOs over block height with a projection
-  from recent growth (recent window or full scale), the finalized
-  18-header trigger window as it stands on chain, reward tiers per state
-  domain and the consensus rules behind them. Backed by a new
-  `/api/v1/halving` endpoint that samples block headers incrementally.
+  outputs once their spend is on record (from an import or a backfill,
+  canonical blocks only), and stale gap entries whose block has a body
+  are closed at start.
+- `/api/v1/tx/{txid}` gains `fee_breakdown`: base, per-input and
+  per-output fees, the state-growth burn at the parent block's pressure
+  multiplier, tip and miner share (`core/src/fees.rs` mirrors the
+  consensus fee model).
+- `/api/v1/halving`: live-state occupancy against the expansion
+  threshold, the 18 hard-finalized headers deciding the next block, a
+  sampled header history, the pressure multiplier and thresholds.
+- `/api/v1/economics`: issued (mirrored emission schedule) vs burned
+  (issued minus the node's supply, walked back through the recorded
+  blocks and estimated from the headers' mint counter before that), net
+  supply, annualized issuance, state pressure, the minimum burn until the
+  next expansion split into pressure bands, development allocation with
+  next payout and cumulative amounts per recipient, and recorded state
+  activity over 24 h / 7 d / 30 d.
+- `/api/v1/stats`: transactions and burned fees of the last 24 hours,
+  addresses with a balance, database size, emission and burn totals,
+  state capacity and slots until the next expansion; `blocks.log_slots`
+  is stored so subsidies stay right across expansions.
+- Header samples and the finalized window are cached per tip; the
+  economics response takes about 100 ms, the halving response 12 ms.
 
 ## 0.1.16 - 2026-09-18
 

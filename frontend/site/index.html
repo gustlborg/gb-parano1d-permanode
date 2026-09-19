@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>parano1d-permanode</title>
+  <style>
+    body { margin: 0; padding: 40px 24px; background: #0b0f0e; color: #cfd8d5; font: 15px/1.6 system-ui, sans-serif; }
+    main { max-width: 720px; margin: 0 auto; }
+    h1 { font-size: 22px; margin: 0 0 6px; color: #e6ede9; }
+    p { margin: 0 0 18px; }
+    code, td:first-child { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13.5px; }
+    table { border-collapse: collapse; width: 100%; margin: 6px 0 22px; }
+    td { padding: 7px 10px 7px 0; border-bottom: 1px solid #1d2624; vertical-align: top; }
+    a { color: #3ee6b8; text-decoration: none; }
+    .muted { color: #7f8c88; font-size: 13.5px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>parano1d-permanode</h1>
+  <p>This permanode records the transaction history its Parano1d node prunes and serves it as a JSON API under <code>/api/v1/</code>. No frontend is configured; set <code>site_dir</code> in <code>permanode.toml</code> to serve one.</p>
+  <table>
+    <tr><td><a href="/api/v1/stats">stats</a></td><td>indexer state, chain and network figures</td></tr>
+    <tr><td><a href="/api/v1/blocks?limit=25">blocks?limit=N</a></td><td>newest blocks (up to 200)</td></tr>
+    <tr><td>block/height/{h}</td><td>block with its transactions</td></tr>
+    <tr><td>block/hash/{hash}</td><td>same, by hash</td></tr>
+    <tr><td>tx/{txid}</td><td>transaction with inputs, outputs, receipt data and the fee split into miner share and burn</td></tr>
+    <tr><td>address/{a}?page=&amp;page_size=</td><td>recorded and live balance, transactions</td></tr>
+    <tr><td>address/{a}/utxos</td><td>the address's live UTXOs from the node</td></tr>
+    <tr><td><a href="/api/v1/mempool">mempool</a></td><td>the node's pending transactions</td></tr>
+    <tr><td><a href="/api/v1/richlist">richlist</a></td><td>top 100 addresses by live balance</td></tr>
+    <tr><td><a href="/api/v1/gaps">gaps</a></td><td>blocks recorded without a body</td></tr>
+    <tr><td><a href="/api/v1/halving">halving</a></td><td>live-state occupancy, expansion window, header history</td></tr>
+    <tr><td><a href="/api/v1/economics">economics</a></td><td>supply, burn, state pressure, development allocation, recorded activity</td></tr>
+  </table>
+  <p class="muted">Amounts are in µNOID (1 NOID = 1 000 000 µNOID); totals that can exceed 2^53 are decimal strings. Source and documentation: <a href="https://github.com/gustlborg/gb-parano1d-permanode">github.com/gustlborg/gb-parano1d-permanode</a> (AGPL-3.0).</p>
+</main>
+</body>
+</html>
