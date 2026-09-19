@@ -12,6 +12,8 @@ Notable changes per release. Commit history has the details.
   this instance has been recording.
 - Blocks store `log_slots` so subsidies stay right across future
   expansions.
+- Explanations on stat cards moved from a dotted underline on the value
+  to a round "i" in the card's corner; hover it for the tooltip.
 - `ROADMAP.md`.
 
 ## 0.1.16 - 2026-09-18

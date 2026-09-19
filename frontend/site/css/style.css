@@ -333,10 +333,11 @@ main { flex: 1; }
   padding-top: 30px;
 }
 .stat {
+  position: relative;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 12px;
-  padding: 16px 16px 14px;
+  padding: 16px 16px 22px;
   display: flex;
   flex-direction: column;
   gap: 7px;
@@ -355,10 +356,28 @@ main { flex: 1; }
 .stat .k { font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted-2); }
 .stats.inner { grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); gap: 12px; padding-top: 0; }
 .stats.inner.three { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
-.stats.inner .stat { background: var(--panel-2); border-radius: 11px; padding: 16px; gap: 6px; }
+.stats.inner .stat { background: var(--panel-2); border-radius: 11px; padding: 16px 16px 22px; gap: 6px; }
 .stats.inner .stat .v { font-size: 17px; }
 .stats.inner.three .stat .v { font-size: 18px; }
 .stats.inner .stat .k { font-size: 10px; letter-spacing: .13em; }
+.stat .info {
+  position: absolute;
+  right: 7px;
+  bottom: 5px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 1.5px solid var(--muted-3);
+  color: var(--muted-2);
+  font-family: var(--sans);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 12px;
+  text-align: center;
+  cursor: help;
+  user-select: none;
+}
+.stat .info:hover { border-color: var(--accent); color: var(--accent); }
 
 /* ---- cards -------------------------------------------------------- */
 .card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }

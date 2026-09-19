@@ -143,10 +143,14 @@ function supply(micronoid) {
   return frac ? `${whole}.${frac.slice(0, 2).padEnd(2, "0")}` : full;
 }
 
+// A round "i" in the card's corner carries the explanation (hover for the
+// tooltip) so the figures themselves stay clean.
+function infoDot(text) {
+  return text ? `<span class="info" title="${escapeHtml(text)}" aria-label="Info">i</span>` : "";
+}
+
 function statCard(v, k, opts = {}) {
-  const title = opts.hint ? ` title="${escapeHtml(opts.hint)}"` : "";
-  const cls = opts.hint ? "v hint" : "v";
-  return `<div class="stat"${opts.id ? ` id="${opts.id}"` : ""}><span class="${cls}"${title}>${v}</span><span class="k">${k}</span></div>`;
+  return `<div class="stat"${opts.id ? ` id="${opts.id}"` : ""}><span class="v${opts.cls ? " " + opts.cls : ""}">${v}</span><span class="k">${k}</span>${infoDot(opts.hint)}</div>`;
 }
 
 function bytesText(b) {
@@ -710,12 +714,16 @@ export async function addressView(address, pageNo = 1, pageSize = 25) {
         <span class="addr-full">${escapeHtml(address)}</span>
       </div>
       <div class="stats inner">
-        <div class="stat"><span class="v pos hint" title="${escapeHtml(liveHint)}">${liveKnown ? noid(result.live_balance_micronoid, false) : "?"}</span><span class="k">Current balance (live, all UTXOs)</span></div>
-        <div class="stat"><span class="v">${liveKnown ? int(result.live_utxo_count) : "?"}</span><span class="k">UTXOs (live, all)</span></div>
-        <div class="stat"><span class="v hint" title="${escapeHtml(recHint)}">${noid(b.confirmed_balance_micronoid, false)}</span><span class="k">Recorded balance</span></div>
-        <div class="stat"><span class="v">${int(b.confirmed_utxos)}</span><span class="k">Recorded UTXOs</span></div>
-        <div class="stat"><span class="v hint" title="Sum of recorded outputs to this address\nsince this permanode began recording -\nnot the address's lifetime total.">${noid(b.total_received_micronoid, false)}</span><span class="k">Total received</span></div>
-        <div class="stat"><span class="v hint" title="Sum of the inputs this address spent in\nrecorded transactions since this permanode\nbegan recording - may include coins it\nreceived before that.">${noid(b.total_sent_micronoid, false)}</span><span class="k">Total sent</span></div>
+        ${statCard(liveKnown ? noid(result.live_balance_micronoid, false) : "?", "Current balance (live, all UTXOs)", { cls: "pos", hint: liveHint })}
+        ${statCard(liveKnown ? int(result.live_utxo_count) : "?", "UTXOs (live, all)")}
+        ${statCard(noid(b.confirmed_balance_micronoid, false), "Recorded balance", { hint: recHint })}
+        ${statCard(int(b.confirmed_utxos), "Recorded UTXOs")}
+        ${statCard(noid(b.total_received_micronoid, false), "Total received", {
+          hint: "Sum of recorded outputs to this address\nsince this permanode began recording -\nnot the address's lifetime total.",
+        })}
+        ${statCard(noid(b.total_sent_micronoid, false), "Total sent", {
+          hint: "Sum of the inputs this address spent in\nrecorded transactions since this permanode\nbegan recording - may include coins it\nreceived before that.",
+        })}
       </div>
       ${note}
     </div>
@@ -778,7 +786,7 @@ function mempoolStatsHtml(info) {
   return `
     <div class="stat"><span class="v">${int(info.size)} tx</span><span class="k">Pending txs</span></div>
     <div class="stat"><span class="v">${noid(info.fee_floor)}</span><span class="k">Fee floor</span></div>
-    <div class="stat"><span class="v hint" title="µNOID per weight unit (inputs + outputs + 4 per net new slot) - the node's own mempool priority key">${range}</span><span class="k">Fee rate range</span></div>`;
+    ${statCard(range, "Fee rate range", { hint: "µNOID per weight unit (inputs + outputs\n+ 4 per net new slot) - the node's own\nmempool priority key." })}`;
 }
 
 function seenText(admittedHeight, tip) {
