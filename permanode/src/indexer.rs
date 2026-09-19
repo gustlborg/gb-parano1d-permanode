@@ -412,8 +412,8 @@ fn insert_block_header_row(
 ) -> Result<i64> {
     conn.execute(
         "INSERT INTO blocks (height, hash, prev_hash, state_root, tx_root, timestamp, miner,
-            nonce_hex, difficulty_target, body_captured, body_source, first_seen_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+            nonce_hex, difficulty_target, body_captured, body_source, first_seen_at, log_slots)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
          ON CONFLICT(height, hash) DO NOTHING",
         params![
             h.height as i64,
@@ -428,6 +428,7 @@ fn insert_block_header_row(
             body_captured as i64,
             body_source,
             now,
+            h.log_slots as i64,
         ],
     )?;
 

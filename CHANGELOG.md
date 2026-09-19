@@ -4,9 +4,15 @@ Notable changes per release. Commit history has the details.
 
 ## Unreleased
 
-- Dashboard card "UTXOs until halving" (live UTXOs until the state
-  expands and the reward halves, from `getStateInfo`); the cards sit in
-  a fixed four-column grid.
+- Dashboard grows to twelve cards in two rows of six: UTXOs until
+  halving (from `getStateInfo`), burned fees in the last 24 hours (from
+  recorded blocks: fees minus what the coinbase claimed) with the burn
+  since genesis in the tooltip (mirrored emission schedule minus the
+  circulating supply), transactions in the last 24 hours, addresses with
+  a balance, database size on disk with the growth rate, and how long
+  this instance has been recording.
+- Blocks store `log_slots` so subsidies stay right across future
+  expansions.
 - `ROADMAP.md`.
 
 ## 0.1.16 - 2026-09-18

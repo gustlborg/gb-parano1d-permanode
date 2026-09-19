@@ -43,6 +43,12 @@ struct AppState {
     /// refreshed one by one.
     address_refresh_interval_seconds: u64,
     donation_address: Option<String>,
+    db_path: String,
+    /// Heights at which log_slots first reached 25, 26, ... - found by
+    /// binary search over the permanent headers and cached per current
+    /// log_slots, so the emission total needs no RPC calls in the common
+    /// case where the state has never expanded.
+    expansions: Mutex<Option<(u32, Vec<u64>)>>,
 }
 
 impl AppState {
@@ -85,6 +91,8 @@ pub async fn run(cfg: &Config) -> Result<()> {
             .then(|| cfg.scan_slots_every_cycles.saturating_mul(cfg.poll_interval_seconds)),
         address_refresh_interval_seconds: cfg.refresh_addresses_every_cycles.saturating_mul(cfg.poll_interval_seconds),
         donation_address: cfg.donation_address.as_deref().map(str::trim).filter(|a| !a.is_empty()).map(String::from),
+        db_path: cfg.db_path.clone(),
+        expansions: Mutex::new(None),
     });
 
     let api = Router::new()
@@ -170,6 +178,8 @@ struct StatsResponse {
     address_refresh_interval_seconds: u64,
     /// The operator's donation address from the config, if any.
     donation_address: Option<String>,
+    /// Size of the database on disk (main file plus write-ahead log).
+    db_bytes: Option<u64>,
 }
 
 #[derive(serde::Serialize, Default)]
@@ -198,6 +208,11 @@ struct NetworkMetrics {
     state_capacity: Option<u64>,
     slots_until_halving: Option<u64>,
     halving_trigger_pct: Option<u64>,
+    /// Everything the protocol has minted up to the node's tip (mirrored
+    /// emission schedule, see core::emission) and the part of it that fees
+    /// have burned since genesis: minted minus circulating supply.
+    emitted_total_micronoid: Option<String>,
+    burned_total_micronoid: Option<String>,
 }
 
 async fn get_stats(State(state): State<Arc<AppState>>) -> ApiResult<StatsResponse> {
@@ -216,17 +231,31 @@ async fn get_stats(State(state): State<Arc<AppState>>) -> ApiResult<StatsRespons
         )
     };
 
-    let rpc_client = state.rpc.clone();
-    let (active_slots, chain_info, mining_info, state_info) = tokio::task::spawn_blocking(move || {
+    let state_for_rpc = Arc::clone(&state);
+    let (active_slots, chain_info, mining_info, state_info, expansions) = tokio::task::spawn_blocking(move || {
+        let rpc = &state_for_rpc.rpc;
+        let chain_info = rpc.get_chain_info().ok();
+        let expansions = chain_info.as_ref().and_then(|c| expansion_heights(&state_for_rpc, c.log_slots, c.height));
         (
-            rpc_client.get_active_slot_count().ok(),
-            rpc_client.get_chain_info().ok(),
-            rpc_client.get_mining_info().ok(),
-            rpc_client.get_state_info().ok(),
+            rpc.get_active_slot_count().ok(),
+            chain_info,
+            rpc.get_mining_info().ok(),
+            rpc.get_state_info().ok(),
+            expansions,
         )
     })
     .await
-    .unwrap_or((None, None, None, None));
+    .unwrap_or((None, None, None, None, None));
+
+    let (emitted_total_micronoid, burned_total_micronoid) = match (&chain_info, &expansions) {
+        (Some(c), Some(exp)) => {
+            let emitted = permanode_core::emission::emitted_up_to(c.height, exp);
+            let supply: u128 = c.circulating_supply_micronoid.parse().unwrap_or(0);
+            (Some(emitted.to_string()), Some(emitted.saturating_sub(supply).to_string()))
+        }
+        _ => (None, None),
+    };
+    let db_bytes = db_size_bytes(&state.db_path);
 
     let estimated_hashrate_hs = mining_info
         .as_ref()
@@ -245,6 +274,8 @@ async fn get_stats(State(state): State<Arc<AppState>>) -> ApiResult<StatsRespons
         state_capacity: state_info.as_ref().map(|i| i.capacity),
         slots_until_halving: state_info.as_ref().map(|i| i.slots_until_expand),
         halving_trigger_pct: state_info.as_ref().map(|i| i.expand_trigger_pct),
+        emitted_total_micronoid,
+        burned_total_micronoid,
     };
 
     Ok(Json(StatsResponse {
@@ -253,6 +284,7 @@ async fn get_stats(State(state): State<Arc<AppState>>) -> ApiResult<StatsRespons
         balance_sweep_interval_seconds: state.balance_sweep_interval_seconds,
         address_refresh_interval_seconds: state.address_refresh_interval_seconds,
         donation_address: state.donation_address.clone(),
+        db_bytes,
     }))
 }
 
@@ -279,6 +311,43 @@ fn is_address(s: &str) -> bool {
 fn cached_json<T: serde::Serialize>(value: T, is_final: bool) -> Response {
     let policy = if is_final { "public, max-age=3600" } else { "no-cache" };
     ([(header::CACHE_CONTROL, policy)], Json(value)).into_response()
+}
+
+fn db_size_bytes(db_path: &str) -> Option<u64> {
+    let main = std::fs::metadata(db_path).ok()?.len();
+    let wal = std::fs::metadata(format!("{db_path}-wal")).map(|m| m.len()).unwrap_or(0);
+    Some(main + wal)
+}
+
+/// First heights at which the state reached log_slots 25, 26, ..., up to
+/// the current value. log_slots only ever grows, so each step is a binary
+/// search over the permanent headers; the result is cached until the
+/// state expands again.
+fn expansion_heights(state: &AppState, current_log_slots: u32, tip: u64) -> Option<Vec<u64>> {
+    if let Some((cached_for, heights)) = state.expansions.lock().ok()?.as_ref() {
+        if *cached_for == current_log_slots {
+            return Some(heights.clone());
+        }
+    }
+    let mut heights = Vec::new();
+    let mut lo = 1u64;
+    for level in (permanode_core::emission::LOG_SLOTS_GENESIS + 1)..=current_log_slots {
+        // smallest h in [lo, tip] with log_slots >= level
+        let (mut a, mut b) = (lo, tip);
+        while a < b {
+            let mid = a + (b - a) / 2;
+            let h = state.rpc.get_block_header(mid).ok()??;
+            if h.log_slots >= level {
+                b = mid;
+            } else {
+                a = mid + 1;
+            }
+        }
+        heights.push(a);
+        lo = a;
+    }
+    *state.expansions.lock().ok()? = Some((current_log_slots, heights.clone()));
+    Some(heights)
 }
 
 #[derive(Deserialize)]
