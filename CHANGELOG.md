@@ -17,6 +17,18 @@ Notable changes per release. Commit history has the details.
   (hover it for the explanation) instead of a dotted underline on the
   value.
 - `ROADMAP.md`.
+- Transaction pages split the fee into what the miner claimed and what
+  consensus burned (base + per-input + per-output + tip vs. the
+  state-growth fee on net-new UTXO slots at the parent block's state
+  pressure), via `fee_breakdown` on `/api/v1/tx/{txid}`.
+- Dashboard wording aligned with the protocol's economics: "Net supply"
+  (issued minus burned, the node's figure) instead of "Circulating
+  supply"; the burn tooltip lists the 1x/2x/4x/8x pressure tiers; the
+  halving tooltip states the 12 582 912-UTXO threshold and the 10-of-18
+  finalized-header rule; block reward explains the 90/5/5 split with the
+  O(1) Network Fund and Parano1d Lab; fee floor is labelled as the node's
+  relay policy, not the consensus minimum. Every dashboard card now has a
+  tooltip.
 - **Halving page** (`/halving`, in the nav between Block and
   Transaction): live-state occupancy against the 75 % expansion
   threshold, chart of live UTXOs over block height with a projection

@@ -417,14 +417,41 @@ async fn get_tx(
     if !is_hex64(&txid) {
         return Err(ApiErrorOr404::NotFound);
     }
-    let conn = state.db();
-    match queries::tx_by_txid(&conn, &txid)? {
+    let tx = {
+        let conn = state.db();
+        queries::tx_by_txid(&conn, &txid)?
+    };
+    match tx {
         Some(t) => {
             let is_final = t.block.canonical && t.confirmations.is_some_and(|c| c >= FINAL_CONFIRMATIONS);
-            Ok(cached_json(t, is_final))
+            let fee_breakdown = tx_fee_breakdown(&state, &t).await;
+            Ok(cached_json(TxResponse { tx: t, fee_breakdown }, is_final))
         }
         None => Err(ApiErrorOr404::NotFound),
     }
+}
+
+#[derive(serde::Serialize)]
+struct TxResponse {
+    #[serde(flatten)]
+    tx: queries::TxDetail,
+    /// Miner share vs. consensus burn of the paid fee; absent for coinbase
+    /// and development-payout pages or when the parent header can't be
+    /// fetched right now.
+    fee_breakdown: Option<permanode_core::fees::FeeBreakdown>,
+}
+
+/// The burn depends on the occupancy in the parent header (what the node
+/// checks the coinbase against), which is permanent, so one RPC call.
+async fn tx_fee_breakdown(state: &Arc<AppState>, t: &queries::TxDetail) -> Option<permanode_core::fees::FeeBreakdown> {
+    if t.coinbase || t.development_payout {
+        return None;
+    }
+    let parent_height = u64::try_from(t.block.height).ok()?.checked_sub(1)?;
+    let (fee, n_in, n_out) = (u64::try_from(t.fee_micronoid).ok()?, t.inputs.len() as u64, t.outputs.len() as u64);
+    let st = Arc::clone(state);
+    let header = tokio::task::spawn_blocking(move || st.rpc.get_block_header(parent_height)).await.ok()?.ok()??;
+    Some(permanode_core::fees::fee_breakdown(fee, n_in, n_out, header.active_slot_count, header.log_slots))
 }
 
 #[derive(Deserialize)]

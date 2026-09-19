@@ -106,7 +106,7 @@ Navigation ist clientseitig; Header bleibt in allen Views identisch (`position: 
      Animation `noidScan` 2.6s linear infinite, `translateY(-100%) → translateY(400%)`, `pointer-events: none`).
    - Klick auf Mempool-Block → Mempool-View, Klick auf Block → Block-View.
 3. **Kennzahlen-Raster** (max 1180px, `repeat(auto-fit, minmax(170px, 1fr))`, gap 14px):
-   Circulating supply · Block reward · Network hashrate · Avg block time (1h) · Mempool pending · Fee floor.
+   Net supply · Block reward · Network hashrate · Avg block time (1h) · Mempool pending · Fee floor.
 4. **Recent blocks** — Karte mit Kopf („RECENT BLOCKS", rechts „all blocks →"), Spalten
    `1fr 1fr 2fr 0.7fr 1.1fr 1fr`: Height (Link) · Time · Miner (Link) · Txs · Reward · Fees.
 

@@ -17,6 +17,16 @@ const STATS_REFRESH_MS = 20_000;
 const ALL_BLOCKS_LIMIT = 200;
 // The protocol's maximum reorg depth is 17 blocks; from 18 on a block is final.
 const FINAL_CONFIRMATIONS = 18;
+// Consensus emission constants (mirrored from core/src/emission.rs).
+const BLOCKS_PER_DAY = 4320;
+const DEVELOPMENT_ALLOCATION_END_HEIGHT = BLOCKS_PER_DAY * 365 * 3;
+const FEE_FLOOR_HINT = `This node's mempool relay floor:
+0.005 NOID, raised towards the median of
+recently admitted fees while the mempool
+is busy. A local policy, not the consensus
+minimum fee (0.005 base + 0.0001 per input
++ 0.0007 per output + the state-growth
+burn per net-new UTXO).`;
 
 function link(href, text, cls = "") {
   return `<a href="${href}" data-link${cls ? ` class="${cls}"` : ""}>${escapeHtml(text)}</a>`;
@@ -176,18 +186,27 @@ blocks, not the node - a fresh install
 won't have a 24h figure yet.`;
   const burnedShare =
     n.burned_total_micronoid != null && n.emitted_total_micronoid != null
-      ? `${((Number(n.burned_total_micronoid) / Number(n.emitted_total_micronoid)) * 100).toFixed(4)}% of the ${noid(n.emitted_total_micronoid)}
-minted so far`
+      ? `${((Number(n.burned_total_micronoid) / Number(n.emitted_total_micronoid)) * 100).toFixed(4)}% of the
+${noid(n.emitted_total_micronoid)} minted so far`
       : "";
   const perDay =
     stats?.db_bytes != null && recordedFor > 3600 ? `\n≈ ${bytesText((stats.db_bytes / recordedFor) * 86400)} per day at the current rate.` : "";
   return [
-    statCard(supply(n.circulating_supply_micronoid), "Circulating supply", { hint: "in NOID" }),
+    statCard(supply(n.circulating_supply_micronoid), "Net supply", {
+      hint: `All block subsidies issued so far minus
+the NOID burned by consensus (state-growth
+fees), as reported by the node. Includes
+coins still held by the funds and miners.${n.emitted_total_micronoid != null ? `\nIssued so far: ${noid(n.emitted_total_micronoid)}.` : ""}`,
+    }),
     statCard(noid(n.block_reward_micronoid), "Block reward", {
-      hint: `Minted with every block while the live UTXO
-set fits in ${n.state_capacity != null ? int(n.state_capacity) : "the current"} slots. It halves
-with the next state expansion, not at
-a fixed block height.`,
+      hint: `Subsidy minted with every block in the
+current state domain of ${n.state_capacity != null ? int(n.state_capacity) : "-"} slots.
+It halves with the next state expansion,
+not at a fixed block height.
+Until block ${int(DEVELOPMENT_ALLOCATION_END_HEIGHT)} it is split 90% to
+the miner (${noid(Math.floor((n.block_reward_micronoid || 0) * 0.9))}), 5% to the O(1)
+Network Fund and 5% to Parano1d Lab; the
+fund shares are paid out every ${int(BLOCKS_PER_DAY)} blocks.`,
     }),
     statCard(hashrate(n.estimated_hashrate_hs), "Network hashrate", {
       hint: "Rough estimate derived from the\ncurrent PoW target, not a\nmeasured network figure.",
@@ -199,25 +218,32 @@ a fixed block height.`,
     }),
     statCard(mempool ? noid(mempool.fee_floor) : "-", "Fee floor", {
       id: "stat-floor",
-      hint: "Lowest fee the node's mempool\naccepts right now.",
+      hint: FEE_FLOOR_HINT,
     }),
     statCard(n.slots_until_halving != null ? int(n.slots_until_halving) : "-", "UTXOs until halving", {
       hint:
         n.slots_until_halving != null
-          ? `The block reward halves (${noid(n.block_reward_micronoid)} → ${noid(Math.floor(n.block_reward_micronoid / 2))})
-when the live UTXO set expands, which
-happens at ${n.halving_trigger_pct}% of its capacity of
-${int(n.state_capacity)} slots. Live UTXOs now:
+          ? `Net-new live UTXOs still needed before the
+block reward halves (${noid(n.block_reward_micronoid)} → ${noid(Math.floor(n.block_reward_micronoid / 2))}).
+That happens when the UTXO state expands,
+which consensus triggers once ${n.halving_trigger_pct}% of its
+${int(n.state_capacity)} slots - ${int(Math.floor((n.state_capacity * n.halving_trigger_pct) / 100))} live UTXOs
+in total - are occupied in at least 10 of
+18 hard-finalized headers, not the moment
+the line is crossed. Live UTXOs now:
 ${int(n.active_slots)} (${((n.active_slots / n.state_capacity) * 100).toFixed(2)}%).`
           : "Not available from the node.",
     }),
     statCard(n.burned_total_micronoid != null ? noid(n.burned_total_micronoid) : "-", "Burned since genesis", {
-      hint: `Fees destroyed by consensus: 0.0025 NOID
-per net-new UTXO slot at today's occupancy,
-miners only claim the rest. Computed as the
-emission schedule minus the circulating
-supply${burnedShare ? `, ${burnedShare}` : ""}.
-Last 24 hours: ${stats?.burned_fees_24h_micronoid != null ? noid(stats.burned_fees_24h_micronoid) : "-"} (from recorded blocks).`,
+      hint: `NOID destroyed by consensus: the
+state-growth fee on every net-new UTXO
+slot - 0.0025 NOID below 50% occupancy,
+×2 from 50%, ×4 from 75%, ×8 from 90%.
+Miners can only claim the rest of a fee.
+Computed as the emission schedule minus
+the net supply${burnedShare ? `, ${burnedShare}` : ""}.
+Last 24 hours: ${stats?.burned_fees_24h_micronoid != null ? noid(stats.burned_fees_24h_micronoid) : "-"}
+(from recorded blocks).`,
     }),
     statCard(stats ? int(stats.transactions_24h) : "-", "Transactions (24h)", {
       hint: "Transactions in the blocks of the last\n24 hours, from this permanode's records.",
@@ -417,6 +443,23 @@ export function tickerHtml(stats) {
 }
 
 // ---- block ------------------------------------------------------------
+// Miner share vs. consensus burn of a paid fee (from /api/v1/tx).
+function feeBreakdownRows(tx) {
+  const b = tx.fee_breakdown;
+  if (!b) return [];
+  const parts = [`base ${noid(b.base, false)}`, `${b.input / 100} input${b.input === 100 ? "" : "s"} × 0.0001`, `${b.output / 700} output${b.output === 700 ? "" : "s"} × 0.0007`];
+  if (b.tip > 0) parts.push(`tip ${noid(b.tip, false)}`);
+  const miner = `${noid(b.to_miner)} <span class="dim">${parts.join(" + ")}</span>`;
+  const burned =
+    b.net_new_slots > 0
+      ? `${noid(b.burned)} <span class="dim">${int(b.net_new_slots)} net-new UTXO slot${b.net_new_slots === 1 ? "" : "s"} × ${noid(b.burned / b.net_new_slots, false)} (state pressure ${b.multiplier}× at ${(b.occupancy_bps / 100).toFixed(2)}% occupancy)</span>`
+      : `${noid(0)} <span class="dim">no net-new UTXO slot (${tx.inputs.length} in → ${tx.outputs.length} out), so nothing is burned</span>`;
+  return [
+    kvRow("Fee to miner", miner, "t2"),
+    kvRow("Fee burned", burned, "t2"),
+  ];
+}
+
 function kvRow(k, v, cls = "") {
   return `<div><span class="k">${k}</span><span class="v${cls ? " " + cls : ""}">${v}</span></div>`;
 }
@@ -509,6 +552,7 @@ export async function txView(txid) {
     kvRow("Sender", tx.input_owner ? addrLink(tx.input_owner, true) : "—"),
     kvRow(`Receiver${tx.outputs.length > 1 ? "s" : ""}`, receivers),
     kvRow("Fee", noid(tx.fee_micronoid), "t2"),
+    ...feeBreakdownRows(tx),
     kvRow("Fee rate", `${int(feeRateOf({ ...tx, n_inputs: tx.inputs.length, n_outputs: tx.outputs.length }))} µNOID/wu`, "t2"),
     kvRow("Input sum", noid(tx.input_sum_micronoid), "t2"),
     kvRow("Output sum", noid(tx.output_sum_micronoid), "t2"),
@@ -796,7 +840,7 @@ function mempoolStatsHtml(info) {
   const range = !rates.length ? "—" : lo === hi ? int(lo) : `${int(lo)} – ${int(hi)}`;
   return `
     <div class="stat"><span class="v">${int(info.size)} tx</span><span class="k">Pending txs</span></div>
-    <div class="stat"><span class="v">${noid(info.fee_floor)}</span><span class="k">Fee floor</span></div>
+    ${statCard(noid(info.fee_floor), "Fee floor", { hint: FEE_FLOOR_HINT })}
     ${statCard(range, "Fee rate range", { hint: "µNOID per weight unit (inputs + outputs\n+ 4 per net new slot) - the node's own\nmempool priority key." })}`;
 }
 

@@ -354,6 +354,7 @@ main { flex: 1; }
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  margin-right: -14px; /* long values may run into the right padding */
 }
 .stat .v.pos { color: var(--accent); }
 .stat .k {
