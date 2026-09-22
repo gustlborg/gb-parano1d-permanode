@@ -180,6 +180,7 @@ during an update - it is the whole point.
   into miner share and consensus burn, `address/{a}` (recorded and live
   balance, transactions, notices when the recorded figures cannot be
   complete), `address/{a}/utxos`, `mempool`, `richlist`, `gaps`,
+  `orphans` (blocks a reorg replaced, with what took their height),
   `halving` (live-state occupancy against the expansion threshold, the
   finalized trigger window, sampled header history) and `economics`
   (issued vs burned over height, state pressure and burn tiers, minimum
@@ -225,12 +226,29 @@ during an update - it is the whole point.
   list and the address balances complete for addresses that never appear
   in the recorded history. The individual UTXOs are not stored;
   `address/{a}/utxos` loads them from the node on request.
+- **Reorgs** are recorded, not overwritten: a replaced block keeps its row
+  and gets an `orphaned` status entry, so it can still be opened by hash.
+  `/api/v1/orphans` lists them with the block that took their height,
+  `stats.orphaned_blocks` counts them, and a block or transaction with a
+  competing version says so.
 - **Gaps** are heights whose body the node had already pruned when the
   indexer got to them (for example after an outage longer than the
   node's serving window, or on a node that just synced from a snapshot).
   They are listed under `/api/v1/gaps` and counted in `stats`; heights
   still inside the serving window are retried automatically.
   Older ones can be filled from another permanode, see below.
+
+## CSV export
+
+```
+parano1d-permanode -c permanode.toml export --dir export
+```
+
+Writes `blocks.csv`, `transactions.csv`, `inputs.csv`, `outputs.csv`,
+`addresses.csv` and a README into that directory. Join on `tx_id`, not on
+`txid`: a transaction that survived a reorg is recorded once per block it
+was in, so joining on the protocol id double-counts. `canonical = 1`
+selects the chain as it stands.
 
 ## Filling gaps from another permanode
 

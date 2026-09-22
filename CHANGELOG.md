@@ -2,6 +2,19 @@
 
 Notable changes per release. Commit history has the details.
 
+## Unreleased
+
+- **Reorg history is visible.** `/api/v1/orphans` lists the blocks a reorg
+  replaced together with what took their height; `stats.orphaned_blocks`
+  counts them; block responses carry `canonical` and `other_versions`, and
+  a transaction that survived a reorg lists its `other_occurrences`.
+  Replaced blocks can be opened by hash and report no confirmations.
+- **`export --dir DIR`** writes the recorded history as CSV (blocks,
+  transactions, inputs, outputs, addresses) with `tx_id` as the join key,
+  since the protocol `txid` is not unique across reorgs.
+- The economics response caches its 24h/7d/30d aggregates per tip
+  (340 ms cold, 20 ms warm; they scan every recorded block).
+
 ## 0.2.0 - 2026-09-20
 
 The explorer frontend is no longer part of this repository: the
