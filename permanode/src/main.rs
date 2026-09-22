@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use parano1d_permanode::config::Config;
 use parano1d_permanode::rpc::RpcClient;
-use parano1d_permanode::{import, indexer, serve};
+use parano1d_permanode::{export, import, indexer, serve};
 use permanode_core::db;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -30,6 +30,13 @@ enum Command {
     Index,
     /// Only serve the API over an existing database.
     Serve,
+    /// Write the recorded history to CSV files for offline analysis.
+    Export {
+        /// Directory for blocks.csv, transactions.csv, inputs.csv,
+        /// outputs.csv, addresses.csv and a README.
+        #[arg(long, value_name = "DIR", default_value = "export")]
+        dir: PathBuf,
+    },
     /// Fill gaps (blocks recorded without a body) from another
     /// permanode's database or a backup of it. Safe to run while this
     /// permanode is running.
@@ -62,7 +69,23 @@ fn main() -> Result<()> {
         Command::Serve => run_server(&cfg),
         Command::Run => run_both(cfg),
         Command::ImportBodies { from_db } => run_import(&cfg, &from_db),
+        Command::Export { dir } => run_export(&cfg, &dir),
     }
+}
+
+fn run_export(cfg: &Config, dir: &std::path::Path) -> Result<()> {
+    let conn = db::open(&cfg.db_path)?;
+    let r = export::export_csv(&conn, dir)?;
+    log::info!(
+        "export written to {}: {} blocks, {} transactions, {} inputs, {} outputs, {} addresses",
+        dir.display(),
+        r.blocks,
+        r.transactions,
+        r.inputs,
+        r.outputs,
+        r.addresses
+    );
+    Ok(())
 }
 
 fn run_import(cfg: &Config, from_db: &std::path::Path) -> Result<()> {

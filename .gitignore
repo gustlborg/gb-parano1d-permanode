@@ -4,3 +4,6 @@
 /dist/
 # TLS material for the public instance - never commit
 /security/
+
+# Local CSV exports for analysis
+/export/

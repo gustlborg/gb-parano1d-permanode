@@ -45,7 +45,27 @@ pub struct BlockDetail {
     /// tip; `None` if that isn't known yet. 18 and up is final on this
     /// chain (the protocol's maximum reorg depth is 17).
     pub confirmations: Option<i64>,
+    /// False for a block a reorg replaced. Orphaned blocks stay in the
+    /// database and can be opened by hash; the explorer's normal views
+    /// only show canonical ones.
+    pub canonical: bool,
+    /// Other blocks this permanode recorded at the same height - the
+    /// versions a reorg replaced, or the one that replaced this block.
+    pub other_versions: Vec<BlockVersion>,
     pub transactions: Vec<TxSummary>,
+}
+
+/// A competing block at the same height, recorded before or after a reorg.
+#[derive(Debug, Serialize)]
+pub struct BlockVersion {
+    pub hash: String,
+    pub canonical: bool,
+    pub miner: String,
+    pub timestamp: i64,
+    pub tx_count: i64,
+    pub body_captured: bool,
+    /// When this permanode last logged a status for it.
+    pub observed_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -99,6 +119,17 @@ pub struct TxDetail {
     /// See `BlockDetail::confirmations`; `Some(0)` if the block was
     /// orphaned.
     pub confirmations: Option<i64>,
+    /// The same txid recorded in other blocks - a transaction that
+    /// survived a reorg appears once per block it was in. Empty for the
+    /// vast majority of transactions.
+    pub other_occurrences: Vec<TxOccurrence>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TxOccurrence {
+    pub height: i64,
+    pub block_hash: String,
+    pub canonical: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -151,12 +182,28 @@ pub struct ChainStats {
     pub burned_fees_24h_micronoid: Option<String>,
     /// Addresses holding at least one live UTXO per the last sweep.
     pub addresses_with_balance: i64,
+    /// Blocks a reorg replaced. Kept on record instead of overwritten -
+    /// that history is one of the reasons this permanode exists.
+    pub orphaned_blocks: i64,
     /// Outputs recorded on a canonical block whose creation_id has not
     /// (yet) been consumed by any recorded input - the live UTXO set as
     /// far as this permanode's own indexed history can tell. Same caveat
     /// as an address's confirmed balance: outputs already unspent before
     /// this permanode started recording are invisible to it.
     pub live_utxos: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OrphanedBlock {
+    pub height: i64,
+    pub hash: String,
+    pub miner: String,
+    pub timestamp: i64,
+    pub tx_count: i64,
+    pub body_captured: bool,
+    pub observed_at: Option<String>,
+    /// The block that took this height, if this permanode recorded it.
+    pub replaced_by: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -206,9 +253,11 @@ fn block_id_and_row(
         "SELECT blocks.id, blocks.height, blocks.hash, blocks.prev_hash, blocks.state_root,
                 blocks.tx_root, blocks.timestamp, blocks.miner, blocks.nonce_hex,
                 blocks.difficulty_target, blocks.proof_class, blocks.reward_micronoid,
-                blocks.total_fees_micronoid, blocks.body_captured
+                blocks.total_fees_micronoid, blocks.body_captured,
+                ({CANONICAL_BLOCK_FILTER}) AS is_canonical
          FROM blocks
-         WHERE {where_clause} AND {CANONICAL_BLOCK_FILTER}
+         WHERE {where_clause}
+         ORDER BY is_canonical DESC
          LIMIT 1"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -231,6 +280,8 @@ fn block_id_and_row(
                     total_fees_micronoid: row.get(12)?,
                     body_captured: row.get::<_, i64>(13)? != 0,
                     confirmations: None,
+                    canonical: row.get::<_, i64>(14)? != 0,
+                    other_versions: vec![],
                     transactions: vec![],
                 },
             ))
@@ -300,8 +351,69 @@ fn confirmations_for(tip: Option<i64>, height: i64) -> Option<i64> {
 
 fn finish_block(conn: &Connection, block_id: i64, mut detail: BlockDetail) -> Result<BlockDetail> {
     detail.transactions = tx_summaries_for_block(conn, block_id)?;
-    detail.confirmations = confirmations_for(indexed_tip(conn)?, detail.height);
+    // A replaced block has no confirmations: it is not on the chain any
+    // more, however deep its former height lies.
+    detail.confirmations = if detail.canonical { confirmations_for(indexed_tip(conn)?, detail.height) } else { Some(0) };
+    detail.other_versions = block_versions_at(conn, detail.height, block_id)?;
     Ok(detail)
+}
+
+/// Every other block recorded at `height`, newest status first. Empty for
+/// the vast majority of heights; non-empty exactly where a reorg happened.
+fn block_versions_at(conn: &Connection, height: i64, except_block_id: i64) -> Result<Vec<BlockVersion>> {
+    let sql = format!(
+        "SELECT blocks.hash, blocks.miner, blocks.timestamp, blocks.body_captured,
+                ({CANONICAL_BLOCK_FILTER}) AS is_canonical,
+                (SELECT COUNT(*) FROM transactions t WHERE t.block_id = blocks.id) AS tx_count,
+                (SELECT s.observed_at FROM block_status_log s WHERE s.block_id = blocks.id ORDER BY s.id DESC LIMIT 1) AS observed_at
+         FROM blocks
+         WHERE blocks.height = ?1 AND blocks.id <> ?2
+         ORDER BY is_canonical DESC, observed_at DESC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![height, except_block_id], |row| {
+        Ok(BlockVersion {
+            hash: row.get("hash")?,
+            canonical: row.get::<_, i64>("is_canonical")? != 0,
+            miner: row.get("miner")?,
+            timestamp: row.get("timestamp")?,
+            tx_count: row.get("tx_count")?,
+            body_captured: row.get::<_, i64>("body_captured")? != 0,
+            observed_at: row.get("observed_at")?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Blocks a reorg replaced, newest first - the reorg history this
+/// permanode keeps instead of overwriting it.
+pub fn orphaned_blocks(conn: &Connection, limit: i64) -> Result<Vec<OrphanedBlock>> {
+    let sql = format!(
+        "SELECT blocks.height, blocks.hash, blocks.miner, blocks.timestamp, blocks.body_captured,
+                (SELECT COUNT(*) FROM transactions t WHERE t.block_id = blocks.id) AS tx_count,
+                (SELECT s.observed_at FROM block_status_log s WHERE s.block_id = blocks.id ORDER BY s.id DESC LIMIT 1) AS observed_at,
+                (SELECT b2.hash FROM blocks b2 WHERE b2.height = blocks.height AND b2.id <> blocks.id
+                   AND ({canonical_on_b2}) LIMIT 1) AS replaced_by
+         FROM blocks
+         WHERE NOT ({CANONICAL_BLOCK_FILTER})
+         ORDER BY blocks.height DESC
+         LIMIT ?1",
+        canonical_on_b2 = canonical_filter_on("b2")
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![limit.clamp(1, 500)], |row| {
+        Ok(OrphanedBlock {
+            height: row.get("height")?,
+            hash: row.get("hash")?,
+            miner: row.get("miner")?,
+            timestamp: row.get("timestamp")?,
+            tx_count: row.get("tx_count")?,
+            body_captured: row.get::<_, i64>("body_captured")? != 0,
+            observed_at: row.get("observed_at")?,
+            replaced_by: row.get("replaced_by")?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 pub fn block_by_height(conn: &Connection, height: i64) -> Result<Option<BlockDetail>> {
@@ -357,6 +469,7 @@ pub fn tx_by_txid(conn: &Connection, txid: &str) -> Result<Option<TxDetail>> {
                         canonical: row.get::<_, i64>(13)? != 0,
                     },
                     confirmations: None,
+                    other_occurrences: vec![],
                 },
             ))
         })
@@ -369,6 +482,26 @@ pub fn tx_by_txid(conn: &Connection, txid: &str) -> Result<Option<TxDetail>> {
     } else {
         Some(0)
     };
+
+    // The same txid can sit in more than one block: a transaction that
+    // survived a reorg was re-mined into the replacement block, and this
+    // permanode keeps both.
+    let occurrence_sql = format!(
+        "SELECT b.height, b.hash, ({canonical_on_b}) AS is_canonical
+         FROM transactions t JOIN blocks b ON b.id = t.block_id
+         WHERE t.txid = ?1 AND t.id <> ?2
+         ORDER BY is_canonical DESC, b.height DESC"
+    );
+    let mut occ_stmt = conn.prepare(&occurrence_sql)?;
+    detail.other_occurrences = occ_stmt
+        .query_map(params![txid, tx_id], |row| {
+            Ok(TxOccurrence {
+                height: row.get("height")?,
+                block_hash: row.get("hash")?,
+                canonical: row.get::<_, i64>("is_canonical")? != 0,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
 
     let mut ph_stmt = conn.prepare(
         "SELECT page_hash FROM tx_page_hashes WHERE tx_id = ?1 ORDER BY idx ASC",
@@ -460,6 +593,17 @@ fn chrono_now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// The canonical-status predicate for the `blocks` table, for callers
+/// outside this module that build their own SQL (the CSV export).
+pub fn canonical_block_filter() -> String {
+    CANONICAL_BLOCK_FILTER.to_string()
+}
+
+/// Same predicate for a different table alias.
+pub fn canonical_block_filter_on(block_alias: &str) -> String {
+    canonical_filter_on(block_alias)
 }
 
 fn canonical_filter_on(block_alias: &str) -> String {
@@ -640,6 +784,11 @@ pub fn chain_stats(conn: &Connection) -> Result<ChainStats> {
     };
     let addresses_with_balance: i64 =
         conn.query_row("SELECT COUNT(*) FROM address_balance_cache WHERE live_utxo_count > 0", [], |r| r.get(0))?;
+    let orphaned_blocks: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM blocks WHERE NOT ({CANONICAL_BLOCK_FILTER})"),
+        [],
+        |r| r.get(0),
+    )?;
 
     let canonical_on_b = canonical_filter_on("b");
     let canonical_on_b2 = canonical_filter_on("b2");
@@ -672,6 +821,7 @@ pub fn chain_stats(conn: &Connection) -> Result<ChainStats> {
         transactions_24h,
         burned_fees_24h_micronoid,
         addresses_with_balance,
+        orphaned_blocks,
         live_utxos,
     })
 }
@@ -781,7 +931,7 @@ pub fn burn_by_block(conn: &Connection) -> Result<Vec<(u64, u128)>> {
 }
 
 /// What the recorded blocks since `since_unix` did to the live state.
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Serialize, Default, Clone)]
 pub struct StateActivity {
     /// Recorded canonical blocks with a body in the period.
     pub blocks: u64,

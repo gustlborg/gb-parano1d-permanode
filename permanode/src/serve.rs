@@ -55,6 +55,10 @@ struct AppState {
     /// The finalized expansion window for the tip it was computed at;
     /// headers are permanent, so it only changes when the tip moves.
     window_cache: Mutex<Option<(u64, Vec<WindowHeader>)>>,
+    /// The economics page's 24h/7d/30d aggregates, which scan every
+    /// recorded block and get slower as the history grows. Recomputed
+    /// when the tip moves on or the entry is older than a minute.
+    period_cache: Mutex<Option<(i64, i64, Vec<PeriodActivity>)>>,
 }
 
 #[derive(Default)]
@@ -116,6 +120,7 @@ pub async fn run(cfg: &Config) -> Result<()> {
         expansions: Mutex::new(None),
         state_history: Mutex::new(StateHistory::default()),
         window_cache: Mutex::new(None),
+        period_cache: Mutex::new(None),
     });
 
     let api = Router::new()
@@ -127,6 +132,7 @@ pub async fn run(cfg: &Config) -> Result<()> {
         .route("/api/v1/address/{address}", get(get_address))
         .route("/api/v1/address/{address}/utxos", get(get_address_utxos))
         .route("/api/v1/gaps", get(get_gaps))
+        .route("/api/v1/orphans", get(get_orphans))
         .route("/api/v1/richlist", get(get_richlist))
         .route("/api/v1/mempool", get(get_mempool))
         .route("/api/v1/halving", get(get_halving))
@@ -588,6 +594,13 @@ async fn get_gaps(State(state): State<Arc<AppState>>) -> ApiResult<Vec<queries::
     Ok(Json(queries::recent_gaps(&conn, 100)?))
 }
 
+/// Blocks a reorg replaced. Kept on record; normal views show only the
+/// canonical chain, this is the trail behind it.
+async fn get_orphans(State(state): State<Arc<AppState>>, Query(q): Query<LimitQuery>) -> ApiResult<Vec<queries::OrphanedBlock>> {
+    let conn = state.db();
+    Ok(Json(queries::orphaned_blocks(&conn, q.limit.unwrap_or(100))?))
+}
+
 async fn get_richlist(State(state): State<Arc<AppState>>) -> ApiResult<Vec<queries::RichListEntry>> {
     let conn = state.db();
     Ok(Json(queries::richlist(&conn, 100)?))
@@ -866,7 +879,7 @@ struct EconomicsPoint {
     burned_estimate_micronoid: Option<String>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Clone)]
 struct PeriodActivity {
     label: &'static str,
     seconds: i64,
@@ -881,10 +894,22 @@ async fn get_economics(State(state): State<Arc<AppState>>) -> ApiResult<Economic
         .unwrap_or(0);
     let (burn_by_block, periods) = {
         let conn = state.db();
-        let mut periods = Vec::new();
-        for (label, seconds) in [("24h", 86_400i64), ("7d", 7 * 86_400), ("30d", 30 * 86_400)] {
-            periods.push(PeriodActivity { label, seconds, activity: queries::state_activity(&conn, now_unix - seconds)? });
-        }
+        let tip = queries::indexed_tip(&conn)?.unwrap_or(0);
+        let cached = {
+            let cache = state.period_cache.lock().unwrap_or_else(|e| e.into_inner());
+            cache.as_ref().filter(|(h, at, _)| *h == tip && now_unix - *at < 60).map(|(_, _, p)| p.clone())
+        };
+        let periods = match cached {
+            Some(p) => p,
+            None => {
+                let mut periods = Vec::new();
+                for (label, seconds) in [("24h", 86_400i64), ("7d", 7 * 86_400), ("30d", 30 * 86_400)] {
+                    periods.push(PeriodActivity { label, seconds, activity: queries::state_activity(&conn, now_unix - seconds)? });
+                }
+                *state.period_cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((tip, now_unix, periods.clone()));
+                periods
+            }
+        };
         (queries::burn_by_block(&conn)?, periods)
     };
 
