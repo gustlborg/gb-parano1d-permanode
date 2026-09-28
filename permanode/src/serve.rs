@@ -235,6 +235,9 @@ struct StatsResponse {
     donation_address: Option<String>,
     /// Size of the database on disk (main file plus write-ahead log).
     db_bytes: Option<u64>,
+    /// Rules of the next block and the v2 activation; `None` if the node
+    /// is unreachable.
+    protocol: Option<ProtocolInfo>,
 }
 
 #[derive(serde::Serialize, Default)]
@@ -287,20 +290,25 @@ async fn get_stats(State(state): State<Arc<AppState>>) -> ApiResult<StatsRespons
     };
 
     let state_for_rpc = Arc::clone(&state);
-    let (active_slots, chain_info, mining_info, state_info, expansions) = tokio::task::spawn_blocking(move || {
+    let (active_slots, chain_info, mining_info, state_info, expansions, protocol) = tokio::task::spawn_blocking(move || {
         let rpc = &state_for_rpc.rpc;
         let chain_info = rpc.get_chain_info().ok();
         let expansions = chain_info.as_ref().and_then(|c| expansion_heights(&state_for_rpc, c.log_slots, c.height));
+        let protocol = chain_info.as_ref().and_then(|c| {
+            let ts = rpc.get_block_header(c.height).ok().flatten()?.timestamp;
+            Some(protocol_info(c.height, ts))
+        });
         (
             rpc.get_active_slot_count().ok(),
             chain_info,
             rpc.get_mining_info().ok(),
             rpc.get_state_info().ok(),
             expansions,
+            protocol,
         )
     })
     .await
-    .unwrap_or((None, None, None, None, None));
+    .unwrap_or((None, None, None, None, None, None));
 
     let (emitted_total_micronoid, burned_total_micronoid) = match (&chain_info, &expansions) {
         (Some(c), Some(exp)) => {
@@ -340,6 +348,7 @@ async fn get_stats(State(state): State<Arc<AppState>>) -> ApiResult<StatsRespons
         address_refresh_interval_seconds: state.address_refresh_interval_seconds,
         donation_address: state.donation_address.clone(),
         db_bytes,
+        protocol,
     }))
 }
 
@@ -616,10 +625,151 @@ async fn get_mempool(State(state): State<Arc<AppState>>) -> ApiResult<live_rpc::
     Ok(Json(info))
 }
 
+/// Which rules the chain follows and when v2 starts. The explorer switches
+/// its halving and economics views once `active` is true.
+#[derive(serde::Serialize, Clone)]
+struct ProtocolInfo {
+    /// `"v1.1"` until block 210,537 exists, `"v2"` from then on.
+    version: &'static str,
+    active: bool,
+    activation_height: u64,
+    /// Blocks still to be mined up to and including the activation block.
+    blocks_until_activation: u64,
+    /// Estimated time of the activation block at the target block time,
+    /// counted from the tip's timestamp; `None` once active.
+    activation_eta_unix: Option<u64>,
+    /// Target interval of the next block, in seconds.
+    target_block_time_seconds: u64,
+}
+
+fn protocol_info(tip: u64, tip_timestamp: u64) -> ProtocolInfo {
+    use permanode_core::emission::{block_time_at, target_seconds_between, v2_active, V2_ACTIVATION_HEIGHT};
+    let active = v2_active(tip);
+    ProtocolInfo {
+        version: if active { "v2" } else { "v1.1" },
+        active,
+        activation_height: V2_ACTIVATION_HEIGHT,
+        blocks_until_activation: V2_ACTIVATION_HEIGHT.saturating_sub(tip),
+        activation_eta_unix: (!active).then(|| tip_timestamp + target_seconds_between(tip, V2_ACTIVATION_HEIGHT)),
+        target_block_time_seconds: block_time_at(tip + 1),
+    }
+}
+
+/// One interval of the v2 reward schedule.
+#[derive(serde::Serialize)]
+struct RewardTier {
+    tier: usize,
+    first_height: u64,
+    /// `None` for the tail, which never ends.
+    last_height: Option<u64>,
+    reward_micronoid: u64,
+    /// Gross subsidy of the whole interval; `None` for the tail.
+    interval_total_micronoid: Option<String>,
+    /// Gross issuance from genesis to the interval's last block, before
+    /// burns (a projection for intervals still ahead); `None` for the tail.
+    issued_at_end_micronoid: Option<String>,
+    /// `"done"`, `"current"` or `"upcoming"`.
+    status: &'static str,
+    /// Estimated start at the target block time; `None` once started.
+    eta_unix: Option<u64>,
+}
+
+/// The v2 reward schedule as seen from `tip` - also before the fork, so
+/// the explorer can preview it.
+#[derive(serde::Serialize)]
+struct V2Schedule {
+    interval_blocks: u64,
+    tiers: Vec<RewardTier>,
+    current_tier: Option<usize>,
+    /// The next block with a lower reward (the activation block itself
+    /// while the fork lies ahead); `None` in the tail.
+    next_reduction_height: Option<u64>,
+    blocks_to_next_reduction: Option<u64>,
+    next_reduction_eta_unix: Option<u64>,
+    next_reward_micronoid: Option<u64>,
+    /// Share of the current interval already mined, in basis points.
+    interval_progress_bps: Option<u64>,
+    /// Gross issuance of all legacy blocks (projected while they lie ahead).
+    legacy_issued_micronoid: String,
+    /// Reward of the last legacy block (50 NOID unless the state expanded).
+    legacy_reward_micronoid: u64,
+    issued_since_activation_micronoid: String,
+    eight_interval_total_micronoid: String,
+    tail_height: u64,
+    tail_reward_micronoid: u64,
+    /// Development share of the incomplete legacy day before the fork,
+    /// which is never paid out.
+    unpaid_legacy_share_micronoid: String,
+}
+
+fn v2_schedule(tip: u64, tip_timestamp: u64, expansions: &[u64]) -> V2Schedule {
+    use permanode_core::emission::*;
+    let eta = |height: u64| (height > tip).then(|| tip_timestamp + target_seconds_between(tip, height));
+    let n = V2_REWARDS_MICRONOID.len();
+    let current_tier = v2_tier(tip);
+    let tiers = (0..n)
+        .map(|tier| {
+            let first = v2_tier_first_height(tier);
+            let last = (tier + 1 < n).then(|| v2_tier_first_height(tier + 1) - 1);
+            let reward = V2_REWARDS_MICRONOID[tier];
+            RewardTier {
+                tier,
+                first_height: first,
+                last_height: last,
+                reward_micronoid: reward,
+                interval_total_micronoid: last.map(|_| (reward as u128 * V2_REWARD_INTERVAL_BLOCKS as u128).to_string()),
+                issued_at_end_micronoid: last.map(|l| emitted_up_to(l, expansions).to_string()),
+                status: match current_tier {
+                    Some(c) if tier < c => "done",
+                    Some(c) if tier == c => "current",
+                    _ => "upcoming",
+                },
+                eta_unix: eta(first),
+            }
+        })
+        .collect();
+    let next_reduction_height = match current_tier {
+        None => Some(V2_ACTIVATION_HEIGHT),
+        Some(c) if c + 1 < n => Some(v2_tier_first_height(c + 1)),
+        Some(_) => None,
+    };
+    let last_legacy = V2_ACTIVATION_HEIGHT - 1;
+    let legacy_log_slots = LOG_SLOTS_GENESIS + expansions.iter().filter(|h| **h <= last_legacy).count() as u32;
+    let unpaid_blocks = last_legacy - (last_legacy / BLOCKS_PER_DAY) * BLOCKS_PER_DAY;
+    let legacy_issued = emitted_up_to(last_legacy, expansions);
+    V2Schedule {
+        interval_blocks: V2_REWARD_INTERVAL_BLOCKS,
+        tiers,
+        current_tier,
+        next_reduction_height,
+        blocks_to_next_reduction: next_reduction_height.map(|h| h.saturating_sub(tip)),
+        next_reduction_eta_unix: next_reduction_height.and_then(eta),
+        next_reward_micronoid: next_reduction_height.map(|h| block_reward_at(h, legacy_log_slots)),
+        interval_progress_bps: current_tier.filter(|c| c + 1 < n).map(|c| {
+            (tip + 1 - v2_tier_first_height(c)) * 10_000 / V2_REWARD_INTERVAL_BLOCKS
+        }),
+        legacy_issued_micronoid: legacy_issued.to_string(),
+        legacy_reward_micronoid: block_reward(legacy_log_slots),
+        issued_since_activation_micronoid: if v2_active(tip) {
+            (emitted_up_to(tip, expansions) - legacy_issued).to_string()
+        } else {
+            "0".to_string()
+        },
+        eight_interval_total_micronoid: V2_REWARDS_MICRONOID[..n - 1]
+            .iter()
+            .map(|r| *r as u128 * V2_REWARD_INTERVAL_BLOCKS as u128)
+            .sum::<u128>()
+            .to_string(),
+        tail_height: v2_tier_first_height(n - 1),
+        tail_reward_micronoid: V2_REWARDS_MICRONOID[n - 1],
+        unpaid_legacy_share_micronoid: (2 * (block_reward(legacy_log_slots) / 20) as u128 * unpaid_blocks as u128).to_string(),
+    }
+}
+
 /// Everything the halving page needs: where the live state stands
 /// against the expansion threshold, the finalized window that decides
 /// it, and a sampled history of the live-UTXO count from the permanent
-/// headers. Mirrors `noid_chain::consensus::slot_expansion` (v1.1.0):
+/// headers. Mirrors `noid_chain::consensus::slot_expansion` (unchanged in v2.0.0):
 /// the child of `tip` expands when a strict majority of the 18
 /// hard-finalized headers `tip-35 ..= tip-18` report at least 75%
 /// occupancy.
@@ -636,10 +786,13 @@ struct HalvingResponse {
     window: Vec<WindowHeader>,
     history_step: u64,
     history: Vec<[u64; 2]>,
+    /// Gross reward of the next block (legacy: by state size, v2: by height).
     block_reward_micronoid: u64,
     multiplier: u64,
     burn_per_new_slot_micronoid: u64,
     pressure_thresholds: Vec<PressureThreshold>,
+    protocol: ProtocolInfo,
+    v2: V2Schedule,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -663,6 +816,8 @@ async fn get_halving(State(state): State<Arc<AppState>>) -> ApiResult<HalvingRes
         let tip = chain.height;
         let capacity = 1u64 << chain.log_slots;
         let threshold = capacity / 4 * 3;
+        let tip_timestamp = rpc.get_block_header(tip)?.map_or(0, |h| h.timestamp);
+        let expansions = expansion_heights(&st, chain.log_slots, tip).unwrap_or_default();
 
         let window = finalized_window(&st, tip, capacity)?;
         let (history_step, samples) = sampled_state_history(&st, tip)?;
@@ -683,10 +838,12 @@ async fn get_halving(State(state): State<Arc<AppState>>) -> ApiResult<HalvingRes
             window,
             history_step,
             history,
-            block_reward_micronoid: permanode_core::emission::block_reward(chain.log_slots),
+            block_reward_micronoid: permanode_core::emission::block_reward_at(tip + 1, chain.log_slots),
             multiplier: permanode_core::fees::pressure_multiplier(chain.active_slot_count, chain.log_slots),
             burn_per_new_slot_micronoid: permanode_core::fees::state_growth_fee_per_slot(chain.active_slot_count, chain.log_slots),
             pressure_thresholds: pressure_thresholds(capacity),
+            protocol: protocol_info(tip, tip_timestamp),
+            v2: v2_schedule(tip, tip_timestamp, &expansions),
         })
     })
     .await
@@ -748,9 +905,10 @@ fn sampled_state_history(st: &AppState, tip: u64) -> anyhow::Result<(u64, Vec<He
 
 /// Live outputs created by transactions (not by coinbases or development
 /// payouts) up to `height`, from the header's mint counter: every block
-/// mints one coinbase output, every payout block two more.
+/// mints one coinbase output, every payout block two more (legacy every
+/// 4,320th block, v2 on its own 2,880-block rhythm).
 fn user_mints(sample: &HeaderSample) -> u64 {
-    let minted_by_consensus = sample.height + 2 * (sample.height / permanode_core::emission::BLOCKS_PER_DAY);
+    let minted_by_consensus = sample.height + 2 * permanode_core::emission::development_payout_blocks_up_to(sample.height);
     sample.alloc_counter.saturating_sub(minted_by_consensus)
 }
 
@@ -799,11 +957,15 @@ struct EconomicsResponse {
     total_issued_micronoid: String,
     total_burned_micronoid: String,
     net_supply_micronoid: String,
+    /// Target blocks per year at the next block's interval (20 s: 1,576,800,
+    /// v2 30 s: 1,051,200).
     blocks_per_year: u64,
     /// Current reward times the target blocks per year - a projection at
     /// target block time, not a guaranteed figure.
     annualized_issuance_micronoid: String,
     development: DevelopmentAllocation,
+    protocol: ProtocolInfo,
+    v2: V2Schedule,
     history_step: u64,
     /// Issued from genesis at every sample; burned exact where the
     /// records allow it (the total at the tip walked backwards through
@@ -857,12 +1019,21 @@ fn min_burn_bands(active: u64, log_slots: u32, thresholds: &[PressureThreshold],
 
 #[derive(serde::Serialize)]
 struct DevelopmentAllocation {
+    /// Last block of the allocation under the network's schedule (the
+    /// fork converts the remaining three years into 30 s blocks).
     end_height: u64,
+    /// Where it would have ended under the pre-v2 rule (never reached).
+    legacy_end_height: u64,
+    /// Blocks per payout at the next payout (4,320 legacy, 2,880 v2).
     payout_interval: u64,
     active: bool,
     next_payout_height: Option<u64>,
-    /// Per fund, at the current reward.
+    /// Per fund, at the next payout.
     payout_per_fund_micronoid: u64,
+    last_legacy_payout_height: u64,
+    first_v2_payout_height: u64,
+    /// Blocks covered by the final, partial v2 payout at `end_height`.
+    final_partial_blocks: u64,
     cumulative_miner_micronoid: String,
     /// Each of the two funds has received this much so far.
     cumulative_per_fund_micronoid: String,
@@ -926,7 +1097,10 @@ async fn get_economics(State(state): State<Arc<AppState>>) -> ApiResult<Economic
         let issued = split.miner + split.development;
         let supply: u128 = chain.circulating_supply_micronoid.parse().unwrap_or(0);
         let burned = issued.saturating_sub(supply);
-        let reward = emission::block_reward(chain.log_slots);
+        let reward = emission::block_reward_at(tip + 1, chain.log_slots);
+        let blocks_per_year = 365 * 86_400 / emission::block_time_at(tip + 1);
+        let tip_timestamp = rpc.get_block_header(tip)?.map_or(0, |h| h.timestamp);
+        let next_payout = emission::next_development_payout_height(tip);
         let window = finalized_window(&st, tip, capacity)?;
         let (history_step, mut samples) = sampled_state_history(&st, tip)?;
         if samples.last().map_or(true, |p| p.height != tip) {
@@ -996,14 +1170,24 @@ async fn get_economics(State(state): State<Arc<AppState>>) -> ApiResult<Economic
             total_issued_micronoid: issued.to_string(),
             total_burned_micronoid: burned.to_string(),
             net_supply_micronoid: supply.to_string(),
-            blocks_per_year: BLOCKS_PER_YEAR,
-            annualized_issuance_micronoid: (reward as u128 * BLOCKS_PER_YEAR as u128).to_string(),
+            blocks_per_year,
+            annualized_issuance_micronoid: (reward as u128 * blocks_per_year as u128).to_string(),
+            protocol: protocol_info(tip, tip_timestamp),
+            v2: v2_schedule(tip, tip_timestamp, &expansions),
             development: DevelopmentAllocation {
                 end_height: emission::DEVELOPMENT_ALLOCATION_END_HEIGHT,
-                payout_interval: emission::BLOCKS_PER_DAY,
+                legacy_end_height: emission::LEGACY_DEVELOPMENT_ALLOCATION_END_HEIGHT,
+                payout_interval: if next_payout.is_some_and(emission::v2_active) {
+                    emission::V2_BLOCKS_PER_DAY
+                } else {
+                    emission::BLOCKS_PER_DAY
+                },
                 active: dev_active,
-                next_payout_height: emission::next_development_payout_height(tip),
-                payout_per_fund_micronoid: emission::development_payout(emission::BLOCKS_PER_DAY, chain.log_slots) / 2,
+                next_payout_height: next_payout,
+                payout_per_fund_micronoid: next_payout.map_or(0, |h| emission::development_payout(h, chain.log_slots) / 2),
+                last_legacy_payout_height: (emission::V2_ACTIVATION_HEIGHT - 1) / emission::BLOCKS_PER_DAY * emission::BLOCKS_PER_DAY,
+                first_v2_payout_height: emission::V2_ACTIVATION_HEIGHT - 1 + emission::V2_BLOCKS_PER_DAY,
+                final_partial_blocks: (emission::DEVELOPMENT_ALLOCATION_END_HEIGHT - (emission::V2_ACTIVATION_HEIGHT - 1)) % emission::V2_BLOCKS_PER_DAY,
                 cumulative_miner_micronoid: split.miner.to_string(),
                 cumulative_per_fund_micronoid: (split.development / 2).to_string(),
             },
@@ -1016,9 +1200,6 @@ async fn get_economics(State(state): State<Arc<AppState>>) -> ApiResult<Economic
     .map_err(anyhow::Error::from)??;
     Ok(Json(resp))
 }
-
-/// Target blocks per year at the 20 s block target.
-const BLOCKS_PER_YEAR: u64 = 365 * permanode_core::emission::BLOCKS_PER_DAY;
 
 enum ApiErrorOr404 {
     Error(ApiError),

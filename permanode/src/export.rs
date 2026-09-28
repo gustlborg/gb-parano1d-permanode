@@ -82,13 +82,14 @@ pub fn export_csv(conn: &Connection, dir: &Path) -> Result<ExportReport> {
     let transactions = write_query(
         conn,
         &dir.join("transactions.csv"),
-        "tx_id,txid,block_height,block_hash,timestamp,time_utc,fee,canonical,finalized,coinbase,development_payout,sender,input_sum,output_sum,tx_position,page_count",
+        "tx_id,txid,block_height,block_hash,timestamp,time_utc,fee,canonical,finalized,coinbase,development_payout,sender,input_sum,output_sum,tx_position,page_count,contract",
         &format!(
             "SELECT t.id, t.txid, b.height, b.hash, b.timestamp, datetime(b.timestamp,'unixepoch'),
                     t.fee_micronoid, ({canonical_b}), CASE WHEN {tip} - b.height + 1 >= 18 THEN 1 ELSE 0 END,
                     t.coinbase, t.development_payout, t.input_owner,
                     CAST(t.input_sum_micronoid AS INTEGER), CAST(t.output_sum_micronoid AS INTEGER),
-                    t.position, t.page_count
+                    t.position, t.page_count,
+                    CASE WHEN t.contract_flags & 2 != 0 THEN 'close' WHEN t.contract_flags != 0 THEN 'call' ELSE '' END
              FROM transactions t JOIN blocks b ON b.id = t.block_id
              ORDER BY b.height, t.position",
             canonical_b = queries::canonical_block_filter_on("b")
@@ -155,6 +156,9 @@ outputs.csv: unspent = canonical = 1 AND spent = 0 AND spent_in_gap = 0.
 spent_in_gap marks an output that is gone from the node's UTXO state
 although no recorded transaction spends it - its spend sits in a block
 whose body this permanode never got.
+
+transactions.csv: contract = call / close marks a v2 contract call (from
+block 210537); the contract's successor address is the call's first output.
 
 addresses.csv holds live balances read from the node's UTXO state by the
 periodic sweep. They are authoritative and cover addresses that never

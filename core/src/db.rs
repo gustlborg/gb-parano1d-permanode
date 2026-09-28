@@ -76,12 +76,18 @@ fn migrate_locked(conn: &Connection) -> Result<()> {
     // per expansion). NULL on rows recorded before this column existed;
     // readers treat that as the genesis value, which every block so far has.
     add_column_if_missing(conn, "blocks", "log_slots", "INTEGER")?;
+    // v2 contract calls (bit 0: call, bit 1: closes the contract), read
+    // from the raw block bytes because getBlockDetails does not report
+    // them; `contracts_scanned` marks v2 blocks whose bytes were checked.
+    add_column_if_missing(conn, "transactions", "contract_flags", "INTEGER NOT NULL DEFAULT 0")?;
+    add_column_if_missing(conn, "blocks", "contracts_scanned", "INTEGER")?;
     // Unspent-output queries match outputs against inputs by creation_id;
     // without these every such query is outputs x inputs.
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_inputs_creation ON tx_inputs(creation_id);
          CREATE INDEX IF NOT EXISTS idx_outputs_creation ON tx_outputs(creation_id);
-         CREATE INDEX IF NOT EXISTS idx_blocks_timestamp ON blocks(timestamp);",
+         CREATE INDEX IF NOT EXISTS idx_blocks_timestamp ON blocks(timestamp);
+         CREATE INDEX IF NOT EXISTS idx_tx_contract ON transactions(block_id) WHERE contract_flags != 0;",
     )?;
     Ok(())
 }
@@ -313,6 +319,31 @@ pub fn uncaptured_block_id(conn: &Connection, height: u64, hash: &str) -> Result
 
 /// Marks an existing block row's body as now captured (via the getBlock
 /// fallback), after its transaction rows have been inserted by the caller.
+/// Records the contract calls of the block `(height, hash)` found in its
+/// raw bytes and marks the block as scanned. Positions not listed are
+/// ordinary transactions.
+pub fn set_contract_flags(conn: &Connection, height: u64, hash: &str, flags: &[(u32, u8)]) -> Result<()> {
+    let Some(block_id) = conn
+        .query_row(
+            "SELECT id FROM blocks WHERE height = ?1 AND hash = ?2",
+            params![height as i64, hash],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+    else {
+        return Ok(());
+    };
+    conn.execute("UPDATE transactions SET contract_flags = 0 WHERE block_id = ?1 AND contract_flags != 0", params![block_id])?;
+    for (position, f) in flags {
+        conn.execute(
+            "UPDATE transactions SET contract_flags = ?3 WHERE block_id = ?1 AND position = ?2",
+            params![block_id, *position as i64, *f as i64],
+        )?;
+    }
+    conn.execute("UPDATE blocks SET contracts_scanned = 1 WHERE id = ?1", params![block_id])?;
+    Ok(())
+}
+
 pub fn mark_body_recovered(conn: &Connection, block_id: i64, body_source: &str) -> Result<()> {
     conn.execute(
         "UPDATE blocks SET body_captured = 1, body_source = ?2 WHERE id = ?1",

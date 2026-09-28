@@ -1,24 +1,19 @@
-//! Fallback decoder for `paranoid_getBlock` bytes, used when
-//! `paranoid_getBlockDetails` reports `retained: null` for a block that is
-//! still within the node's serving window.
+//! Decoder for `paranoid_getBlock` bytes. Two uses:
 //!
-//! Root cause (full analysis: `docs/node-rpc-marker-bug/REPORT.md`):
-//! the node stores every accepted block's body, but for every "marker"
-//! block of a multi-block commit (a catch-up suffix of ≥2 blocks, or a
-//! reorg that applies ≥2 blocks) `getBlockDetails`/`getRecentTransactions`
-//! go through a bundle accessor that deliberately hides marker blocks
-//! (`get_recent_accepted_block_bundle_bounded`, meant for proof-payload
-//! consumers like snapshot generation). `paranoid_getBlock` reads the plain
-//! body store instead and is not affected - ~2.2% of all heights are
-//! markers, so this is permanent, steady, normal operation, not an outage.
+//! - **Fallback** when `paranoid_getBlockDetails` reports `retained: null`
+//!   for a block still inside the node's serving window. Node v1.1.x hid
+//!   every "marker" block of a multi-block commit that way (~2.2% of all
+//!   heights, analysis in `docs/node-rpc-marker-bug/REPORT.md`); v2.0.0
+//!   fixed it, the fallback stays for older nodes and short-lived gaps.
+//! - **Contract flags** of v2 blocks, which getBlockDetails does not report
+//!   (`contract_flags`).
 //!
-//! This module decodes the same body ourselves, deriving fields exactly
-//! the way `noid_rpc::server::get_block_details` does (mirrored step by
-//! step from v1.1.0 `noid_rpc/src/server.rs:1838-2010`), by linking the
-//! node's own crates rather than reimplementing txid/bech32m/paged-spend
-//! logic - verified byte-identical against 40/40 live blocks with existing
-//! `retained` data before this was wired into the indexer, see
-//! `permanode/tests/decode_fixtures.rs`.
+//! Fields are derived exactly the way `noid_rpc::server::get_block_details`
+//! does (mirrored from v2.0.0), by linking the node's own crates rather
+//! than reimplementing txid/bech32m/paged-spend logic - verified
+//! byte-identical against live blocks with existing `retained` data, see
+//! `permanode/tests/decode_fixtures.rs`. The one exception is the proof
+//! class of v2 blocks: it lives only in the proof, never in the body.
 
 use crate::rpc::{
     BlockTransactionInfo, BlockTransactionInputInfo, BlockTransactionOutputInfo, RetainedBlockInfo,
@@ -43,15 +38,8 @@ pub fn decode_retained_block(
         bail!("genesis block has no coinbase/transactions, not a decode target");
     }
 
-    let block = noid_chain::Block::from_bytes(bytes).map_err(|e| anyhow!("decode block: {e:?}"))?;
+    let block = decode_bound_block(bytes, expected_height, expected_hash_hex)?;
     let header = &block.header;
-    if header.height != expected_height {
-        bail!("height mismatch: body claims {}, expected {expected_height}", header.height);
-    }
-    let hash = hex::encode(noid_chain::block_header::block_id(header));
-    if hash != expected_hash_hex {
-        bail!("body hash {hash} != canonical {expected_hash_hex}");
-    }
 
     let stream = noid_chain::validate_block_page_stream(&block.transactions)
         .map_err(|e| anyhow!("page stream: {e}"))?;
@@ -208,9 +196,16 @@ pub fn decode_retained_block(
         .map(|g| u128::from(g.spend.fee))
         .sum::<u128>()
         .to_string();
-    let proof_class = match stream.proof_class {
-        noid_chain::consensus::BlockProofClass::B25 => "B25 / m22",
-        noid_chain::consensus::BlockProofClass::B255 => "B255 / m24",
+    let proof_class = if noid_chain::consensus::params::v2_active(header.height) {
+        // The v2 class (Small/Large) is chosen by the producer and only
+        // recorded in the proof, which getBlock does not carry. The node
+        // itself reports exactly this string once the proof is gone.
+        V2_CLASS_UNAVAILABLE
+    } else {
+        match stream.proof_class {
+            noid_chain::consensus::BlockProofClass::B25 => "B25 / m22",
+            noid_chain::consensus::BlockProofClass::B255 => "B255 / m24",
+        }
     }
     .to_string();
 
@@ -227,4 +222,59 @@ pub fn decode_retained_block(
         block_bytes: bytes.len() as u64,
         transactions,
     })
+}
+
+/// What the node reports as the proof class of a v2 block whose proof it
+/// no longer holds (and what this decoder reports for every v2 block).
+pub const V2_CLASS_UNAVAILABLE: &str = "v2 / class unavailable";
+
+/// Contract flags of one logical transaction, as stored in
+/// `transactions.contract_flags`: a v2 contract call, and additionally
+/// whether that call closes the contract (no successor output).
+pub const CONTRACT_CALL: u8 = 1;
+pub const CONTRACT_CLOSE: u8 = 2;
+
+/// Decodes `paranoid_getBlock` bytes and binds them to the canonical
+/// height and hash from a trusted source (see `decode_retained_block`).
+fn decode_bound_block(bytes: &[u8], expected_height: u64, expected_hash_hex: &str) -> Result<noid_chain::Block> {
+    let block = noid_chain::Block::from_bytes(bytes).map_err(|e| anyhow!("decode block: {e:?}"))?;
+    if block.header.height != expected_height {
+        bail!("height mismatch: body claims {}, expected {expected_height}", block.header.height);
+    }
+    let hash = hex::encode(noid_chain::block_header::block_id(&block.header));
+    if hash != expected_hash_hex {
+        bail!("body hash {hash} != canonical {expected_hash_hex}");
+    }
+    Ok(block)
+}
+
+/// `(position, flags)` of every contract call in a block, from the raw
+/// `paranoid_getBlock` bytes - getBlockDetails does not report them. A call
+/// is a one-page spend whose validity bitmap carries the contract bit; the
+/// terminal bit marks a call that closes the contract.
+pub fn contract_flags(bytes: &[u8], expected_height: u64, expected_hash_hex: &str) -> Result<Vec<(u32, u8)>> {
+    let block = decode_bound_block(bytes, expected_height, expected_hash_hex)?;
+    contract_flags_of(&block.transactions)
+}
+
+pub fn contract_flags_of(transactions: &[noid_tx::Transaction]) -> Result<Vec<(u32, u8)>> {
+    let stream = noid_chain::validate_block_page_stream(transactions).map_err(|e| anyhow!("page stream: {e}"))?;
+    let mut flags = Vec::new();
+    for (index, group) in stream.groups.iter().enumerate() {
+        let first = transactions
+            .get(stream.user_body_start(usize::from(group.start_page)))
+            .context("page range")?;
+        let bitmap = first.body.validity_bitmap;
+        let mut f = 0u8;
+        if bitmap & noid_tx::PAGED_SPEND_CONTRACT_BIT != 0 {
+            f |= CONTRACT_CALL;
+            if bitmap & noid_tx::PAGED_SPEND_TERMINAL_BIT != 0 {
+                f |= CONTRACT_CLOSE;
+            }
+        }
+        if f != 0 {
+            flags.push((stream.user_logical_index(index) as u32, f));
+        }
+    }
+    Ok(flags)
 }

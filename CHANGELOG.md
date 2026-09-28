@@ -4,6 +4,26 @@ Notable changes per release. Commit history has the details.
 
 ## Unreleased
 
+- **Parano1d v2 support** (fork at block 210 537). Requires node v2.0.0
+  before that height. The emission mirror follows the height-based v2
+  schedule (16 → 11.30 → … → 1 NOID per 1 051 200 blocks), the converted
+  development allocation (ends at 3 223 778, pays every 2 880 blocks from
+  213 416, the incomplete legacy day is never paid) and the 30 s block
+  time; a test holds it against the node's own code at every boundary.
+- `/api/v1/stats`, `/halving` and `/economics` carry `protocol` (active
+  version, activation height and estimate, target block time);
+  `/halving` and `/economics` add the `v2` reward schedule (tiers,
+  next reduction, progress, issued since activation), and the development
+  section reports the payout rhythm at the next payout.
+- **Contract calls** are read from the raw block bytes of v2 blocks
+  (getBlockDetails does not report them): transactions carry
+  `contract: "call" | "close"`, block lists `contract_calls`, and the CSV
+  export a `contract` column.
+- The v2 proof class (Small/Large) lives only in the proof, which the node
+  drops after ~42 blocks: it is kept as first reported and never replaced
+  by `"v2 / class unavailable"`; the decoder self-check ignores it for v2.
+- The decoder links node crates v2.0.0.
+
 - **Reorg history is visible.** `/api/v1/orphans` lists the blocks a reorg
   replaced together with what took their height; `stats.orphaned_blocks`
   counts them; block responses carry `canonical` and `other_versions`, and

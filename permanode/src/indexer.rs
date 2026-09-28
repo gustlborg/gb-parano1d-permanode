@@ -121,7 +121,8 @@ fn poll_once(conn: &Connection, rpc: &RpcClient, cfg: &Config) -> Result<()> {
 /// What happened when we tried the getBlock fallback for a height whose
 /// getBlockDetails came back with `retained: null`.
 enum FallbackOutcome {
-    Recovered(RetainedBlockInfo),
+    /// The decoded body and the raw bytes it came from.
+    Recovered(RetainedBlockInfo, Vec<u8>),
     /// getBlock also has nothing (outside its serving window, or the node
     /// genuinely never had this body) - not the decoder's fault.
     NoBody,
@@ -141,10 +142,47 @@ fn try_getblock_fallback(rpc: &RpcClient, height: u64, expected_hash: &str) -> F
         }
     };
     match decode::decode_retained_block(&raw, height, expected_hash) {
-        Ok(retained) => FallbackOutcome::Recovered(retained),
+        Ok(retained) => FallbackOutcome::Recovered(retained, raw),
         Err(e) => {
             error!("height {height}: getBlock body could not be decoded: {e:#}");
             FallbackOutcome::DecodeFailed(e.to_string())
+        }
+    }
+}
+
+/// Raw getBlock bytes for `height`, `None` if the node has none (outside
+/// its serving window) or the call failed (logged).
+fn fetch_raw(rpc: &RpcClient, height: u64) -> Option<Vec<u8>> {
+    match rpc.get_block_raw(height) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            warn!("height {height}: getBlock RPC call failed: {e:#}");
+            None
+        }
+    }
+}
+
+/// Stores the contract calls of a v2 block, read from its raw bytes. Left
+/// unscanned (`contracts_scanned` NULL) if the bytes are missing or do not
+/// decode - the block itself is stored either way.
+fn record_contract_flags(conn: &Connection, height: u64, hash: &str, raw: Option<&[u8]>) -> Result<()> {
+    if !permanode_core::emission::v2_active(height) {
+        return Ok(());
+    }
+    let Some(raw) = raw else {
+        warn!("height {height}: no raw bytes, contract calls not scanned");
+        return Ok(());
+    };
+    match decode::contract_flags(raw, height, hash) {
+        Ok(flags) => {
+            if !flags.is_empty() {
+                info!("height {height}: {} contract call(s)", flags.len());
+            }
+            db::set_contract_flags(conn, height, hash, &flags)
+        }
+        Err(e) => {
+            warn!("height {height}: contract scan inconclusive: {e:#}");
+            Ok(())
         }
     }
 }
@@ -167,7 +205,9 @@ fn first_start_height(rpc: &RpcClient, tip: u64) -> u64 {
 /// What a height should be written as, decided before any database write
 /// so the write itself can be a single transaction.
 enum BodyOutcome {
-    Store(BlockDetailsInfo, &'static str),
+    /// Details with a body, its source, and the raw getBlock bytes if they
+    /// were already fetched.
+    Store(BlockDetailsInfo, &'static str, Option<Vec<u8>>),
     Gap(BlockDetailsInfo, String),
 }
 
@@ -175,13 +215,13 @@ enum BodyOutcome {
 /// getBlock fallback decoder. Pure RPC, no database access.
 fn resolve_body(rpc: &RpcClient, cfg: &Config, mut details: BlockDetailsInfo, missing_note: &str) -> BodyOutcome {
     if details.retained.is_some() {
-        return BodyOutcome::Store(details, "details");
+        return BodyOutcome::Store(details, "details", None);
     }
     if cfg.getblock_fallback {
         return match try_getblock_fallback(rpc, details.header.height, &details.header.hash) {
-            FallbackOutcome::Recovered(retained) => {
+            FallbackOutcome::Recovered(retained, raw) => {
                 details.retained = Some(retained);
-                BodyOutcome::Store(details, "getblock")
+                BodyOutcome::Store(details, "getblock", Some(raw))
             }
             FallbackOutcome::NoBody => BodyOutcome::Gap(
                 details,
@@ -203,14 +243,23 @@ fn ingest_height(conn: &Connection, rpc: &RpcClient, cfg: &Config, height: u64) 
     };
 
     match resolve_body(rpc, cfg, details, "body already pruned by node on first ingest attempt") {
-        BodyOutcome::Store(details, source) => {
+        BodyOutcome::Store(details, source, raw) => {
+            let wants_raw = cfg.decoder_selfcheck || permanode_core::emission::v2_active(height);
+            let raw = match raw {
+                Some(raw) => Some(raw),
+                None if wants_raw => fetch_raw(rpc, height),
+                None => None,
+            };
             let tx = db::write_tx(conn)?;
             store_block(&tx, &details, source)?;
+            record_contract_flags(&tx, height, &details.header.hash, raw.as_deref())?;
             tx.commit()?;
             if source == "getblock" {
                 info!("height {height}: body recovered via getBlock ({} tx)", details.retained.as_ref().map_or(0, |r| r.transactions.len()));
             } else if cfg.decoder_selfcheck {
-                selfcheck(conn, rpc, height, &details);
+                if let Some(raw) = raw.as_deref() {
+                    selfcheck(conn, height, &details, raw);
+                }
             }
         }
         BodyOutcome::Gap(details, note) => {
@@ -259,8 +308,14 @@ fn recheck_height(conn: &Connection, rpc: &RpcClient, cfg: &Config, height: u64)
             let tx = db::write_tx(conn)?;
             db::mark_orphaned(&tx, old_block_id, &now)?;
             match replacement {
-                Some(BodyOutcome::Store(details, source)) => {
+                Some(BodyOutcome::Store(details, source, raw)) => {
+                    let raw = match raw {
+                        Some(raw) => Some(raw),
+                        None if permanode_core::emission::v2_active(height) => fetch_raw(rpc, height),
+                        None => None,
+                    };
                     store_block(&tx, &details, source)?;
+                    record_contract_flags(&tx, height, &details.header.hash, raw.as_deref())?;
                     if source == "getblock" {
                         let n = details.retained.as_ref().map_or(0, |r| r.transactions.len());
                         info!("height {height}: reorg replacement body recovered via getBlock ({n} tx)");
@@ -295,11 +350,12 @@ fn backfill_gap(conn: &Connection, rpc: &RpcClient, height: u64) -> Result<()> {
     };
 
     match try_getblock_fallback(rpc, height, &hash) {
-        FallbackOutcome::Recovered(retained) => {
+        FallbackOutcome::Recovered(retained, raw) => {
             let n = retained.transactions.len();
             let tx = db::write_tx(conn)?;
             insert_transactions(&tx, uncaptured_id, &retained)?;
             db::mark_body_recovered(&tx, uncaptured_id, "getblock")?;
+            record_contract_flags(&tx, height, &hash, Some(&raw))?;
             let now = Utc::now().to_rfc3339();
             db::resolve_gap(&tx, height, &now, "recovered via getBlock")?;
             tx.commit()?;
@@ -318,16 +374,8 @@ fn backfill_gap(conn: &Connection, rpc: &RpcClient, height: u64) -> Result<()> {
 /// already returned full data, purely to cross-check the decoder's output
 /// against the RPC's own - see config.rs `decoder_selfcheck`. Never
 /// affects storage; only logs and counts mismatches.
-fn selfcheck(conn: &Connection, rpc: &RpcClient, height: u64, details: &BlockDetailsInfo) {
-    let raw = match rpc.get_block_raw(height) {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => return, // already outside the getBlock window somehow; not a mismatch
-        Err(e) => {
-            warn!("height {height}: selfcheck getBlock call failed: {e:#}");
-            return;
-        }
-    };
-    let decoded = match decode::decode_retained_block(&raw, height, &details.header.hash) {
+fn selfcheck(conn: &Connection, height: u64, details: &BlockDetailsInfo, raw: &[u8]) {
+    let decoded = match decode::decode_retained_block(raw, height, &details.header.hash) {
         Ok(d) => d,
         Err(e) => {
             // A hash mismatch here usually means the two RPC calls
@@ -336,8 +384,17 @@ fn selfcheck(conn: &Connection, rpc: &RpcClient, height: u64, details: &BlockDet
             return;
         }
     };
-    let mine = serde_json::to_value(&decoded).ok();
-    let theirs = details.retained.as_ref().and_then(|r| serde_json::to_value(r).ok());
+    let mut mine = serde_json::to_value(&decoded).ok();
+    let mut theirs = details.retained.as_ref().and_then(|r| serde_json::to_value(r).ok());
+    if permanode_core::emission::v2_active(height) {
+        // The v2 proof class lives only in the proof, which getBlock does
+        // not carry - the decoder cannot know it, so it is no mismatch.
+        for value in [&mut mine, &mut theirs].into_iter().flatten() {
+            if let Some(object) = value.as_object_mut() {
+                object.remove("proof_class");
+            }
+        }
+    }
     if mine != theirs {
         error!("height {height}: decoder selfcheck MISMATCH against getBlockDetails output");
         if let Err(e) = increment_mismatch_counter(conn) {
@@ -452,7 +509,12 @@ fn insert_block_header_row(
 
 pub(crate) fn insert_transactions(conn: &Connection, block_id: i64, retained: &RetainedBlockInfo) -> Result<()> {
     conn.execute(
-        "UPDATE blocks SET proof_class = ?2, reward_micronoid = ?3, total_fees_micronoid = ?4 WHERE id = ?1",
+        // Never replace a known proof class with the node's "unavailable"
+        // (v2 proofs are pruned after ~42 blocks); upgrade the other way.
+        "UPDATE blocks SET
+            proof_class = CASE WHEN ?2 LIKE '%unavailable%' AND proof_class IS NOT NULL THEN proof_class ELSE ?2 END,
+            reward_micronoid = ?3, total_fees_micronoid = ?4
+         WHERE id = ?1",
         params![
             block_id,
             retained.proof_class,

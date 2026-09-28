@@ -24,6 +24,8 @@ pub struct BlockSummary {
     pub total_fees_micronoid: Option<String>,
     pub tx_count: i64,
     pub body_captured: bool,
+    /// v2 contract calls in this block (0 before the fork).
+    pub contract_calls: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -98,12 +100,29 @@ pub struct TxSummary {
     /// viewed address (`receiver` may be its own change output).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub counterparty: Option<String>,
+    /// v2 contract call: `"call"` (the contract continues under its
+    /// successor address, the first output) or `"close"`; absent for
+    /// ordinary transactions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contract: Option<&'static str>,
+}
+
+/// `transactions.contract_flags` as the API names it.
+pub fn contract_kind(flags: i64) -> Option<&'static str> {
+    match flags {
+        0 => None,
+        f if f & 2 != 0 => Some("close"),
+        _ => Some("call"),
+    }
 }
 
 #[derive(Debug, Serialize)]
 pub struct TxDetail {
     pub txid: String,
     pub position: i64,
+    /// See `TxSummary::contract`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contract: Option<&'static str>,
     pub page_count: i64,
     pub fee_micronoid: i64,
     pub coinbase: bool,
@@ -221,7 +240,8 @@ pub fn recent_blocks(conn: &Connection, limit: i64) -> Result<Vec<BlockSummary>>
         "SELECT blocks.height, blocks.hash, blocks.timestamp, blocks.miner,
                 blocks.proof_class, blocks.reward_micronoid, blocks.total_fees_micronoid,
                 blocks.body_captured,
-                (SELECT COUNT(*) FROM transactions t WHERE t.block_id = blocks.id) AS tx_count
+                (SELECT COUNT(*) FROM transactions t WHERE t.block_id = blocks.id) AS tx_count,
+                (SELECT COUNT(*) FROM transactions t WHERE t.block_id = blocks.id AND t.contract_flags != 0) AS contract_calls
          FROM blocks
          WHERE {CANONICAL_BLOCK_FILTER}
          ORDER BY blocks.height DESC
@@ -239,6 +259,7 @@ pub fn recent_blocks(conn: &Connection, limit: i64) -> Result<Vec<BlockSummary>>
             total_fees_micronoid: row.get(6)?,
             body_captured: row.get::<_, i64>(7)? != 0,
             tx_count: row.get(8)?,
+            contract_calls: row.get(9)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -296,7 +317,7 @@ fn block_id_and_row(
 // list like that.
 const TX_SUMMARY_COLUMNS: &str = "
     t.position, t.txid, t.page_count, t.fee_micronoid, t.coinbase, t.development_payout,
-    t.input_owner, t.input_sum_micronoid, t.output_sum_micronoid,
+    t.input_owner, t.input_sum_micronoid, t.output_sum_micronoid, t.contract_flags,
     b.height, b.timestamp,
     (SELECT COUNT(*) FROM tx_inputs i WHERE i.tx_id = t.id) AS n_inputs,
     (SELECT COUNT(*) FROM tx_outputs o WHERE o.tx_id = t.id) AS n_outputs,
@@ -321,6 +342,7 @@ fn tx_summary_from_row(row: &rusqlite::Row) -> rusqlite::Result<TxSummary> {
         n_outputs: row.get("n_outputs")?,
         address_delta_micronoid: row.get::<_, Option<i64>>("address_delta").ok().flatten().map(|d| d.to_string()),
         counterparty: row.get::<_, Option<String>>("counterparty").ok().flatten(),
+        contract: contract_kind(row.get("contract_flags")?),
     })
 }
 
@@ -436,7 +458,7 @@ pub fn tx_by_txid(conn: &Connection, txid: &str) -> Result<Option<TxDetail>> {
         "SELECT t.id, t.position, t.page_count, t.fee_micronoid, t.coinbase,
                 t.development_payout, t.epoch_anchor, t.input_owner, t.input_sum_micronoid,
                 t.output_sum_micronoid, b.height, b.hash, b.timestamp,
-                ({canonical_on_b}) AS is_canonical
+                ({canonical_on_b}) AS is_canonical, t.contract_flags
          FROM transactions t
          JOIN blocks b ON b.id = t.block_id
          WHERE t.txid = ?1
@@ -451,6 +473,7 @@ pub fn tx_by_txid(conn: &Connection, txid: &str) -> Result<Option<TxDetail>> {
                 TxDetail {
                     txid: txid.to_string(),
                     position: row.get(1)?,
+                    contract: contract_kind(row.get(14)?),
                     page_count: row.get(2)?,
                     fee_micronoid: row.get(3)?,
                     coinbase: row.get::<_, i64>(4)? != 0,

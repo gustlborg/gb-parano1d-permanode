@@ -23,11 +23,12 @@ hex = "0.4"
 include_dir = "0.7"
 log = "0.4.34"
 mime_guess = "2"
-# getBlock fallback decoder (see src/decode.rs): links the node's own
-# crates so transaction-field derivation stays byte-identical to
-# noid_rpc's get_block_details, instead of reimplementing txid/bech32m/
-# paged-spend logic ourselves.
-noid_chain = { git = "https://git.parano1d.org/ignotusnemo/parano1d.git", tag = "v1.1.0" }
+# getBlock decoder (see src/decode.rs): links the node's own crates so
+# transaction-field derivation stays byte-identical to noid_rpc's
+# get_block_details, instead of reimplementing txid/bech32m/paged-spend
+# logic ourselves. noid_tx supplies the v2 contract-call bits.
+noid_chain = { git = "https://git.parano1d.org/ignotusnemo/parano1d.git", tag = "v2.0.0" }
+noid_tx = { git = "https://git.parano1d.org/ignotusnemo/parano1d.git", tag = "v2.0.0" }
 permanode-core = { path = "../core" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -36,3 +37,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "fs"] }
 toml = "1.1.6"
 tower-http = { version = "0.6", features = ["cors"] }
 ureq = { version = "3.4.2", features = ["json"] }
+
+[dev-dependencies]
+noid_poseidon2b = { git = "https://git.parano1d.org/ignotusnemo/parano1d.git", tag = "v2.0.0" }
