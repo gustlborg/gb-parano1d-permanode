@@ -1,16 +1,16 @@
 use crate::config::Config;
 use crate::decode;
-use crate::rpc::{BlockDetailsInfo, BlockHeaderInfo, RetainedBlockInfo, RpcClient};
-use anyhow::Result;
+use crate::rpc::{BlockDetailsInfo, BlockHeaderInfo, RetainedBlockInfo, RpcClient, StateMapInfo};
+use anyhow::{bail, Result};
 use chrono::Utc;
 use log::{error, info, warn};
 use permanode_core::db;
 use rusqlite::{params, Connection};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Observed width of the node's getBlock serving window (see
 /// docs/node-rpc-marker-bug/REPORT.md section 6, measured with
@@ -60,12 +60,13 @@ pub fn run(conn: &Connection, rpc: &RpcClient, cfg: &Config) -> Result<()> {
             } else {
                 let db_path = cfg.db_path.clone();
                 let rpc = rpc.clone();
+                let max_per_second = cfg.state_scan_max_per_second;
                 let running_flag = Arc::clone(&slot_scan_running);
                 // Its own connection (WAL mode allows concurrent readers/
-                // writers) so the getSlot flood never holds up the main
+                // writers) so a segment read never holds up the main
                 // ingest loop's connection.
                 thread::spawn(move || {
-                    let result = db::open(&db_path).and_then(|scan_conn| scan_live_state(&scan_conn, &rpc));
+                    let result = db::open(&db_path).and_then(|scan_conn| scan_live_state(&scan_conn, &rpc, max_per_second));
                     match result {
                         Ok(n) => info!("live state sweep finished: {n} distinct address(es) with a balance"),
                         Err(e) => warn!("live state sweep failed: {e:#}"),
@@ -605,117 +606,222 @@ fn refresh_known_address_balances(conn: &Connection, rpc: &RpcClient) -> Result<
     Ok(fresh.len())
 }
 
-/// Sweep every populated segment of the node's Live State
-/// (`paranoid_getSlot` over each 65,536-slot bucket that
-/// `paranoid_getStateMap` reports as holding live slots) to discover every
-/// address that currently holds a balance - not just ones
-/// `known_addresses()` already knows about (which only covers addresses
-/// that moved funds in a transaction this permanode has itself recorded
-/// since it started indexing).
+/// Keeps the permanode's picture of the node's Live State - every
+/// recorded unspent output plus the live UTXOs it has no recorded output
+/// for (`state_slots`: created before it started recording, or in a gap) -
+/// in step with the node, and derives every address's balance from it.
 ///
-/// The node's allocator does not fill the slot index space contiguously:
-/// each zone of 65,536 mints lands in a segment chosen by a permutation
-/// (see `noid_chain::consensus::allocator`), and the node's own block
-/// template prefers reusing holes in already-populated segments. So the
-/// state map, not any range heuristic, decides what gets swept - and its
-/// per-segment counts are the exact figure the sweep must reproduce
-/// whenever no block landed while it ran. Any shortfall at an unchanged
-/// tip is logged as a coverage problem rather than papered over.
+/// A run reads the node's state map (live UTXOs per 65,536-slot segment)
+/// at a height the indexer has fully processed and compares it segment by
+/// segment with its own picture at that height. Only segments whose counts
+/// differ are read slot by slot (`paranoid_getSlot`); normally none do, so
+/// a run costs one node call. The node's allocator scatters UTXOs over
+/// many segments (a zone of mints lands in a segment chosen by a
+/// permutation, see `noid_chain::consensus::allocator`) - since late
+/// September 2026 over 70 of them - so reading every populated segment on
+/// every run (4.7 million calls) would keep the node busy for most of the
+/// time. The first run after an upgrade, or after a gap, reads the
+/// segments that differ once and remembers what it found.
 ///
-/// Called from its own background thread spawned in `run()` - never call
-/// this on the main ingest connection/loop, it's tens of thousands of
-/// sequential RPC round-trips per populated segment.
-fn scan_live_state(conn: &Connection, rpc: &RpcClient) -> Result<usize> {
-    let tip_before = rpc.block_count()?;
-    let map = rpc.get_state_map()?;
-    let expected: u64 = map.live_counts.iter().sum();
-    let populated: Vec<(usize, u64)> = map
-        .live_counts
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| **c > 0)
-        .map(|(i, c)| (i, *c))
-        .collect();
+/// Reads are throttled to `max_per_second` and pause while the indexer is
+/// behind the node, so the sweep never starves block ingestion or the node
+/// itself. A segment is only committed after it was read completely; a
+/// node that stops answering ends the run (the next one picks up where
+/// this one stopped, as finished segments already match).
+///
+/// The same pass reconciles the recorded history: a recorded output that
+/// is gone from a freshly read segment although no recorded input spent it
+/// was spent in a block this permanode has no body for.
+///
+/// Runs in its own background thread spawned in `run()`.
+fn scan_live_state(conn: &Connection, rpc: &RpcClient, max_per_second: u64) -> Result<usize> {
+    let (height, map) = consistent_state_map(conn, rpc)?;
+    let segment_size = map.bucket_capacity;
+    let node_total: u64 = map.live_counts.iter().sum();
+    let differing = differing_segments(conn, &map, height)?;
+    let populated = map.live_counts.iter().filter(|c| **c > 0).count();
     info!(
-        "live state sweep: {} populated segment(s) of {} ({} slots each), {expected} live slot(s) at #{tip_before}",
-        populated.len(),
-        map.live_counts.len(),
-        map.bucket_capacity
+        "live state sweep at #{height}: node holds {node_total} live UTXO(s) in {populated} segment(s); {} segment(s) differ from the recorded state{}",
+        differing.len(),
+        if differing.is_empty() { String::new() } else { format!(", reading them at up to {max_per_second} slot(s)/s") }
     );
 
-    let mut owners: HashMap<String, (u128, u64)> = HashMap::new();
-    let mut live_creation_ids: HashSet<String> = HashSet::new();
-    let mut queried = 0u64;
-    let mut found = 0u64;
-    for (segment, count) in &populated {
-        let start = *segment as u64 * map.bucket_capacity;
-        let mut seg_found = 0u64;
-        for idx in start..start + map.bucket_capacity {
-            let slot = match rpc.get_slot(idx) {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!("live state sweep: getSlot({idx}) failed, skipping: {e:#}");
-                    continue;
-                }
-            };
-            queried += 1;
-            if slot.empty {
-                continue;
-            }
-            seg_found += 1;
-            live_creation_ids.insert(slot.creation_id.to_string());
-            let entry = owners.entry(slot.owner).or_insert((0u128, 0u64));
-            entry.0 += slot.value as u128;
-            entry.1 += 1;
+    let mut limiter = Throttle::new(max_per_second);
+    for (segment, node_count, own_count) in &differing {
+        let started = Instant::now();
+        let start_height = rpc.block_count()?;
+        let slots = segment * segment_size..(segment + 1) * segment_size;
+        let live = read_segment(conn, rpc, slots.clone(), &mut limiter)?;
+        let now = Utc::now().to_rfc3339();
+        let tx = db::write_tx(conn)?;
+        let recorded = db::recorded_creation_ids(&tx, slots.clone())?;
+        let (known, foreign): (Vec<_>, Vec<_>) = live.into_iter().partition(|s| recorded.contains(&s.creation_id));
+        db::replace_state_slots(&tx, *segment, &foreign, start_height, &now)?;
+        let live_ids: HashSet<&str> = known.iter().chain(foreign.iter()).map(|s| s.creation_id.as_str()).collect();
+        let back = db::unmark_live_outputs(&tx, slots.clone(), &live_ids)?;
+        let gone: Vec<i64> = db::unspent_recorded_outputs(&tx, start_height, slots)?
+            .into_iter()
+            .filter(|(_, cid)| !live_ids.contains(cid.as_str()))
+            .map(|(rowid, _)| rowid)
+            .collect();
+        if !gone.is_empty() {
+            db::mark_spent_in_gap(&tx, &gone, &now)?;
         }
-        found += seg_found;
-        if seg_found != *count {
-            info!("live state sweep: segment {segment} swept {seg_found} live slot(s), state map said {count}");
+        tx.commit()?;
+        info!(
+            "live state sweep: segment {segment} read in {:.0} s (node {node_count}, recorded {own_count}): {} live, {} without a recorded output{}",
+            started.elapsed().as_secs_f64(),
+            known.len() + foreign.len(),
+            foreign.len(),
+            if gone.is_empty() { String::new() } else { format!(", {} recorded output(s) spent in a gap", gone.len()) }
+        );
+        if back > 0 {
+            info!("live state sweep: segment {segment}: {back} output(s) earlier marked as spent in a gap are live after all - mark taken back");
         }
     }
 
     let now = Utc::now().to_rfc3339();
     let tx = db::write_tx(conn)?;
-    for (address, (total, count)) in &owners {
-        db::upsert_address_balance_cache(&tx, address, &total.to_string(), *count as i64, &now)?;
-    }
-    // Bounds from the earlier range-based sweep design; no longer read.
-    tx.execute("DELETE FROM indexer_state WHERE key IN ('slot_scan_low', 'slot_scan_high')", [])?;
-    // Reconcile recorded history against the state just swept: a recorded
-    // output that is gone from the node although no recorded input spent
-    // it was spent in a block this permanode has no body for. Only
-    // outputs created at or before the sweep's starting tip are judged -
-    // anything younger may simply postdate the snapshot.
-    let gone: Vec<i64> = db::unspent_recorded_outputs(&tx, tip_before)?
-        .into_iter()
-        .filter(|(_, creation_id)| !live_creation_ids.contains(creation_id))
-        .map(|(rowid, _)| rowid)
-        .collect();
-    if !gone.is_empty() {
-        db::mark_spent_in_gap(&tx, &gone, &now)?;
-        info!(
-            "live state sweep: {} recorded output(s) are gone from the node's state without a recorded spend - marked as spent in a gap",
-            gone.len()
-        );
-    }
     let cleared = db::clear_spent_in_gap_with_recorded_spend(&tx)?;
     if cleared > 0 {
         info!("live state sweep: {cleared} output(s) marked as spent in a gap now have their spend on record");
     }
+    let balances = db::live_balances(&tx)?;
+    for (address, (total, count)) in &balances {
+        db::upsert_address_balance_cache(&tx, address, &total.to_string(), *count as i64, &now)?;
+    }
+    tx.execute("DELETE FROM indexer_state WHERE key IN ('slot_scan_low', 'slot_scan_high')", [])?;
     tx.commit()?;
 
-    let tip_after = rpc.block_count().unwrap_or(tip_before);
-    if tip_after == tip_before && found != expected {
-        warn!(
-            "live state sweep: found {found} live slot(s) but the node reported {expected} at the same height #{tip_before} - the sweep is missing part of the state"
-        );
-    } else if tip_after == tip_before {
-        info!("live state sweep: queried {queried} slot(s), found {found} live slot(s) across {} address(es) - exact match with the node at #{tip_before}", owners.len());
-    } else {
+    // Check the result against the node once more.
+    let (check_height, check_map) = consistent_state_map(conn, rpc)?;
+    let still = differing_segments(conn, &check_map, check_height)?;
+    if still.is_empty() {
+        let keep: HashSet<String> = balances.keys().cloned().collect();
+        let zeroed = db::zero_balance_cache_except(conn, &keep, &now)?;
         info!(
-            "live state sweep: queried {queried} slot(s), found {found} live slot(s) across {} address(es); node said {expected} at #{tip_before}, chain advanced to #{tip_after} during the sweep",
-            owners.len()
+            "live state sweep: every segment matches the node at #{check_height} ({} live UTXO(s), {} address(es) with a balance{})",
+            check_map.live_counts.iter().sum::<u64>(),
+            balances.len(),
+            if zeroed > 0 { format!(", {zeroed} emptied since the last run") } else { String::new() }
+        );
+    } else {
+        let detail: Vec<String> = still.iter().take(5).map(|(s, n, o)| format!("{s}: node {n}, recorded {o}")).collect();
+        warn!(
+            "live state sweep: {} segment(s) still differ from the node at #{check_height} ({}) - the next run reads them",
+            still.len(),
+            detail.join("; ")
         );
     }
-    Ok(owners.len())
+    Ok(balances.len())
+}
+
+/// The node's state map at a height the indexer has fully processed: the
+/// map and the tip are read back to back and retried if a block landed in
+/// between, and the call waits (up to two minutes) for the indexer to
+/// catch up with that tip.
+fn consistent_state_map(conn: &Connection, rpc: &RpcClient) -> Result<(u64, StateMapInfo)> {
+    for _ in 0..10 {
+        let tip = rpc.block_count()?;
+        wait_for_indexer(conn, rpc, tip, Duration::from_secs(120))?;
+        let map = rpc.get_state_map()?;
+        if rpc.block_count()? == tip {
+            return Ok((tip, map));
+        }
+    }
+    bail!("the chain kept moving while reading the state map")
+}
+
+fn processed_height(conn: &Connection) -> Result<u64> {
+    Ok(db::get_state(conn, "last_processed_height")?.and_then(|s| s.parse().ok()).unwrap_or(0))
+}
+
+/// Blocks until the indexer has processed `height`, or fails after `limit`.
+fn wait_for_indexer(conn: &Connection, rpc: &RpcClient, height: u64, limit: Duration) -> Result<()> {
+    let started = Instant::now();
+    while processed_height(conn)? < height {
+        if started.elapsed() > limit {
+            bail!("the indexer is behind the node (#{} of #{}), sweep postponed", processed_height(conn)?, rpc.block_count().unwrap_or(height));
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+    Ok(())
+}
+
+/// Segments whose live-UTXO count in the node's map differs from the
+/// permanode's picture at `height`: (segment, node count, own count).
+fn differing_segments(conn: &Connection, map: &StateMapInfo, height: u64) -> Result<Vec<(u64, u64, u64)>> {
+    let own = db::live_count_per_segment(conn, height, map.bucket_capacity)?;
+    let segments = (map.live_counts.len() as u64).max(own.keys().max().map_or(0, |m| m + 1));
+    Ok((0..segments)
+        .filter_map(|seg| {
+            let node = map.live_counts.get(seg as usize).copied().unwrap_or(0);
+            let mine = own.get(&seg).copied().unwrap_or(0);
+            (node != mine).then_some((seg, node, mine))
+        })
+        .collect())
+}
+
+/// Spaces calls out to at most `per_second` (0 = unthrottled).
+struct Throttle {
+    interval: Duration,
+    next: Instant,
+}
+
+impl Throttle {
+    fn new(per_second: u64) -> Self {
+        let interval = if per_second == 0 { Duration::ZERO } else { Duration::from_secs_f64(1.0 / per_second as f64) };
+        Throttle { interval, next: Instant::now() }
+    }
+
+    fn wait(&mut self) {
+        let now = Instant::now();
+        if self.next > now {
+            thread::sleep(self.next - now);
+        }
+        self.next = self.next.max(now) + self.interval;
+    }
+}
+
+/// Reads every slot of one segment, returning the live ones. Pauses while
+/// the indexer lags more than one block behind the node; a slot that fails
+/// five times in a row ends the read with an error, so nothing half-read is
+/// ever committed and a node that went away is not hammered further.
+fn read_segment(conn: &Connection, rpc: &RpcClient, slots: std::ops::Range<u64>, limiter: &mut Throttle) -> Result<Vec<db::StateSlot>> {
+    let mut live = Vec::new();
+    for idx in slots {
+        if idx % 2_048 == 0 {
+            let mut paused = false;
+            loop {
+                let tip = rpc.block_count()?;
+                if processed_height(conn)? + 1 >= tip {
+                    break;
+                }
+                if !paused {
+                    info!("live state sweep: pausing while the indexer catches up with the node (#{tip})");
+                    paused = true;
+                }
+                thread::sleep(Duration::from_secs(2));
+            }
+        }
+        let mut attempt = 0;
+        let slot = loop {
+            limiter.wait();
+            match rpc.get_slot(idx) {
+                Ok(s) => break s,
+                Err(e) if attempt < 4 => {
+                    attempt += 1;
+                    thread::sleep(Duration::from_millis(500 * attempt));
+                    if attempt == 4 {
+                        warn!("live state sweep: getSlot({idx}) keeps failing: {e:#}");
+                    }
+                }
+                Err(e) => bail!("getSlot({idx}) failed five times, ending this run: {e:#}"),
+            }
+        };
+        if !slot.empty {
+            live.push(db::StateSlot { slot_index: idx, creation_id: slot.creation_id.to_string(), owner: slot.owner, amount_micronoid: slot.value });
+        }
+    }
+    Ok(live)
 }

@@ -128,6 +128,8 @@ must not fall behind the node's pruning: an outage longer than roughly
   Keep this well below the node's body window.
 - `scan_slots_every_cycles` — how often the UTXO sweep runs, in polls
   (default 360, about 30 minutes; 0 disables it).
+- `state_scan_max_per_second` — upper bound for `getSlot` calls while the
+  sweep reads a state segment (default 500; 0 = unthrottled).
 - `donation_address` — returned by `/api/v1/stats` for a frontend to
   show; leave empty for none.
 
@@ -212,20 +214,28 @@ during an update - it is the whole point.
   was active before the permanode started, or some of its outputs were
   spent inside gaps), the address response says so; the live balance is
   authoritative regardless.
-- **The UTXO sweep** reads every live UTXO of the node (`getStateMap` to
-  find the populated state segments, `getSlot` for each slot in them) on
-  the first poll after start and then every `scan_slots_every_cycles`
-  polls (default 360, about 30 minutes), assigns each UTXO to its owner
-  and stores balance and UTXO count per address. Every run checks its own
-  total against the node's count and logs the result; a shortfall at an
-  unchanged tip is logged as a warning. The same pass reconciles the
-  recorded history: a recorded output the node no longer holds, with no
-  recorded transaction spending it, was spent in a block whose body this
-  permanode never had; it is flagged and dropped from the recorded
-  balance, and the address response says so. This is what makes the rich
+- **The UTXO sweep** keeps the permanode's picture of the node's live
+  UTXOs in step with the node: its recorded unspent outputs plus the UTXOs
+  it found in the node without a recorded output (created before it
+  started recording, or in a gap). On the first poll after start and then
+  every `scan_slots_every_cycles` polls (default 360, about 30 minutes) it
+  compares that picture per state segment with the node's `getStateMap`,
+  at a height it has fully processed, and reads only the segments that
+  differ slot by slot (`getSlot`, throttled by
+  `state_scan_max_per_second`, paused while the indexer is behind). A
+  normal run is a single node call; the first run on a new database, or
+  after a gap, reads the segments concerned once. Balance and UTXO count
+  per address come from that picture, and each run checks it against the
+  node and logs the result. The same pass reconciles the recorded
+  history: a recorded output that a freshly read segment no longer holds,
+  with no recorded transaction spending it, was spent in a block whose
+  body this permanode never had; it is flagged and dropped from the
+  recorded balance, and the address response says so (a later read that
+  finds it live takes the flag back). This is what makes the rich
   list and the address balances complete for addresses that never appear
-  in the recorded history. The individual UTXOs are not stored;
-  `address/{a}/utxos` loads them from the node on request.
+  in the recorded history. Of the individual UTXOs only those without a
+  recorded output are kept (for the per-segment comparison);
+  `address/{a}/utxos` loads an address's UTXOs from the node on request.
 - **Reorgs** are recorded, not overwritten: a replaced block keeps its row
   and gets an `orphaned` status entry, so it can still be opened by hash.
   `/api/v1/orphans` lists them with the block that took their height,

@@ -81,6 +81,26 @@ fn migrate_locked(conn: &Connection) -> Result<()> {
     // them; `contracts_scanned` marks v2 blocks whose bytes were checked.
     add_column_if_missing(conn, "transactions", "contract_flags", "INTEGER NOT NULL DEFAULT 0")?;
     add_column_if_missing(conn, "blocks", "contracts_scanned", "INTEGER")?;
+    // Live UTXOs the state sweep found in the node that this permanode has
+    // no recorded output for - created before it started recording, or in
+    // a block it has no body for. Together with the recorded outputs they
+    // make up the permanode's full picture of the live state, which lets
+    // the sweep compare per-segment counts with the node instead of reading
+    // every slot. Replaced segment by segment whenever a segment is swept.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS state_slots (
+             slot_index        INTEGER PRIMARY KEY,
+             segment           INTEGER NOT NULL,
+             creation_id       TEXT NOT NULL,
+             owner             TEXT NOT NULL,
+             amount_micronoid  INTEGER NOT NULL,
+             seen_height       INTEGER NOT NULL,
+             seen_at           TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_state_slots_segment ON state_slots(segment);
+         CREATE INDEX IF NOT EXISTS idx_state_slots_creation ON state_slots(creation_id);
+         CREATE INDEX IF NOT EXISTS idx_outputs_slot ON tx_outputs(slot_index);",
+    )?;
     // Unspent-output queries match outputs against inputs by creation_id;
     // without these every such query is outputs x inputs.
     conn.execute_batch(
@@ -421,28 +441,160 @@ pub fn upsert_address_balance_cache(
     Ok(())
 }
 
-/// Recorded outputs on canonical blocks up to `max_height` that no
-/// recorded input has spent and that aren't flagged yet - the candidates
-/// for the sweep's spent-in-gap reconciliation. Returns (rowid, creation_id).
-pub fn unspent_recorded_outputs(conn: &Connection, max_height: u64) -> Result<Vec<(i64, String)>> {
-    let mut stmt = conn.prepare(
+const CANONICAL_B: &str = "(SELECT s.status FROM block_status_log s WHERE s.block_id = b.id ORDER BY s.id DESC LIMIT 1) = 'canonical'";
+
+/// "No input in a canonical block at or below height ?1 spends the coin
+/// with creation id `{cid}`."
+fn not_spent_by_recorded_input(cid: &str) -> String {
+    format!(
+        "NOT EXISTS (
+           SELECT 1 FROM tx_inputs i
+           JOIN transactions t2 ON t2.id = i.tx_id
+           JOIN blocks b2 ON b2.id = t2.block_id
+           WHERE i.creation_id = {cid} AND b2.height <= ?1
+             AND (SELECT s.status FROM block_status_log s WHERE s.block_id = b2.id ORDER BY s.id DESC LIMIT 1) = 'canonical'
+         )"
+    )
+}
+
+/// Recorded outputs on canonical blocks up to `max_height` with a slot
+/// index in `slots` that no recorded input up to that height has spent and
+/// that aren't flagged yet - the candidates for the sweep's spent-in-gap
+/// reconciliation of one segment. Returns (rowid, creation_id).
+pub fn unspent_recorded_outputs(conn: &Connection, max_height: u64, slots: std::ops::Range<u64>) -> Result<Vec<(i64, String)>> {
+    let sql = format!(
         "SELECT o.rowid, o.creation_id
          FROM tx_outputs o
          JOIN transactions t ON t.id = o.tx_id
          JOIN blocks b ON b.id = t.block_id
-         WHERE b.height <= ?1
+         WHERE b.height <= ?1 AND o.slot_index >= ?2 AND o.slot_index < ?3
            AND o.spent_in_gap = 0
-           AND (SELECT s.status FROM block_status_log s WHERE s.block_id = b.id ORDER BY s.id DESC LIMIT 1) = 'canonical'
-           AND NOT EXISTS (
-             SELECT 1 FROM tx_inputs i
-             JOIN transactions t2 ON t2.id = i.tx_id
-             JOIN blocks b2 ON b2.id = t2.block_id
-             WHERE i.creation_id = o.creation_id
-               AND (SELECT s.status FROM block_status_log s WHERE s.block_id = b2.id ORDER BY s.id DESC LIMIT 1) = 'canonical'
-           )",
-    )?;
-    let rows = stmt.query_map(params![max_height as i64], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?;
+           AND {CANONICAL_B}
+           AND {}",
+        not_spent_by_recorded_input("o.creation_id")
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![max_height as i64, slots.start as i64, slots.end as i64], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Live UTXOs per state segment as this permanode knows them at `height`:
+/// recorded outputs up to that height that no recorded input up to that
+/// height spent (and not spent in a gap), plus the sweep's own
+/// `state_slots` not spent by a recorded input. Segment = slot index /
+/// `segment_size`. Compared against the node's state map at the same
+/// height, it tells the sweep which segments need reading.
+pub fn live_count_per_segment(conn: &Connection, height: u64, segment_size: u64) -> Result<std::collections::HashMap<u64, u64>> {
+    let mut out = std::collections::HashMap::new();
+    let recorded = format!(
+        "SELECT o.slot_index / ?2 AS seg, COUNT(*)
+         FROM tx_outputs o
+         JOIN transactions t ON t.id = o.tx_id
+         JOIN blocks b ON b.id = t.block_id
+         WHERE b.height <= ?1 AND o.spent_in_gap = 0 AND {CANONICAL_B} AND {}
+         GROUP BY seg",
+        not_spent_by_recorded_input("o.creation_id")
+    );
+    let foreign = format!(
+        "SELECT f.segment, COUNT(*) FROM state_slots f WHERE {} GROUP BY f.segment",
+        not_spent_by_recorded_input("f.creation_id")
+    );
+    for (sql, with_size) in [(recorded, true), (foreign, false)] {
+        let mut stmt = conn.prepare(&sql)?;
+        let map = |row: &rusqlite::Row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64));
+        let rows: Vec<(u64, u64)> = if with_size {
+            stmt.query_map(params![height as i64, segment_size as i64], map)?.collect::<rusqlite::Result<_>>()?
+        } else {
+            stmt.query_map(params![height as i64], map)?.collect::<rusqlite::Result<_>>()?
+        };
+        for (seg, n) in rows {
+            *out.entry(seg).or_insert(0) += n;
+        }
+    }
+    Ok(out)
+}
+
+/// Creation ids of every recorded output (canonical block, spent or not)
+/// whose slot index lies in `slots` - a live slot of the node with one of
+/// these ids is already part of the recorded history.
+pub fn recorded_creation_ids(conn: &Connection, slots: std::ops::Range<u64>) -> Result<std::collections::HashSet<String>> {
+    let sql = format!(
+        "SELECT o.creation_id FROM tx_outputs o
+         JOIN transactions t ON t.id = o.tx_id
+         JOIN blocks b ON b.id = t.block_id
+         WHERE o.slot_index >= ?1 AND o.slot_index < ?2 AND {CANONICAL_B}"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![slots.start as i64, slots.end as i64], |row| row.get::<_, String>(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// One live UTXO as read from the node.
+pub struct StateSlot {
+    pub slot_index: u64,
+    pub creation_id: String,
+    pub owner: String,
+    pub amount_micronoid: u64,
+}
+
+/// Replaces the sweep's own slots of one segment with what a fresh read of
+/// that segment found.
+pub fn replace_state_slots(conn: &Connection, segment: u64, slots: &[StateSlot], height: u64, now: &str) -> Result<()> {
+    conn.execute("DELETE FROM state_slots WHERE segment = ?1", params![segment as i64])?;
+    let mut stmt = conn.prepare(
+        "INSERT OR REPLACE INTO state_slots (slot_index, segment, creation_id, owner, amount_micronoid, seen_height, seen_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+    )?;
+    for s in slots {
+        stmt.execute(params![s.slot_index as i64, segment as i64, s.creation_id, s.owner, s.amount_micronoid as i64, height as i64, now])?;
+    }
+    Ok(())
+}
+
+/// Balance and UTXO count of every address in the permanode's picture of
+/// the live state (recorded unspent outputs plus the sweep's own slots),
+/// as of everything recorded so far.
+pub fn live_balances(conn: &Connection) -> Result<std::collections::HashMap<String, (u128, u64)>> {
+    let recorded = format!(
+        "SELECT o.owner, o.amount_micronoid
+         FROM tx_outputs o
+         JOIN transactions t ON t.id = o.tx_id
+         JOIN blocks b ON b.id = t.block_id
+         WHERE b.height <= ?1 AND o.spent_in_gap = 0 AND {CANONICAL_B} AND {}",
+        not_spent_by_recorded_input("o.creation_id")
+    );
+    let foreign = format!("SELECT f.owner, f.amount_micronoid FROM state_slots f WHERE {}", not_spent_by_recorded_input("f.creation_id"));
+    let mut out: std::collections::HashMap<String, (u128, u64)> = std::collections::HashMap::new();
+    for sql in [recorded, foreign] {
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![i64::MAX], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
+        for row in rows {
+            let (owner, amount) = row?;
+            let e = out.entry(owner).or_insert((0, 0));
+            e.0 += amount as u128;
+            e.1 += 1;
+        }
+    }
+    Ok(out)
+}
+
+/// Sets the cached balance of every address not in `keep` to zero - used
+/// once the sweep's picture of the state matches the node exactly, so an
+/// address whose last coins were spent in a gap does not keep a stale
+/// balance.
+pub fn zero_balance_cache_except(conn: &Connection, keep: &std::collections::HashSet<String>, now: &str) -> Result<usize> {
+    let mut stmt = conn.prepare("SELECT address FROM address_balance_cache WHERE live_utxo_count > 0")?;
+    let stale: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .filter_map(|r| r.ok())
+        .filter(|a| !keep.contains(a))
+        .collect();
+    for a in &stale {
+        upsert_address_balance_cache(conn, a, "0", 0, now)?;
+    }
+    Ok(stale.len())
 }
 
 /// Undoes `mark_spent_in_gap` for outputs whose spending transaction has
@@ -482,10 +634,142 @@ pub fn resolve_gaps_with_bodies(conn: &Connection, now: &str) -> Result<usize> {
     )?)
 }
 
+/// Takes back `mark_spent_in_gap` for recorded outputs in `slots` that a
+/// fresh read found live after all (an earlier sweep could not read their
+/// slot). Returns how many were taken back.
+pub fn unmark_live_outputs(conn: &Connection, slots: std::ops::Range<u64>, live: &std::collections::HashSet<&str>) -> Result<usize> {
+    let mut stmt = conn.prepare("SELECT rowid, creation_id FROM tx_outputs WHERE spent_in_gap = 1 AND slot_index >= ?1 AND slot_index < ?2")?;
+    let flagged: Vec<(i64, String)> = stmt
+        .query_map(params![slots.start as i64, slots.end as i64], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut n = 0;
+    for (rowid, _) in flagged.iter().filter(|(_, cid)| live.contains(cid.as_str())) {
+        n += conn.execute("UPDATE tx_outputs SET spent_in_gap = 0, spent_in_gap_at = NULL WHERE rowid = ?1", params![rowid])?;
+    }
+    Ok(n)
+}
+
 pub fn mark_spent_in_gap(conn: &Connection, rowids: &[i64], now: &str) -> Result<()> {
     let mut stmt = conn.prepare("UPDATE tx_outputs SET spent_in_gap = 1, spent_in_gap_at = ?2 WHERE rowid = ?1")?;
     for id in rowids {
         stmt.execute(params![id, now])?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    struct Db {
+        conn: Connection,
+        path: std::path::PathBuf,
+    }
+
+    impl Drop for Db {
+        fn drop(&mut self) {
+            for ext in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{ext}", self.path.display()));
+            }
+        }
+    }
+
+    fn db(name: &str) -> Db {
+        let path = std::env::temp_dir().join(format!("permanode-{name}-{}.sqlite3", std::process::id()));
+        let conn = open(path.to_str().unwrap()).unwrap();
+        Db { conn, path }
+    }
+
+    /// A block at `height` with the given status and one transaction:
+    /// inputs spend creation ids, outputs are (slot, owner, amount, creation id).
+    fn block(c: &Connection, height: i64, hash: &str, status: &str, inputs: &[&str], outputs: &[(i64, &str, i64, &str)]) {
+        c.execute(
+            "INSERT INTO blocks (height, hash, prev_hash, state_root, tx_root, timestamp, miner, nonce_hex, difficulty_target, body_captured, first_seen_at)
+             VALUES (?1, ?2, '', '', '', 0, 'o1miner', '', '', 1, '')",
+            params![height, hash],
+        )
+        .unwrap();
+        let block_id = c.last_insert_rowid();
+        c.execute("INSERT INTO block_status_log (block_id, status, observed_at) VALUES (?1, ?2, '')", params![block_id, status]).unwrap();
+        c.execute(
+            "INSERT INTO transactions (block_id, position, txid, page_count, fee_micronoid, coinbase, development_payout, epoch_anchor, input_sum_micronoid, output_sum_micronoid)
+             VALUES (?1, 1, ?2, 1, 0, 0, 0, '', '0', '0')",
+            params![block_id, format!("tx{hash}")],
+        )
+        .unwrap();
+        let tx_id = c.last_insert_rowid();
+        for (i, cid) in inputs.iter().enumerate() {
+            c.execute(
+                "INSERT INTO tx_inputs (tx_id, idx, page, lane, slot_index, amount_micronoid, creation_id) VALUES (?1, ?2, 0, 0, 0, 0, ?3)",
+                params![tx_id, i as i64, cid],
+            )
+            .unwrap();
+        }
+        for (i, (slot, owner, amount, cid)) in outputs.iter().enumerate() {
+            c.execute(
+                "INSERT INTO tx_outputs (tx_id, idx, page, lane, slot_index, amount_micronoid, owner, creation_id) VALUES (?1, ?2, 0, 0, ?3, ?4, ?5, ?6)",
+                params![tx_id, i as i64, slot, amount, owner, cid],
+            )
+            .unwrap();
+        }
+    }
+
+    fn slot(i: u64, cid: &str, owner: &str, amount: u64) -> StateSlot {
+        StateSlot { slot_index: i, creation_id: cid.into(), owner: owner.into(), amount_micronoid: amount }
+    }
+
+    #[test]
+    fn picture_of_the_live_state() {
+        let d = db("state");
+        let c = &d.conn;
+        const SEG: u64 = 65_536;
+        // recorded: A (seg 0) and B (seg 1) at #10; #11 spends A and creates C;
+        // an orphaned #11 that spends B must not count; #12 spends the
+        // foreign E and creates F.
+        block(c, 10, "a10", "canonical", &[], &[(5, "o1x", 100, "1"), (70_000, "o1y", 50, "2")]);
+        block(c, 11, "a11", "canonical", &["1"], &[(6, "o1y", 90, "3")]);
+        block(c, 11, "b11", "orphaned", &["2"], &[]);
+        block(c, 12, "a12", "canonical", &["8"], &[(9, "o1z", 39, "4")]);
+        // found by an earlier sweep, no recorded output: D and E
+        replace_state_slots(c, 0, &[slot(7, "9", "o1z", 40), slot(8, "8", "o1w", 10)], 9, "t").unwrap();
+
+        let at = |h| live_count_per_segment(c, h, SEG).unwrap();
+        assert_eq!(at(10).get(&0), Some(&3), "A + D + E");
+        assert_eq!(at(10).get(&1), Some(&1), "B");
+        assert_eq!(at(11).get(&0), Some(&3), "C + D + E, A spent");
+        assert_eq!(at(11).get(&1), Some(&1), "the orphaned spend of B does not count");
+        assert_eq!(at(12).get(&0), Some(&3), "C + D + F, E spent");
+
+        let bal = live_balances(c).unwrap();
+        assert_eq!(bal.get("o1y"), Some(&(140, 2)));
+        assert_eq!(bal.get("o1z"), Some(&(79, 2)));
+        assert_eq!(bal.get("o1x"), None, "spent everything");
+        assert_eq!(bal.get("o1w"), None, "its only coin was spent");
+
+        let mut unspent: Vec<String> = unspent_recorded_outputs(c, 12, 0..SEG).unwrap().into_iter().map(|(_, cid)| cid).collect();
+        unspent.sort();
+        assert_eq!(unspent, vec!["3", "4"]);
+        let ids = recorded_creation_ids(c, 0..SEG).unwrap();
+        assert_eq!(ids, HashSet::from(["1".to_string(), "3".to_string(), "4".to_string()]));
+
+        // a fresh read of segment 0 replaces the old foreign slots
+        replace_state_slots(c, 0, &[slot(7, "9", "o1z", 40)], 12, "t").unwrap();
+        assert_eq!(live_count_per_segment(c, 12, SEG).unwrap().get(&0), Some(&3), "C + D + F");
+        assert_eq!(live_count_per_segment(c, 12, SEG).unwrap().get(&1), Some(&1));
+
+        // an output wrongly flagged as spent in a gap comes back once read live
+        let c_row: i64 = c.query_row("SELECT rowid FROM tx_outputs WHERE creation_id = '3'", [], |r| r.get(0)).unwrap();
+        mark_spent_in_gap(c, &[c_row], "t").unwrap();
+        assert_eq!(live_count_per_segment(c, 12, SEG).unwrap().get(&0), Some(&2), "C flagged");
+        assert_eq!(unmark_live_outputs(c, 0..SEG, &HashSet::from(["3", "9", "4"])).unwrap(), 1);
+        assert_eq!(live_count_per_segment(c, 12, SEG).unwrap().get(&0), Some(&3), "C back");
+
+        upsert_address_balance_cache(c, "o1old", "5", 1, "t").unwrap();
+        upsert_address_balance_cache(c, "o1y", "140", 2, "t").unwrap();
+        let keep: HashSet<String> = HashSet::from(["o1y".to_string()]);
+        assert_eq!(zero_balance_cache_except(c, &keep, "t").unwrap(), 1);
+        let n: i64 = c.query_row("SELECT live_utxo_count FROM address_balance_cache WHERE address = 'o1old'", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0);
+    }
 }

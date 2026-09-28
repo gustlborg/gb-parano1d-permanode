@@ -4,6 +4,24 @@ Notable changes per release. Commit history has the details.
 
 ## Unreleased
 
+- **The UTXO sweep no longer reads the whole state on every run.** Since
+  late September 2026 the node spreads the live UTXOs over more than 70
+  state segments, and reading every slot of each (4.7 million `getSlot`
+  calls every 30 minutes) kept a small node busy most of the time. The
+  permanode now keeps its own picture of the live state - its recorded
+  unspent outputs plus the UTXOs it found in the node without a recorded
+  output (new table `state_slots`) - compares it per segment with
+  `getStateMap` at a height the indexer has fully processed, and reads only
+  segments that differ. A normal run is one node call; the first run after
+  the upgrade reads the segments holding UTXOs from before the recording
+  started once. Balances for the rich list come from that picture.
+- Segment reads are throttled (`state_scan_max_per_second`, default 500),
+  pause while the indexer is behind the node, and end the run instead of
+  skipping slots when the node stops answering - skipped slots used to get
+  their outputs flagged as spent in a gap. A freshly read segment takes
+  such flags back for outputs that are live after all, and once every
+  segment matches, addresses that no longer hold anything are set to zero.
+
 - **Parano1d v2 support** (fork at block 210 537). Requires node v2.0.0
   before that height. The emission mirror follows the height-based v2
   schedule (16 → 11.30 → … → 1 NOID per 1 051 200 blocks), the converted

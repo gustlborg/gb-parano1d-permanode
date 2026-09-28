@@ -45,14 +45,19 @@ decoder_selfcheck = true
 # one call per known address - powers the rich list).
 refresh_addresses_every_cycles = 120
 
-# How often (in poll cycles) to sweep every populated segment of the node's
-# Live State (paranoid_getStateMap picks the segments, paranoid_getSlot reads
-# each slot) to discover every address with a balance, not just ones this
-# permanode has recorded a transaction for - this is what makes the rich
-# list complete. Runs in its own background thread so it never blocks block
-# ingestion, but it's still 65,536 RPC calls per populated segment against
-# the shared node (a few seconds over loopback). 0 disables the sweep.
+# How often (in poll cycles) to check the permanode's picture of the node's
+# Live State against the node and refresh every address's balance - this is
+# what makes the rich list complete. A run compares live UTXOs per state
+# segment (paranoid_getStateMap) with what the permanode knows and reads only
+# segments that differ slot by slot (paranoid_getSlot, 65,536 calls each);
+# normally none do. The first run after an upgrade reads every populated
+# segment once. Runs in its own background thread. 0 disables the sweep.
 scan_slots_every_cycles = 360
+
+# Upper bound for paranoid_getSlot calls per second while a segment is read
+# (0 = unthrottled). The default keeps a small node responsive; a segment then
+# takes about two minutes.
+state_scan_max_per_second = 500
 
 # Where the JSON API listens. Keep this on loopback for a public instance
 # and put a reverse proxy with TLS in front of it.

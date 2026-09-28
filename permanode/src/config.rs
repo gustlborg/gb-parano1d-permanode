@@ -56,15 +56,22 @@ pub struct Config {
     #[serde(default = "default_refresh_addresses_every_cycles")]
     pub refresh_addresses_every_cycles: u64,
 
-    /// How often (in poll cycles) to sweep every populated segment of the
-    /// node's Live State (paranoid_getStateMap to pick the segments, then
-    /// paranoid_getSlot per slot) to discover every address with a
-    /// balance, not just ones this permanode has recorded a transaction
-    /// for. Runs in its own background thread so it never blocks block
-    /// ingestion, but it's still 65,536 RPC calls per populated segment
-    /// against the shared node. 0 disables it.
+    /// How often (in poll cycles) to check the permanode's picture of the
+    /// node's Live State against the node (paranoid_getStateMap, live
+    /// UTXOs per segment) and refresh every address's balance from it.
+    /// Only segments whose counts differ are read slot by slot
+    /// (paranoid_getSlot, 65,536 calls per segment) - normally none, so a
+    /// run is one node call. Runs in its own background thread. 0 disables it.
     #[serde(default = "default_scan_slots_every_cycles")]
     pub scan_slots_every_cycles: u64,
+
+    /// Upper bound for paranoid_getSlot calls per second while the sweep
+    /// reads a segment (0 = unthrottled). Keeps a segment read from
+    /// starving a small node: at the default a segment takes about two
+    /// minutes, and the first run after an upgrade (which reads every
+    /// segment once) a few hours in the background.
+    #[serde(default = "default_state_scan_max_per_second")]
+    pub state_scan_max_per_second: u64,
 
     /// Address the JSON API listens on. Loopback by default;
     /// put a reverse proxy with TLS in front for a public instance rather
@@ -83,6 +90,9 @@ pub struct Config {
     pub donation_address: Option<String>,
 }
 
+fn default_state_scan_max_per_second() -> u64 {
+    500
+}
 fn default_rpc_url() -> String {
     "http://127.0.0.1:9601".to_string()
 }
@@ -127,6 +137,7 @@ impl Default for Config {
             decoder_selfcheck: default_true(),
             refresh_addresses_every_cycles: default_refresh_addresses_every_cycles(),
             scan_slots_every_cycles: default_scan_slots_every_cycles(),
+            state_scan_max_per_second: default_state_scan_max_per_second(),
             listen: default_listen(),
             site_dir: None,
             donation_address: None,
@@ -155,6 +166,8 @@ impl Config {
                  refresh_addresses_every_cycles = {}\n\
                  # 0 disables the live-state sweep\n\
                  scan_slots_every_cycles = {}\n\
+                 # getSlot calls per second while the sweep reads a segment (0 = unthrottled)\n\
+                 state_scan_max_per_second = {}\n\
                  # API listen address (put a TLS reverse proxy in front for the public)\n\
                  listen = {:?}\n\
                  # your donation address, returned by /api/v1/stats for a frontend to show (leave empty for none)\n\
@@ -169,6 +182,7 @@ impl Config {
                 cfg.decoder_selfcheck,
                 cfg.refresh_addresses_every_cycles,
                 cfg.scan_slots_every_cycles,
+                cfg.state_scan_max_per_second,
                 cfg.listen,
             );
             std::fs::write(path, toml_str)?;
