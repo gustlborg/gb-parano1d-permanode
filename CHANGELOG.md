@@ -4,6 +4,8 @@ Notable changes per release. Commit history has the details.
 
 ## Unreleased
 
+- Unknown paths under `/api/` answer with a JSON 404 instead of the
+  frontend's index page, so a client probing for an endpoint can tell.
 - **The UTXO sweep no longer reads the whole state on every run.** Since
   late September 2026 the node spreads the live UTXOs over more than 70
   state segments, and reading every slot of each (4.7 million `getSlot`

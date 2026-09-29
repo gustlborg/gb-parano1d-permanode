@@ -157,10 +157,20 @@ pub async fn run(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+/// An unknown path under /api/ is a client asking for an endpoint this
+/// permanode does not have: a JSON 404, not the frontend's index page.
+fn unknown_api(uri: &Uri) -> Option<Response> {
+    let p = uri.path();
+    (p == "/api" || p.starts_with("/api/")).then(|| (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "unknown API endpoint" }))).into_response())
+}
+
 /// Serves the page compiled into the binary (an index of the API unless
 /// a frontend was placed in `frontend/site` at build time). Unknown
 /// paths get index.html so a client-side router can take over.
 async fn embedded_site(uri: Uri, headers: axum::http::HeaderMap) -> Response {
+    if let Some(r) = unknown_api(&uri) {
+        return r;
+    }
     let path = uri.path().trim_start_matches('/');
     let (file, spa) = match SITE.get_file(path) {
         Some(f) => (f, false),
@@ -180,6 +190,9 @@ async fn embedded_site(uri: Uri, headers: axum::http::HeaderMap) -> Response {
 /// for the client-side router.
 async fn site_dir_file(dir: Arc<std::path::PathBuf>, uri: Uri, headers: axum::http::HeaderMap) -> Response {
     use std::path::Component;
+    if let Some(r) = unknown_api(&uri) {
+        return r;
+    }
     let rel = std::path::Path::new(uri.path().trim_start_matches('/'));
     if rel.components().any(|c| !matches!(c, Component::Normal(_))) {
         return (StatusCode::NOT_FOUND, "not found").into_response();
