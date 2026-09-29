@@ -1,6 +1,6 @@
 [package]
 name = "parano1d-permanode"
-version = "0.2.0"
+version = "0.3.0-dev"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 description = "Permanent transaction history and JSON API for a Parano1d node"
