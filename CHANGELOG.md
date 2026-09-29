@@ -4,6 +4,11 @@ Notable changes per release. Commit history has the details.
 
 ## Unreleased
 
+- Built against Parano1d **v2.0.1**, the mandatory release that supersedes
+  v2.0.0 (from the v2 fork on, a block's difficulty target follows its parent
+  header). Transaction and block formats are unchanged, so the decoder and
+  the stored history stay as they are. Run the permanode next to a v2.0.1
+  node before block 210,537.
 - Unknown paths under `/api/` answer with a JSON 404 instead of the
   frontend's index page, so a client probing for an endpoint can tell.
 - **The UTXO sweep no longer reads the whole state on every run.** Since

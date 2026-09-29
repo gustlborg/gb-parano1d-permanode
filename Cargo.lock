@@ -1075,8 +1075,8 @@ dependencies = [
 
 [[package]]
 name = "noid_chain"
-version = "2.0.0"
-source = "git+https://git.parano1d.org/ignotusnemo/parano1d.git?tag=v2.0.0#69d068f2de8475cd9526474d321c52e1da41d863"
+version = "2.0.1"
+source = "git+https://git.parano1d.org/ignotusnemo/parano1d.git?tag=v2.0.1#6c96ead36c253a6e3ccf150d7a10c4ed62d1e555"
 dependencies = [
  "bincode",
  "libmdbx",
@@ -1092,8 +1092,8 @@ dependencies = [
 
 [[package]]
 name = "noid_core"
-version = "2.0.0"
-source = "git+https://git.parano1d.org/ignotusnemo/parano1d.git?tag=v2.0.0#69d068f2de8475cd9526474d321c52e1da41d863"
+version = "2.0.1"
+source = "git+https://git.parano1d.org/ignotusnemo/parano1d.git?tag=v2.0.1#6c96ead36c253a6e3ccf150d7a10c4ed62d1e555"
 dependencies = [
  "rand",
  "rayon",
@@ -1103,8 +1103,8 @@ dependencies = [
 
 [[package]]
 name = "noid_fri"
-version = "2.0.0"
-source = "git+https://git.parano1d.org/ignotusnemo/parano1d.git?tag=v2.0.0#69d068f2de8475cd9526474d321c52e1da41d863"
+version = "2.0.1"
+source = "git+https://git.parano1d.org/ignotusnemo/parano1d.git?tag=v2.0.1#6c96ead36c253a6e3ccf150d7a10c4ed62d1e555"
 dependencies = [
  "noid_core",
  "noid_poseidon2b",
@@ -1115,8 +1115,8 @@ dependencies = [
 
 [[package]]
 name = "noid_fri_binius"
-version = "2.0.0"
-source = "git+https://git.parano1d.org/ignotusnemo/parano1d.git?tag=v2.0.0#69d068f2de8475cd9526474d321c52e1da41d863"
+version = "2.0.1"
+source = "git+https://git.parano1d.org/ignotusnemo/parano1d.git?tag=v2.0.1#6c96ead36c253a6e3ccf150d7a10c4ed62d1e555"
 dependencies = [
  "noid_core",
  "noid_fri",
@@ -1129,8 +1129,8 @@ dependencies = [
 
 [[package]]
 name = "noid_poseidon2b"
-version = "2.0.0"
-source = "git+https://git.parano1d.org/ignotusnemo/parano1d.git?tag=v2.0.0#69d068f2de8475cd9526474d321c52e1da41d863"
+version = "2.0.1"
+source = "git+https://git.parano1d.org/ignotusnemo/parano1d.git?tag=v2.0.1#6c96ead36c253a6e3ccf150d7a10c4ed62d1e555"
 dependencies = [
  "bech32",
  "hex",
@@ -1143,8 +1143,8 @@ dependencies = [
 
 [[package]]
 name = "noid_tx"
-version = "2.0.0"
-source = "git+https://git.parano1d.org/ignotusnemo/parano1d.git?tag=v2.0.0#69d068f2de8475cd9526474d321c52e1da41d863"
+version = "2.0.1"
+source = "git+https://git.parano1d.org/ignotusnemo/parano1d.git?tag=v2.0.1#6c96ead36c253a6e3ccf150d7a10c4ed62d1e555"
 dependencies = [
  "noid_core",
  "noid_poseidon2b",

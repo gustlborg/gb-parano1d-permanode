@@ -27,8 +27,8 @@ mime_guess = "2"
 # transaction-field derivation stays byte-identical to noid_rpc's
 # get_block_details, instead of reimplementing txid/bech32m/paged-spend
 # logic ourselves. noid_tx supplies the v2 contract-call bits.
-noid_chain = { git = "https://git.parano1d.org/ignotusnemo/parano1d.git", tag = "v2.0.0" }
-noid_tx = { git = "https://git.parano1d.org/ignotusnemo/parano1d.git", tag = "v2.0.0" }
+noid_chain = { git = "https://git.parano1d.org/ignotusnemo/parano1d.git", tag = "v2.0.1" }
+noid_tx = { git = "https://git.parano1d.org/ignotusnemo/parano1d.git", tag = "v2.0.1" }
 permanode-core = { path = "../core" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -39,4 +39,4 @@ tower-http = { version = "0.6", features = ["cors"] }
 ureq = { version = "3.4.2", features = ["json"] }
 
 [dev-dependencies]
-noid_poseidon2b = { git = "https://git.parano1d.org/ignotusnemo/parano1d.git", tag = "v2.0.0" }
+noid_poseidon2b = { git = "https://git.parano1d.org/ignotusnemo/parano1d.git", tag = "v2.0.1" }
