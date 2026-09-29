@@ -1019,10 +1019,14 @@ fn min_burn_bands(active: u64, log_slots: u32, thresholds: &[PressureThreshold],
 
 #[derive(serde::Serialize)]
 struct DevelopmentAllocation {
-    /// Last block of the allocation under the network's schedule (the
-    /// fork converts the remaining three years into 30 s blocks).
+    /// Last block of the allocation under the rules in force for the next
+    /// block: the pre-v2 end until the fork, the converted v2 end from then
+    /// on (like every other field here, which follows the next payout).
     end_height: u64,
-    /// Where it would have ended under the pre-v2 rule (never reached).
+    /// Last block under v2, which converts the remaining three years into
+    /// 30 s blocks.
+    v2_end_height: u64,
+    /// Where it ends under the pre-v2 rule (never reached once v2 is live).
     legacy_end_height: u64,
     /// Blocks per payout at the next payout (4,320 legacy, 2,880 v2).
     payout_interval: u64,
@@ -1032,7 +1036,7 @@ struct DevelopmentAllocation {
     payout_per_fund_micronoid: u64,
     last_legacy_payout_height: u64,
     first_v2_payout_height: u64,
-    /// Blocks covered by the final, partial v2 payout at `end_height`.
+    /// Blocks covered by the final, partial v2 payout at `v2_end_height`.
     final_partial_blocks: u64,
     cumulative_miner_micronoid: String,
     /// Each of the two funds has received this much so far.
@@ -1175,7 +1179,12 @@ async fn get_economics(State(state): State<Arc<AppState>>) -> ApiResult<Economic
             protocol: protocol_info(tip, tip_timestamp),
             v2: v2_schedule(tip, tip_timestamp, &expansions),
             development: DevelopmentAllocation {
-                end_height: emission::DEVELOPMENT_ALLOCATION_END_HEIGHT,
+                end_height: if emission::v2_active(tip + 1) {
+                    emission::DEVELOPMENT_ALLOCATION_END_HEIGHT
+                } else {
+                    emission::LEGACY_DEVELOPMENT_ALLOCATION_END_HEIGHT
+                },
+                v2_end_height: emission::DEVELOPMENT_ALLOCATION_END_HEIGHT,
                 legacy_end_height: emission::LEGACY_DEVELOPMENT_ALLOCATION_END_HEIGHT,
                 payout_interval: if next_payout.is_some_and(emission::v2_active) {
                     emission::V2_BLOCKS_PER_DAY

@@ -32,7 +32,9 @@ Notable changes per release. Commit history has the details.
   version, activation height and estimate, target block time);
   `/halving` and `/economics` add the `v2` reward schedule (tiers,
   next reduction, progress, issued since activation), and the development
-  section reports the payout rhythm at the next payout.
+  section follows the rules in force for the next block: payout rhythm
+  and `end_height` stay at the pre-v2 values until the fork, while
+  `v2_end_height` and `legacy_end_height` carry both ends throughout.
 - **Contract calls** are read from the raw block bytes of v2 blocks
   (getBlockDetails does not report them): transactions carry
   `contract: "call" | "close"`, block lists `contract_calls`, and the CSV
