@@ -59,6 +59,17 @@ scan_slots_every_cycles = 360
 # takes about two minutes.
 state_scan_max_per_second = 500
 
+# The node keeps every block header since genesis, but bodies only for a few
+# minutes. In a background thread the permanode copies the headers below the
+# first block it recorded, from there down to genesis, as header-only blocks:
+# block pages and mining statistics then cover the whole chain, while
+# everything about the recorded history (counts, "history since", gaps,
+# balances, export) stays as it was. This is the upper bound for
+# paranoid_getBlockHeader calls per second (0 disables the backfill). It
+# pauses while the indexer is behind and resumes after a restart; at the
+# default it copies 180,000 headers an hour.
+header_backfill_per_second = 50
+
 # Where the JSON API listens. Keep this on loopback for a public instance
 # and put a reverse proxy with TLS in front of it.
 listen = "127.0.0.1:8420"

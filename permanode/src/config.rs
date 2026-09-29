@@ -73,6 +73,15 @@ pub struct Config {
     #[serde(default = "default_state_scan_max_per_second")]
     pub state_scan_max_per_second: u64,
 
+    /// Upper bound for paranoid_getBlockHeader calls per second while the
+    /// header backfill copies the node's headers below the archive's first
+    /// block, from there down to genesis (0 disables the backfill). Runs
+    /// in its own background thread, pauses while the indexer is behind the
+    /// node, and picks up where it stopped after a restart; at the default
+    /// it copies 180,000 headers an hour.
+    #[serde(default = "default_header_backfill_per_second")]
+    pub header_backfill_per_second: u64,
+
     /// Address the JSON API listens on. Loopback by default;
     /// put a reverse proxy with TLS in front for a public instance rather
     /// than exposing this port directly.
@@ -92,6 +101,9 @@ pub struct Config {
 
 fn default_state_scan_max_per_second() -> u64 {
     500
+}
+fn default_header_backfill_per_second() -> u64 {
+    50
 }
 fn default_rpc_url() -> String {
     "http://127.0.0.1:9601".to_string()
@@ -138,6 +150,7 @@ impl Default for Config {
             refresh_addresses_every_cycles: default_refresh_addresses_every_cycles(),
             scan_slots_every_cycles: default_scan_slots_every_cycles(),
             state_scan_max_per_second: default_state_scan_max_per_second(),
+            header_backfill_per_second: default_header_backfill_per_second(),
             listen: default_listen(),
             site_dir: None,
             donation_address: None,
@@ -168,6 +181,8 @@ impl Config {
                  scan_slots_every_cycles = {}\n\
                  # getSlot calls per second while the sweep reads a segment (0 = unthrottled)\n\
                  state_scan_max_per_second = {}\n\
+                 # getBlockHeader calls per second while copying the headers below the archive (0 disables it)\n\
+                 header_backfill_per_second = {}\n\
                  # API listen address (put a TLS reverse proxy in front for the public)\n\
                  listen = {:?}\n\
                  # your donation address, returned by /api/v1/stats for a frontend to show (leave empty for none)\n\
@@ -183,6 +198,7 @@ impl Config {
                 cfg.refresh_addresses_every_cycles,
                 cfg.scan_slots_every_cycles,
                 cfg.state_scan_max_per_second,
+                cfg.header_backfill_per_second,
                 cfg.listen,
             );
             std::fs::write(path, toml_str)?;

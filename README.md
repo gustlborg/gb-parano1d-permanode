@@ -130,6 +130,10 @@ must not fall behind the node's pruning: an outage longer than roughly
   (default 360, about 30 minutes; 0 disables it).
 - `state_scan_max_per_second` — upper bound for `getSlot` calls while the
   sweep reads a state segment (default 500; 0 = unthrottled).
+- `header_backfill_per_second` — upper bound for `getBlockHeader` calls
+  while the header backfill copies the headers from before the first
+  recorded block (default 50, about 180,000 headers an hour; 0 disables
+  it). See "Header backfill" below.
 - `donation_address` — returned by `/api/v1/stats` for a frontend to
   show; leave empty for none.
 
@@ -181,7 +185,9 @@ during an update - it is the whole point.
   `block/height/{h}`, `block/hash/{h}`, `tx/{txid}` with the fee split
   into miner share and consensus burn, `address/{a}` (recorded and live
   balance, transactions, notices when the recorded figures cannot be
-  complete), `address/{a}/utxos`, `mempool`, `richlist`, `gaps`,
+  complete, blocks mined), `address/{a}/utxos`, `mempool`, `richlist`,
+  `miners` (miners by blocks found, whole chain or the last 7 days /
+  24 hours), `gaps`,
   `orphans` (blocks a reorg replaced, with what took their height),
   `halving` (live-state occupancy against the expansion threshold, the
   finalized trigger window, sampled header history) and `economics`
@@ -247,6 +253,42 @@ during an update - it is the whole point.
   They are listed under `/api/v1/gaps` and counted in `stats`; heights
   still inside the serving window are retried automatically.
   Older ones can be filled from another permanode, see below.
+
+## Header backfill
+
+The node prunes bodies after minutes but keeps every block header since
+genesis. So that block pages and mining statistics cover the whole chain,
+the permanode copies the headers from below its first recorded block,
+from there down to genesis, into its database as **header-only blocks**:
+height, hash, parent, time, miner, difficulty target, state size and the
+other header fields - no transactions, no reward (the coinbase value
+includes fees, which are unknown without the body), no fees.
+
+- It runs in a background thread next to the indexer, at most
+  `header_backfill_per_second` header calls (default 50), pauses while the
+  indexer is behind the node, and only copies heights deep enough to be
+  final. Each header must be the parent of the block above it, so an
+  answer that does not fit stops the run instead of being stored. After a
+  restart it goes on where it stopped; after an error it waits (one
+  minute, longer each time) instead of retrying at once.
+- It logs its start, a line every 10,000 headers and its completion.
+  `stats` reports `header_only_blocks`, `headers_from_height` (0 once
+  genesis is reached) and `archive_from_height`, the first recorded block.
+- Header-only blocks are not part of the recorded history. Everything
+  that describes that history leaves them out: `indexed_blocks`,
+  `oldest_retained_timestamp`, gaps, balances and the UTXO sweep, the
+  reorg re-check, pruning and the CSV export are exactly as they would be
+  without them.
+- In the API, `block/height/{h}` and `block/hash/{h}` return them with
+  `"archived": false`, `"transactions": []`, `reward_micronoid` and
+  `total_fees_micronoid` null, and `archive_from_height`;
+  `miner_subsidy_micronoid` (what the consensus rules let the coinbase mint
+  before fees, known for every block) is set. `blocks?before={h}` pages
+  down the chain across the first recorded block. `address/{a}` carries
+  `blocks_mined` and `miners?period=all|7d|24h` ranks miners, both over
+  the header-only blocks too (genesis is nobody's block).
+- Space: about 1 KB per header including indexes, some 100 MB for the
+  first 108,000 blocks of the chain.
 
 ## CSV export
 
@@ -345,6 +387,10 @@ re-downloaded from the network.
   from another permanode's database (`import-bodies`, see above).
 - `Address already in use`: something else listens on `listen`; change
   the port or stop the other program.
+- `header backfill stopped, next attempt in N min`: the node did not
+  answer, or answered with a header that does not fit the chain on
+  record. The backfill tries again by itself; nothing it stored is
+  affected.
 - Building from source fails in bindgen: see Building below.
 
 ## License

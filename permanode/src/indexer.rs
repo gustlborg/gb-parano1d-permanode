@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::decode;
 use crate::rpc::{BlockDetailsInfo, BlockHeaderInfo, RetainedBlockInfo, RpcClient, StateMapInfo};
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use log::{error, info, warn};
 use permanode_core::db;
@@ -29,6 +29,17 @@ pub fn run(conn: &Connection, rpc: &RpcClient, cfg: &Config) -> Result<()> {
     // running (tens of thousands of RPC calls per populated segment) when
     // its next trigger comes around - the flag lives for the whole run().
     let slot_scan_running = Arc::new(AtomicBool::new(false));
+    if cfg.header_backfill_per_second > 0 {
+        let db_path = cfg.db_path.clone();
+        let rpc = rpc.clone();
+        let per_second = cfg.header_backfill_per_second;
+        let reorg_check_depth = cfg.reorg_check_depth;
+        // Its own connection, like the sweep: its short batch commits
+        // queue behind the ingest loop's, never the other way round.
+        thread::Builder::new()
+            .name("header-backfill".into())
+            .spawn(move || header_backfill_thread(&db_path, &rpc, per_second, reorg_check_depth))?;
+    }
     loop {
         if let Err(e) = poll_once(conn, rpc, cfg) {
             warn!("poll cycle failed, will retry: {e:#}");
@@ -285,6 +296,14 @@ fn recheck_height(conn: &Connection, rpc: &RpcClient, cfg: &Config, height: u64)
         }
         Some((_block_id, known_hash)) if known_hash == header.hash => {
             // Still canonical, nothing to do.
+        }
+        Some((block_id, known_hash)) if db::is_header_only(conn, block_id)? => {
+            // A header-only row below the archive with a different hash.
+            // The backfill only writes heights deeper than this window and
+            // the protocol's reorg limit, so this cannot happen short of a
+            // broken node; the row is not part of the archive and must not
+            // turn into an orphan plus a gap through this path.
+            warn!("height {height}: header-only block {known_hash} on record, the node now reports {} - left untouched", header.hash);
         }
         Some((old_block_id, old_hash)) => {
             warn!(
@@ -736,6 +755,24 @@ fn processed_height(conn: &Connection) -> Result<u64> {
     Ok(db::get_state(conn, "last_processed_height")?.and_then(|s| s.parse().ok()).unwrap_or(0))
 }
 
+/// The node's tip, as soon as the indexer is at most one block behind it.
+/// Background jobs call this between chunks of work so they never compete
+/// with block ingestion; `job` names them in the one log line per pause.
+fn tip_once_indexer_current(conn: &Connection, rpc: &RpcClient, job: &str) -> Result<u64> {
+    let mut paused = false;
+    loop {
+        let tip = rpc.block_count()?;
+        if processed_height(conn)? + 1 >= tip {
+            return Ok(tip);
+        }
+        if !paused {
+            info!("{job}: pausing while the indexer catches up with the node (#{tip})");
+            paused = true;
+        }
+        thread::sleep(Duration::from_secs(2));
+    }
+}
+
 /// Blocks until the indexer has processed `height`, or fails after `limit`.
 fn wait_for_indexer(conn: &Connection, rpc: &RpcClient, height: u64, limit: Duration) -> Result<()> {
     let started = Instant::now();
@@ -791,18 +828,7 @@ fn read_segment(conn: &Connection, rpc: &RpcClient, slots: std::ops::Range<u64>,
     let mut live = Vec::new();
     for idx in slots {
         if idx % 2_048 == 0 {
-            let mut paused = false;
-            loop {
-                let tip = rpc.block_count()?;
-                if processed_height(conn)? + 1 >= tip {
-                    break;
-                }
-                if !paused {
-                    info!("live state sweep: pausing while the indexer catches up with the node (#{tip})");
-                    paused = true;
-                }
-                thread::sleep(Duration::from_secs(2));
-            }
+            tip_once_indexer_current(conn, rpc, "live state sweep")?;
         }
         let mut attempt = 0;
         let slot = loop {
@@ -824,4 +850,184 @@ fn read_segment(conn: &Connection, rpc: &RpcClient, slots: std::ops::Range<u64>,
         }
     }
     Ok(live)
+}
+
+// ---------------------------------------------------------------- header backfill
+
+/// Headers fetched per database transaction: the write lock is held for
+/// milliseconds, a pause for the indexer takes effect within seconds, and
+/// the fsync per commit does not matter.
+const HEADER_BATCH: u64 = 200;
+/// The protocol's maximum reorg depth is 17; from 18 confirmations on a
+/// block can no longer change.
+const FINAL_DEPTH: u64 = 18;
+/// Progress in `indexer_state`: the next height to copy, or `done`.
+const HEADER_BACKFILL_KEY: &str = "header_backfill_next";
+/// One progress line per this many headers.
+const HEADER_LOG_EVERY: u64 = 10_000;
+
+/// Runs the header backfill until it is complete. After an error (node
+/// unreachable, an answer that does not fit) it waits and tries again,
+/// longer each time, so a struggling node is never hammered.
+fn header_backfill_thread(db_path: &str, rpc: &RpcClient, per_second: u64, reorg_check_depth: u64) {
+    let mut delay = Duration::from_secs(60);
+    loop {
+        let mut progressed = false;
+        let result = db::open(db_path).and_then(|conn| backfill_headers(&conn, rpc, per_second, reorg_check_depth, &mut progressed));
+        let Err(e) = result else {
+            return;
+        };
+        if progressed {
+            delay = Duration::from_secs(60);
+        }
+        warn!("header backfill stopped, next attempt in {} min: {e:#}", delay.as_secs() / 60);
+        thread::sleep(delay);
+        delay = (delay * 2).min(Duration::from_secs(1_800));
+    }
+}
+
+/// Copies the node's permanent block headers below the archive's first
+/// block into `blocks` as header-only rows (`db::HEADER_ONLY_SOURCE`), top
+/// down to genesis:
+///
+/// - at most `per_second` header calls, and paused while the indexer is
+///   behind the node (checked before every batch);
+/// - only heights deeper than both the reorg re-check window and the
+///   protocol's reorg limit, so a header-only row is final when written and
+///   never meets the re-check;
+/// - every header must be the parent of the block above it (the archive's
+///   first block, then the header copied before), so an answer that does
+///   not fit ends the run instead of being stored;
+/// - each batch is one transaction together with its progress entry, so a
+///   restart goes on exactly where the last run stopped and nothing is
+///   written twice.
+fn backfill_headers(conn: &Connection, rpc: &RpcClient, per_second: u64, reorg_check_depth: u64, progressed: &mut bool) -> Result<()> {
+    let archive_first = loop {
+        match db::archive_first_height(conn)? {
+            Some(h) => break h,
+            // a fresh database: wait for the indexer's first block
+            None => thread::sleep(Duration::from_secs(30)),
+        }
+    };
+    let state = db::get_state(conn, HEADER_BACKFILL_KEY)?;
+    if state.as_deref() == Some("done") {
+        return Ok(());
+    }
+    // The rows from the lowest one on record up to the archive have no
+    // holes (whole batches, top down), so the lowest row says where to go
+    // on; the progress entry is committed with it and has to agree.
+    let lowest = db::lowest_recorded_height(conn)?.unwrap_or(archive_first);
+    let Some(mut next) = lowest.checked_sub(1) else {
+        db::set_state(conn, HEADER_BACKFILL_KEY, "done")?;
+        return Ok(());
+    };
+    if let Some(s) = state.as_deref().filter(|s| s.parse::<u64>().ok() != Some(next)) {
+        warn!("header backfill: progress entry says #{s}, the database #{next} - going on from #{next}");
+    }
+    let (_, mut expected_hash) =
+        db::canonical_link_at(conn, next + 1)?.with_context(|| format!("no canonical block at #{} to start below", next + 1))?;
+    if lowest == archive_first {
+        info!("header backfill: copying {} header(s) below the archive (#{archive_first}) at up to {per_second}/s", next + 1);
+    } else {
+        info!("header backfill: going on at #{next}, {} header(s) to go, at up to {per_second}/s", next + 1);
+    }
+
+    let mut limiter = Throttle::new(per_second);
+    let mut copied: u64 = 0;
+    let mut waiting_for_finality = false;
+    loop {
+        let tip = tip_once_indexer_current(conn, rpc, "header backfill")?;
+        let horizon = tip.saturating_sub(reorg_check_depth.max(FINAL_DEPTH) + 1);
+        if next > horizon {
+            // A young database: the archive still starts inside the
+            // re-check window. Its parent will be final in a few blocks.
+            if !waiting_for_finality {
+                info!("header backfill: waiting until #{next} is final");
+                waiting_for_finality = true;
+            }
+            thread::sleep(Duration::from_secs(60));
+            continue;
+        }
+        let low = next.saturating_sub(HEADER_BATCH - 1);
+        let mut batch = Vec::with_capacity((next - low + 1) as usize);
+        let mut genesis_missing = false;
+        for height in (low..=next).rev() {
+            limiter.wait();
+            let Some(header) = fetch_header(rpc, height)? else {
+                if height == 0 {
+                    genesis_missing = true;
+                    break;
+                }
+                bail!("the node has no header at #{height}");
+            };
+            if header.height != height || header.hash != expected_hash {
+                bail!(
+                    "the node's header at #{height} ({} at #{}) is not the parent of #{} on record ({expected_hash})",
+                    header.hash,
+                    header.height,
+                    height + 1
+                );
+            }
+            expected_hash = header.prev_hash.clone();
+            batch.push(header);
+        }
+
+        let done = low == 0;
+        let now = Utc::now().to_rfc3339();
+        let tx = db::write_tx(conn)?;
+        for header in &batch {
+            db::insert_header_only_block(&tx, &header_only_block(header), &now)?;
+        }
+        db::set_state(&tx, HEADER_BACKFILL_KEY, &if done { "done".to_string() } else { (low - 1).to_string() })?;
+        tx.commit()?;
+        *progressed = true;
+
+        let before = copied;
+        copied += batch.len() as u64;
+        if done {
+            let first = if genesis_missing { 1 } else { 0 };
+            info!("header backfill complete: headers from #{first} up to the archive (#{archive_first}) are on record ({copied} copied in this run)");
+            if genesis_missing {
+                warn!("header backfill: the node serves no header for genesis (#0)");
+            }
+            return Ok(());
+        }
+        if copied / HEADER_LOG_EVERY != before / HEADER_LOG_EVERY {
+            info!("header backfill: down to #{low}, {low} header(s) to go");
+        }
+        next = low - 1;
+    }
+}
+
+/// One header, retried a few times; a node that keeps failing ends the run.
+fn fetch_header(rpc: &RpcClient, height: u64) -> Result<Option<BlockHeaderInfo>> {
+    let mut attempt = 0;
+    loop {
+        match rpc.get_block_header(height) {
+            Ok(header) => return Ok(header),
+            Err(e) if attempt < 4 => {
+                attempt += 1;
+                thread::sleep(Duration::from_millis(500 * attempt));
+                if attempt == 4 {
+                    warn!("header backfill: getBlockHeader({height}) keeps failing: {e:#}");
+                }
+            }
+            Err(e) => bail!("getBlockHeader({height}) failed five times: {e:#}"),
+        }
+    }
+}
+
+fn header_only_block(h: &BlockHeaderInfo) -> db::HeaderOnlyBlock {
+    db::HeaderOnlyBlock {
+        height: h.height,
+        hash: h.hash.clone(),
+        prev_hash: h.prev_hash.clone(),
+        state_root: h.state_root.clone(),
+        tx_root: h.tx_root.clone(),
+        timestamp: h.timestamp,
+        miner: h.miner.clone(),
+        nonce_hex: h.nonce_hex.clone(),
+        difficulty_target: h.difficulty_target.clone(),
+        log_slots: h.log_slots,
+    }
 }

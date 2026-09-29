@@ -59,6 +59,17 @@ struct AppState {
     /// recorded block and get slower as the history grows. Recomputed
     /// when the tip moves on or the entry is older than a minute.
     period_cache: Mutex<Option<(i64, i64, Vec<PeriodActivity>)>>,
+    /// `/miners` per period, keyed by the indexed tip and the lowest
+    /// block on record (which moves while the header backfill runs); a
+    /// scan of the whole chain takes a noticeable fraction of a second.
+    miners_cache: Mutex<std::collections::HashMap<&'static str, MinersCacheEntry>>,
+}
+
+struct MinersCacheEntry {
+    tip: i64,
+    lowest: Option<u64>,
+    computed_at: i64,
+    report: queries::MinersReport,
 }
 
 #[derive(Default)]
@@ -121,6 +132,7 @@ pub async fn run(cfg: &Config) -> Result<()> {
         state_history: Mutex::new(StateHistory::default()),
         window_cache: Mutex::new(None),
         period_cache: Mutex::new(None),
+        miners_cache: Mutex::new(std::collections::HashMap::new()),
     });
 
     let api = Router::new()
@@ -134,6 +146,7 @@ pub async fn run(cfg: &Config) -> Result<()> {
         .route("/api/v1/gaps", get(get_gaps))
         .route("/api/v1/orphans", get(get_orphans))
         .route("/api/v1/richlist", get(get_richlist))
+        .route("/api/v1/miners", get(get_miners))
         .route("/api/v1/mempool", get(get_mempool))
         .route("/api/v1/halving", get(get_halving))
         .route("/api/v1/economics", get(get_economics));
@@ -432,13 +445,24 @@ struct LimitQuery {
     limit: Option<i64>,
 }
 
-async fn get_blocks(
-    State(state): State<Arc<AppState>>,
-    Query(q): Query<LimitQuery>,
-) -> ApiResult<Vec<queries::BlockSummary>> {
+#[derive(Deserialize)]
+struct BlocksQuery {
+    limit: Option<i64>,
+    /// Page on: only blocks below this height.
+    before: Option<i64>,
+}
+
+/// Newest blocks, or with `before` the next page further down - across
+/// the archive's first block into the header-only blocks below it. A full
+/// page of final blocks never changes and is cached like a final block.
+async fn get_blocks(State(state): State<Arc<AppState>>, Query(q): Query<BlocksQuery>) -> Result<Response, ApiErrorOr404> {
     let conn = state.db();
     let limit = q.limit.unwrap_or(25).clamp(1, 200);
-    Ok(Json(queries::recent_blocks(&conn, limit)?))
+    let blocks = queries::recent_blocks(&conn, limit, q.before)?;
+    let tip = queries::indexed_tip(&conn)?;
+    let complete_page = blocks.len() as i64 == limit || blocks.last().is_some_and(|b| b.height == 0);
+    let newest_final = blocks.first().is_some_and(|b| tip.is_some_and(|t| t - b.height + 1 >= FINAL_CONFIRMATIONS));
+    Ok(cached_json(blocks, q.before.is_some() && complete_page && newest_final))
 }
 
 async fn get_block_by_height(
@@ -540,6 +564,9 @@ struct AddressPage {
     /// reached for this.
     live_balance_micronoid: Option<String>,
     live_utxo_count: Option<u64>,
+    /// Canonical blocks this address mined, header-only blocks below the
+    /// archive included.
+    blocks_mined: queries::BlocksMined,
 }
 
 /// Fetches and sorts (largest first) an address's live slots. `None` if the
@@ -567,11 +594,12 @@ async fn get_address(
     }
     let page = q.page.unwrap_or(1).max(1);
     let page_size = q.page_size.unwrap_or(25).clamp(1, 200);
-    let (transactions, total, balance) = {
+    let (transactions, total, balance, blocks_mined) = {
         let conn = state.db();
         let (transactions, total) = queries::txs_by_address(&conn, &address, page, page_size)?;
         let balance = queries::address_balance(&conn, &address)?;
-        (transactions, total, balance)
+        let blocks_mined = queries::blocks_mined(&conn, &address)?;
+        (transactions, total, balance, blocks_mined)
     };
 
     // Just the summary here (balance + count) - the individual UTXOs are a
@@ -590,6 +618,7 @@ async fn get_address(
         balance,
         live_balance_micronoid,
         live_utxo_count,
+        blocks_mined,
     }))
 }
 
@@ -626,6 +655,63 @@ async fn get_orphans(State(state): State<Arc<AppState>>, Query(q): Query<LimitQu
 async fn get_richlist(State(state): State<Arc<AppState>>) -> ApiResult<Vec<queries::RichListEntry>> {
     let conn = state.db();
     Ok(Json(queries::richlist(&conn, 100)?))
+}
+
+#[derive(Deserialize)]
+struct MinersQuery {
+    period: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(serde::Serialize)]
+struct MinersResponse {
+    /// `all`, `7d` or `24h`.
+    period: &'static str,
+    #[serde(flatten)]
+    report: queries::MinersReport,
+}
+
+/// Most miners a cached report keeps; `limit` picks from those.
+const MINERS_MAX: usize = 1_000;
+
+/// Miners by blocks found over the whole chain (`period=all`, the default)
+/// or the last 7 days / 24 hours, with their share - header-only blocks
+/// below the archive included.
+async fn get_miners(State(state): State<Arc<AppState>>, Query(q): Query<MinersQuery>) -> Result<Response, ApiErrorOr404> {
+    let (period, seconds) = match q.period.as_deref().unwrap_or("all") {
+        "all" => ("all", None),
+        "7d" => ("7d", Some(7 * 86_400i64)),
+        "24h" => ("24h", Some(86_400i64)),
+        _ => return Err(ApiErrorOr404::BadRequest("period must be all, 7d or 24h")),
+    };
+    let limit = q.limit.unwrap_or(100).clamp(1, MINERS_MAX);
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mut report = {
+        let conn = state.db();
+        let tip = queries::indexed_tip(&conn)?.unwrap_or(0);
+        let lowest = db::lowest_recorded_height(&conn)?;
+        let cached = {
+            let cache = state.miners_cache.lock().unwrap_or_else(|e| e.into_inner());
+            cache
+                .get(period)
+                .filter(|e| e.tip == tip && e.lowest == lowest && now_unix - e.computed_at < 60)
+                .map(|e| e.report.clone())
+        };
+        match cached {
+            Some(report) => report,
+            None => {
+                let report = queries::miners(&conn, seconds.map(|s| now_unix - s), MINERS_MAX)?;
+                let entry = MinersCacheEntry { tip, lowest, computed_at: now_unix, report: report.clone() };
+                state.miners_cache.lock().unwrap_or_else(|e| e.into_inner()).insert(period, entry);
+                report
+            }
+        }
+    };
+    report.miners.truncate(limit);
+    Ok(cached_json(MinersResponse { period, report }, false))
 }
 
 async fn get_mempool(State(state): State<Arc<AppState>>) -> ApiResult<live_rpc::MempoolInfo> {
@@ -1226,6 +1312,8 @@ async fn get_economics(State(state): State<Arc<AppState>>) -> ApiResult<Economic
 enum ApiErrorOr404 {
     Error(ApiError),
     NotFound,
+    /// A query parameter outside what the endpoint accepts.
+    BadRequest(&'static str),
 }
 impl<E: Into<anyhow::Error>> From<E> for ApiErrorOr404 {
     fn from(e: E) -> Self {
@@ -1237,6 +1325,7 @@ impl IntoResponse for ApiErrorOr404 {
         match self {
             ApiErrorOr404::Error(e) => e.into_response(),
             ApiErrorOr404::NotFound => NotFound.into_response(),
+            ApiErrorOr404::BadRequest(msg) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": msg }))).into_response(),
         }
     }
 }

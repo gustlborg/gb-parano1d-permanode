@@ -16,9 +16,33 @@
 //!   gaps observed inside what looked like a retained span, almost
 //!   certainly reorg-related) — so treat every gap as expected, not a bug
 //!   to silently ignore.
+//! - Below the archive's first block, the header backfill adds the node's
+//!   permanent headers as `blocks` rows with `body_source = 'header'`
+//!   (see `HEADER_ONLY_SOURCE`): canonical, never a body, never a gap.
+//!   They are not part of the recorded archive, and every query about it
+//!   (coverage, counts, gaps, balances, export, pruning) excludes them
+//!   explicitly with `ARCHIVED` / `archived_filter_on`.
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use rusqlite::{params, Connection, OptionalExtension};
+
+/// `blocks.body_source` of a header-only row: a block below the archive's
+/// first block whose header the backfill copied from the node, which keeps
+/// every header for ever. Its body was pruned long before this permanode
+/// started, so it has no transactions, reward or fees on record.
+pub const HEADER_ONLY_SOURCE: &str = "header";
+
+/// SQL predicate on the `blocks` table: the row belongs to the recorded
+/// archive, i.e. it is not a header-only row. NULL-safe (rows from before
+/// `body_source` existed hold NULL and are archive rows). The partial
+/// indexes in `migrate_locked` are defined on exactly this expression, so
+/// queries using it stay as fast as before the backfill.
+pub const ARCHIVED: &str = "body_source IS NOT 'header'";
+
+/// `ARCHIVED` for a table alias, e.g. `archived_filter_on("b")`.
+pub fn archived_filter_on(alias: &str) -> String {
+    format!("{alias}.{ARCHIVED}")
+}
 
 pub fn open(path: &str) -> Result<Connection> {
     let conn = Connection::open(path)?;
@@ -43,8 +67,16 @@ pub fn open(path: &str) -> Result<Connection> {
 /// Starts a write transaction on a shared `&Connection`. Callers commit
 /// with `tx.commit()`; dropping it rolls back, so a crash or error between
 /// the statements of one logical unit leaves nothing half-written.
+///
+/// The write lock is taken right away (`BEGIN IMMEDIATE`), so writers on
+/// different connections - the ingest loop, the sweep, the header
+/// backfill - queue for each other through the busy timeout. A deferred
+/// transaction that reads first would fail at once with "database is
+/// locked" whenever another connection committed between its first read
+/// and its first write: in WAL mode its snapshot is then stale and SQLite
+/// does not wait.
 pub fn write_tx(conn: &Connection) -> Result<rusqlite::Transaction<'_>> {
-    Ok(conn.unchecked_transaction()?)
+    Ok(rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?)
 }
 
 /// Idempotent schema migrations for columns added after the initial
@@ -108,6 +140,20 @@ fn migrate_locked(conn: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS idx_outputs_creation ON tx_outputs(creation_id);
          CREATE INDEX IF NOT EXISTS idx_blocks_timestamp ON blocks(timestamp);
          CREATE INDEX IF NOT EXISTS idx_tx_contract ON transactions(block_id) WHERE contract_flags != 0;",
+    )?;
+    // Header backfill: mining statistics look blocks up by miner (with
+    // body_source and height in the index they are counted from the index
+    // alone), and the archive's own figures (first height, oldest body,
+    // block count) must not have to step over the header-only rows below
+    // the archive. The partial indexes use the exact `ARCHIVED` expression
+    // so the planner can pick them for every query that filters with it;
+    // body_source in them makes them cover such a filter, otherwise the
+    // planner prefers walking the whole miner index.
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_blocks_miner ON blocks(miner, body_source, height);
+         CREATE INDEX IF NOT EXISTS idx_blocks_header_only ON blocks(height) WHERE body_source = 'header';
+         CREATE INDEX IF NOT EXISTS idx_blocks_archive_height ON blocks(height, body_source) WHERE body_source IS NOT 'header';
+         CREATE INDEX IF NOT EXISTS idx_blocks_archive_timestamp ON blocks(timestamp, body_source) WHERE body_source IS NOT 'header';",
     )?;
     Ok(())
 }
@@ -282,6 +328,93 @@ pub fn canonical_hash_at(conn: &Connection, height: u64) -> Result<Option<(i64, 
     }
 }
 
+/// Hash and parent hash of the canonical block on record at `height`.
+pub fn canonical_link_at(conn: &Connection, height: u64) -> Result<Option<(String, String)>> {
+    let Some((block_id, hash)) = canonical_hash_at(conn, height)? else {
+        return Ok(None);
+    };
+    let prev: String = conn.query_row("SELECT prev_hash FROM blocks WHERE id = ?1", params![block_id], |r| r.get(0))?;
+    Ok(Some((hash, prev)))
+}
+
+/// Whether the row `block_id` is a header-only block from the backfill.
+pub fn is_header_only(conn: &Connection, block_id: i64) -> Result<bool> {
+    let source: Option<String> = conn.query_row("SELECT body_source FROM blocks WHERE id = ?1", params![block_id], |r| r.get(0))?;
+    Ok(source.as_deref() == Some(HEADER_ONLY_SOURCE))
+}
+
+/// First height of the recorded archive: the lowest block this permanode
+/// recorded as it arrived (with a body or as a gap). Header-only rows lie
+/// below it. `None` before the first block is recorded.
+pub fn archive_first_height(conn: &Connection) -> Result<Option<u64>> {
+    let h: Option<i64> = conn.query_row(&format!("SELECT MIN(height) FROM blocks WHERE {ARCHIVED}"), [], |r| r.get(0))?;
+    Ok(h.map(|h| h as u64))
+}
+
+/// Lowest height with any block on record, header-only rows included.
+pub fn lowest_recorded_height(conn: &Connection) -> Result<Option<u64>> {
+    let h: Option<i64> = conn.query_row("SELECT MIN(height) FROM blocks", [], |r| r.get(0))?;
+    Ok(h.map(|h| h as u64))
+}
+
+/// A block header as the node keeps it for ever (`paranoid_getBlockHeader`).
+#[derive(Debug, Clone)]
+pub struct HeaderOnlyBlock {
+    pub height: u64,
+    pub hash: String,
+    pub prev_hash: String,
+    pub state_root: String,
+    pub tx_root: String,
+    pub timestamp: u64,
+    pub miner: String,
+    pub nonce_hex: String,
+    pub difficulty_target: String,
+    pub log_slots: u32,
+}
+
+/// Records `b` as a header-only canonical block below the archive.
+/// Idempotent: returns `false` and writes nothing if the same block is on
+/// record already. A different block at that height is an error - the
+/// backfill only ever runs below the archive, where nothing else is stored.
+/// Reward and fees stay NULL: the stored reward is the coinbase value
+/// (subsidy plus the fees the miner claimed), and the fees are unknown
+/// without the body.
+pub fn insert_header_only_block(conn: &Connection, b: &HeaderOnlyBlock, now: &str) -> Result<bool> {
+    let mut stmt = conn.prepare("SELECT hash FROM blocks WHERE height = ?1")?;
+    let existing: Vec<String> = stmt.query_map(params![b.height as i64], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    if existing.contains(&b.hash) {
+        return Ok(false);
+    }
+    if let Some(other) = existing.first() {
+        bail!("height {}: block {other} is on record, the node's header says {}", b.height, b.hash);
+    }
+    conn.execute(
+        "INSERT INTO blocks (height, hash, prev_hash, state_root, tx_root, timestamp, miner, nonce_hex,
+            difficulty_target, body_captured, body_source, first_seen_at, log_slots)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11, ?12)",
+        params![
+            b.height as i64,
+            b.hash,
+            b.prev_hash,
+            b.state_root,
+            b.tx_root,
+            b.timestamp as i64,
+            b.miner,
+            b.nonce_hex,
+            b.difficulty_target,
+            HEADER_ONLY_SOURCE,
+            now,
+            b.log_slots as i64,
+        ],
+    )?;
+    let block_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO block_status_log (block_id, status, observed_at) VALUES (?1, 'canonical', ?2)",
+        params![block_id, now],
+    )?;
+    Ok(true)
+}
+
 pub fn mark_orphaned(conn: &Connection, block_id: i64, now: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO block_status_log (block_id, status, observed_at) VALUES (?1, 'orphaned', ?2)",
@@ -326,11 +459,13 @@ pub fn open_gap_heights(conn: &Connection, min_height: u64) -> Result<Vec<u64>> 
 
 /// The block_id for an already-known (height, hash) pair whose body was not
 /// captured yet, if any - used by the getBlock fallback to find the row it
-/// should backfill instead of inserting a duplicate.
+/// should backfill instead of inserting a duplicate. Header-only rows are
+/// never such a row: they are not part of the archive and are not turned
+/// into it through the gap paths.
 pub fn uncaptured_block_id(conn: &Connection, height: u64, hash: &str) -> Result<Option<i64>> {
     Ok(conn
         .query_row(
-            "SELECT id FROM blocks WHERE height = ?1 AND hash = ?2 AND body_captured = 0",
+            &format!("SELECT id FROM blocks WHERE height = ?1 AND hash = ?2 AND body_captured = 0 AND {ARCHIVED}"),
             params![height as i64, hash],
             |row| row.get(0),
         )
@@ -376,9 +511,9 @@ pub fn mark_body_recovered(conn: &Connection, block_id: i64, body_source: &str) 
 /// keeping the block header row itself. Returns the number of blocks
 /// pruned.
 pub fn prune_older_than(conn: &Connection, cutoff_unix: i64) -> Result<usize> {
-    let mut stmt = conn.prepare(
-        "SELECT id FROM blocks WHERE timestamp < ?1 AND body_captured = 1",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id FROM blocks WHERE timestamp < ?1 AND body_captured = 1 AND {ARCHIVED}"
+    ))?;
     let block_ids: Vec<i64> = stmt
         .query_map(params![cutoff_unix], |row| row.get(0))?
         .collect::<rusqlite::Result<_>>()?;
@@ -409,15 +544,17 @@ pub fn prune_older_than(conn: &Connection, cutoff_unix: i64) -> Result<usize> {
 
 /// Every distinct address this permanode has ever recorded, as a sender,
 /// a receiver, or a block's miner. The set the live-balance cache refresh
-/// works through.
+/// works through (one node call each). Miners of header-only blocks below
+/// the archive do not count: they were not recorded as the chain went by,
+/// and the sweep covers every address holding anything anyway.
 pub fn known_addresses(conn: &Connection) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT input_owner FROM transactions WHERE input_owner IS NOT NULL
          UNION
          SELECT owner FROM tx_outputs
          UNION
-         SELECT miner FROM blocks",
-    )?;
+         SELECT miner FROM blocks WHERE {ARCHIVED}"
+    ))?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
@@ -441,6 +578,10 @@ pub fn upsert_address_balance_cache(
     Ok(())
 }
 
+// The live-state queries below all reach `blocks` through a recorded
+// transaction (tx_outputs/tx_inputs -> transactions -> blocks). Header-only
+// rows have no transactions, so they can never take part - no extra filter
+// needed; `header_only_rows_leave_the_archive_alone` checks it.
 const CANONICAL_B: &str = "(SELECT s.status FROM block_status_log s WHERE s.block_id = b.id ORDER BY s.id DESC LIMIT 1) = 'canonical'";
 
 /// "No input in a canonical block at or below height ?1 spends the coin
@@ -623,13 +764,16 @@ pub fn clear_spent_in_gap_with_recorded_spend(conn: &Connection) -> Result<usize
 /// re-ingest after a reorg). Returns how many were closed.
 pub fn resolve_gaps_with_bodies(conn: &Connection, now: &str) -> Result<usize> {
     Ok(conn.execute(
-        "UPDATE ingest_gaps SET resolved_at = ?1, resolution = 'body on record'
-         WHERE resolved_at IS NULL
-           AND EXISTS (
-             SELECT 1 FROM blocks b
-             WHERE b.height = ingest_gaps.height AND b.body_captured = 1
-               AND (SELECT s.status FROM block_status_log s WHERE s.block_id = b.id ORDER BY s.id DESC LIMIT 1) = 'canonical'
-           )",
+        &format!(
+            "UPDATE ingest_gaps SET resolved_at = ?1, resolution = 'body on record'
+             WHERE resolved_at IS NULL
+               AND EXISTS (
+                 SELECT 1 FROM blocks b
+                 WHERE b.height = ingest_gaps.height AND b.body_captured = 1 AND {}
+                   AND (SELECT s.status FROM block_status_log s WHERE s.block_id = b.id ORDER BY s.id DESC LIMIT 1) = 'canonical'
+               )",
+            archived_filter_on("b")
+        ),
         params![now],
     )?)
 }
@@ -684,10 +828,15 @@ mod tests {
     /// A block at `height` with the given status and one transaction:
     /// inputs spend creation ids, outputs are (slot, owner, amount, creation id).
     fn block(c: &Connection, height: i64, hash: &str, status: &str, inputs: &[&str], outputs: &[(i64, &str, i64, &str)]) {
+        block_at(c, height, hash, status, 0, inputs, outputs);
+    }
+
+    /// `block` with a timestamp.
+    fn block_at(c: &Connection, height: i64, hash: &str, status: &str, timestamp: i64, inputs: &[&str], outputs: &[(i64, &str, i64, &str)]) {
         c.execute(
             "INSERT INTO blocks (height, hash, prev_hash, state_root, tx_root, timestamp, miner, nonce_hex, difficulty_target, body_captured, first_seen_at)
-             VALUES (?1, ?2, '', '', '', 0, 'o1miner', '', '', 1, '')",
-            params![height, hash],
+             VALUES (?1, ?2, '', '', '', ?3, 'o1miner', '', '', 1, '')",
+            params![height, hash, timestamp],
         )
         .unwrap();
         let block_id = c.last_insert_rowid();
@@ -771,5 +920,211 @@ mod tests {
         assert_eq!(zero_balance_cache_except(c, &keep, "t").unwrap(), 1);
         let n: i64 = c.query_row("SELECT live_utxo_count FROM address_balance_cache WHERE address = 'o1old'", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 0);
+    }
+
+    /// A header-only row as the backfill writes it.
+    fn header(c: &Connection, height: u64, miner: &str, timestamp: u64) -> Result<bool> {
+        let b = HeaderOnlyBlock {
+            height,
+            hash: format!("h{height}"),
+            prev_hash: format!("h{}", height.wrapping_sub(1)),
+            state_root: "s".into(),
+            tx_root: "t".into(),
+            timestamp,
+            miner: miner.into(),
+            nonce_hex: "n".into(),
+            difficulty_target: "d".into(),
+            log_slots: 24,
+        };
+        insert_header_only_block(c, &b, "now")
+    }
+
+    /// Everything that describes the recorded archive: the API's figures,
+    /// the sweep's picture of the live state, the gap bookkeeping and the
+    /// payment service's coverage query.
+    fn archive_view(c: &Connection) -> serde_json::Value {
+        use crate::queries;
+        let stats = queries::chain_stats(c).unwrap();
+        let coverage = |sql: &str| c.query_row(sql, [], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))).unwrap();
+        let sorted = |mut v: Vec<String>| {
+            v.sort();
+            v
+        };
+        let mut balances: Vec<(String, (u128, u64))> = live_balances(c).unwrap().into_iter().collect();
+        balances.sort();
+        let mut segments: Vec<(u64, u64)> = live_count_per_segment(c, 100, 65_536).unwrap().into_iter().collect();
+        segments.sort();
+        let mut unspent = unspent_recorded_outputs(c, 100, 0..65_536).unwrap();
+        unspent.sort();
+        serde_json::json!({
+            "indexed_blocks": stats.indexed_blocks,
+            "indexed_transactions": stats.indexed_transactions,
+            "gaps": stats.gaps,
+            "gaps_resolved": stats.gaps_resolved,
+            "oldest_retained_timestamp": stats.oldest_retained_timestamp,
+            "orphaned_blocks": stats.orphaned_blocks,
+            "live_utxos": stats.live_utxos,
+            "transactions_24h": stats.transactions_24h,
+            "burned_fees_24h": stats.burned_fees_24h_micronoid,
+            "archive_from_height": stats.archive_from_height,
+            "coverage": coverage(&format!("SELECT COALESCE(MIN(height), 0), COALESCE(MIN(timestamp), 0) FROM blocks WHERE body_captured = 1 AND {ARCHIVED}")),
+            "coverage_as_before": coverage("SELECT COALESCE(MIN(height), 0), COALESCE(MIN(timestamp), 0) FROM blocks WHERE body_captured = 1"),
+            "known_addresses": sorted(known_addresses(c).unwrap()),
+            "live_balances": format!("{balances:?}"),
+            "segments": segments,
+            "unspent": unspent,
+            "recorded_ids": sorted(recorded_creation_ids(c, 0..65_536).unwrap().into_iter().collect()),
+            "open_gaps": open_gap_heights(c, 0).unwrap(),
+            "address": serde_json::to_value(queries::address_balance(c, "o1x").unwrap()).unwrap(),
+            "address_txs": serde_json::to_value(queries::txs_by_address(c, "o1y", 1, 50).unwrap()).unwrap(),
+            "burn_by_block": queries::burn_by_block(c).unwrap(),
+            "state_activity": serde_json::to_value(queries::state_activity(c, 0).unwrap()).unwrap(),
+        })
+    }
+
+    /// Two connections that each read, then write, in a loop - the ingest
+    /// loop and the header backfill do exactly that. Neither may ever see
+    /// "database is locked": they have to wait for each other.
+    #[test]
+    fn writers_on_two_connections_wait_for_each_other() {
+        let d = db("writers");
+        let path = d.path.to_str().unwrap().to_string();
+        let writer = |name: &'static str| {
+            let path = path.clone();
+            std::thread::spawn(move || -> Result<()> {
+                let conn = open(&path)?;
+                for i in 0..300 {
+                    let tx = write_tx(&conn)?;
+                    let n: i64 = tx.query_row("SELECT COUNT(*) FROM indexer_state", [], |r| r.get(0))?;
+                    std::thread::sleep(std::time::Duration::from_micros(200));
+                    set_state(&tx, &format!("{name}-{i}"), &n.to_string())?;
+                    tx.commit()?;
+                }
+                Ok(())
+            })
+        };
+        let (a, b) = (writer("a"), writer("b"));
+        a.join().unwrap().unwrap();
+        b.join().unwrap().unwrap();
+        let n: i64 = d.conn.query_row("SELECT COUNT(*) FROM indexer_state", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 600);
+    }
+
+    #[test]
+    fn header_only_rows_leave_the_archive_alone() {
+        use crate::queries;
+        let d = db("headers");
+        let c = &d.conn;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        // the archive: #10..#13, a reorg at #11, a gap at #12, a resolved one at #11
+        block_at(c, 10, "a10", "canonical", now - 500, &[], &[(5, "o1x", 100, "1"), (70_000, "o1y", 50, "2")]);
+        block_at(c, 11, "a11", "canonical", now - 400, &["1"], &[(6, "o1y", 90, "3")]);
+        block_at(c, 11, "b11", "orphaned", now - 400, &["2"], &[]);
+        c.execute(
+            "INSERT INTO blocks (height, hash, prev_hash, state_root, tx_root, timestamp, miner, nonce_hex, difficulty_target, body_captured, first_seen_at)
+             VALUES (12, 'a12', 'a11', '', '', ?1, 'o1miner', '', '', 0, '')",
+            params![now - 300],
+        )
+        .unwrap();
+        c.execute("INSERT INTO block_status_log (block_id, status, observed_at) VALUES (?1, 'canonical', '')", params![c.last_insert_rowid()]).unwrap();
+        record_gap(c, 12, Some("a12"), "t", "no body").unwrap();
+        record_gap(c, 11, Some("a11"), "t", "no body").unwrap();
+        resolve_gap(c, 11, "t", "recovered via getblock").unwrap();
+        block_at(c, 13, "a13", "canonical", now - 200, &["8"], &[(9, "o1z", 39, "4")]);
+        c.execute("UPDATE blocks SET prev_hash = 'h9' WHERE hash = 'a10'", []).unwrap();
+        c.execute("UPDATE blocks SET miner = 'o1pool' WHERE hash = 'a13'", []).unwrap();
+        c.execute("UPDATE blocks SET reward_micronoid = 45000100, total_fees_micronoid = '300' WHERE body_captured = 1", []).unwrap();
+        replace_state_slots(c, 0, &[slot(7, "9", "o1z", 40), slot(8, "8", "o1w", 10)], 9, "t").unwrap();
+        let before = archive_view(c);
+
+        // the backfill below it: genesis and #1..#9, older than the archive
+        for h in 0..10u64 {
+            let miner = match h {
+                0 => "o1genesis",
+                h if h % 2 == 1 => "o1old",
+                _ => "o1x",
+            };
+            assert!(header(c, h, miner, (now - 100_000) as u64 + h).unwrap());
+        }
+        assert_eq!(archive_view(c), before, "the archive's figures must not move");
+
+        // idempotent, and never on top of a block on record
+        assert!(!header(c, 5, "o1old", 0).unwrap(), "same block again: nothing written");
+        assert!(header(c, 10, "o1old", 0).is_err(), "#10 holds an archive block");
+        assert!(header(c, 12, "o1old", 0).is_err(), "#12 holds a gap");
+
+        let stats = queries::chain_stats(c).unwrap();
+        assert_eq!(stats.indexed_blocks, 4);
+        assert_eq!(stats.header_only_blocks, 10);
+        assert_eq!(stats.headers_from_height, Some(0));
+        assert_eq!(stats.archive_from_height, Some(10));
+        assert_eq!(archive_first_height(c).unwrap(), Some(10));
+        assert_eq!(lowest_recorded_height(c).unwrap(), Some(0));
+        assert_eq!(canonical_link_at(c, 10).unwrap(), Some(("a10".to_string(), "h9".to_string())));
+
+        // the gap paths never pick up a header-only row
+        let (id5, _) = canonical_hash_at(c, 5).unwrap().unwrap();
+        assert!(is_header_only(c, id5).unwrap());
+        assert_eq!(uncaptured_block_id(c, 5, "h5").unwrap(), None);
+        assert!(uncaptured_block_id(c, 12, "a12").unwrap().is_some());
+
+        // block pages and paging run on below the archive
+        let page = queries::recent_blocks(c, 4, Some(12)).unwrap();
+        assert_eq!(page.iter().map(|b| (b.height, b.archived)).collect::<Vec<_>>(), vec![(11, true), (10, true), (9, false), (8, false)]);
+        let newest = queries::recent_blocks(c, 2, None).unwrap();
+        assert_eq!(newest.iter().map(|b| b.height).collect::<Vec<_>>(), vec![13, 12]);
+        let b5 = queries::block_by_height(c, 5).unwrap().unwrap();
+        assert!(!b5.archived && b5.canonical && b5.transactions.is_empty());
+        assert_eq!((b5.reward_micronoid, b5.total_fees_micronoid.as_deref(), b5.archive_from_height), (None, None, Some(10)));
+        assert_eq!(b5.miner_subsidy_micronoid, 45_000_000);
+        assert_eq!(queries::block_by_height(c, 0).unwrap().unwrap().miner_subsidy_micronoid, 0, "genesis mints nothing");
+        let b10 = queries::block_by_hash(c, "a10").unwrap().unwrap();
+        assert!(b10.archived && b10.archive_from_height.is_none());
+
+        // mining history over the whole chain; genesis is nobody's block
+        let mined = queries::blocks_mined(c, "o1old").unwrap();
+        assert_eq!((mined.count, mined.first_height, mined.last_height, mined.counted_from_height), (5, Some(1), Some(9), Some(1)));
+        assert_eq!(queries::blocks_mined(c, "o1genesis").unwrap().count, 0);
+        assert_eq!(queries::blocks_mined(c, "o1pool").unwrap().count, 1);
+        let all = queries::miners(c, None, 100).unwrap();
+        assert!(all.complete);
+        assert_eq!((all.blocks, all.from_height, all.to_height, all.miner_count), (13, Some(1), Some(13), 4));
+        assert_eq!((all.miners[0].address.as_str(), all.miners[0].blocks), ("o1old", 5));
+        assert!((all.miners.iter().map(|m| m.share).sum::<f64>() - 1.0).abs() < 1e-9);
+        let recent = queries::miners(c, Some(now - 1_000), 1).unwrap();
+        assert_eq!((recent.blocks, recent.miner_count, recent.miners.len(), recent.complete), (4, 2, 1, true));
+        // the mining figures skip the status lookup for header-only rows; the
+        // full canonical filter must agree
+        let full: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM blocks b WHERE b.height >= 1
+                   AND (SELECT s.status FROM block_status_log s WHERE s.block_id = b.id ORDER BY s.id DESC LIMIT 1) = 'canonical'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(full, all.blocks);
+        assert_eq!(queries::chain_stats(c).unwrap().orphaned_blocks, 1);
+        assert_eq!(queries::orphaned_blocks(c, 10).unwrap().iter().map(|o| o.hash.as_str()).collect::<Vec<_>>(), vec!["b11"]);
+
+        // the archive's own queries use the partial indexes
+        let plan = |sql: &str| -> String {
+            let mut stmt = c.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(3)).unwrap().map(|r| r.unwrap()).collect::<Vec<_>>().join("; ")
+        };
+        assert!(plan(&format!("SELECT MIN(height) FROM blocks WHERE {ARCHIVED}")).contains("idx_blocks_archive_height"));
+        assert!(plan(&format!("SELECT MIN(timestamp) FROM blocks WHERE body_captured = 1 AND {ARCHIVED}")).contains("idx_blocks_archive_timestamp"));
+        assert!(plan("SELECT COUNT(*) FROM blocks WHERE body_source = 'header'").contains("idx_blocks_header_only"));
+        let count_plan = plan(&format!(
+            "SELECT COUNT(*) FROM blocks WHERE blocks.{ARCHIVED}
+               AND (SELECT s.status FROM block_status_log s WHERE s.block_id = blocks.id ORDER BY s.id DESC LIMIT 1) = 'canonical'"
+        ));
+        assert!(count_plan.contains("idx_blocks_archive_"), "{count_plan}");
+        assert!(plan("SELECT COUNT(*), MIN(height) FROM blocks WHERE miner = 'o1old' AND height >= 1").contains("COVERING INDEX idx_blocks_miner"));
+
+        // retention prunes archive bodies only
+        assert_eq!(prune_older_than(c, now + 1).unwrap(), 4, "#10, #11 (both versions), #13");
+        let headers: i64 = c.query_row("SELECT COUNT(*) FROM blocks WHERE body_source = 'header' AND body_captured = 0", [], |r| r.get(0)).unwrap();
+        assert_eq!(headers, 10);
     }
 }

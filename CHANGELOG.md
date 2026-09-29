@@ -4,6 +4,33 @@ Notable changes per release. Commit history has the details.
 
 ## Unreleased
 
+- **Header backfill.** The node keeps every block header since genesis;
+  a background thread now copies the headers from below the first
+  recorded block, down to genesis, as header-only blocks (`body_source =
+  'header'`: no transactions, reward or fees). Throttled by the new
+  `header_backfill_per_second` (default 50, 0 disables it), paused while
+  the indexer is behind, only for final heights, every header checked
+  against its child, resumable, logged sparsely.
+- Header-only blocks are not part of the recorded history: every query
+  about it excludes them explicitly - `indexed_blocks`,
+  `oldest_retained_timestamp`, gaps and their backfill, the reorg
+  re-check, balances and the UTXO sweep, the known-address refresh,
+  pruning and the CSV export are unchanged. New partial indexes keep
+  those queries as fast as before; a new index by miner serves the
+  mining figures.
+- API: `block/height/{h}` and `block/hash/{h}` serve header-only blocks
+  with `archived: false`, empty `transactions` and `archive_from_height`;
+  every block carries `miner_subsidy_micronoid`; `blocks` takes
+  `before={h}` to page down the chain (full pages of final blocks are
+  cached like final blocks); `address/{a}` adds `blocks_mined`; new
+  `miners?period=all|7d|24h[&limit=N]` ranks miners by blocks found with
+  their share; `stats` adds `archive_from_height`, `header_only_blocks`
+  and `headers_from_height`.
+- Write transactions take the write lock up front (`BEGIN IMMEDIATE`).
+  A transaction that read before it wrote failed at once with "database
+  is locked" whenever another connection (sweep, backfill) had committed
+  in between, costing the ingest loop a poll cycle; writers now wait for
+  each other.
 - Built against Parano1d **v2.0.1**, the mandatory release that supersedes
   v2.0.0 (from the v2 fork on, a block's difficulty target follows its parent
   header). Transaction and block formats are unchanged, so the decoder and

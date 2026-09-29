@@ -22,14 +22,15 @@
   <p>This permanode records the transaction history its Parano1d node prunes and serves it as a JSON API under <code>/api/v1/</code>. No frontend is configured; set <code>site_dir</code> in <code>permanode.toml</code> to serve one.</p>
   <table>
     <tr><td><a href="/api/v1/stats">stats</a></td><td>indexer state, chain and network figures</td></tr>
-    <tr><td><a href="/api/v1/blocks?limit=25">blocks?limit=N</a></td><td>newest blocks (up to 200)</td></tr>
-    <tr><td>block/height/{h}</td><td>block with its transactions</td></tr>
+    <tr><td><a href="/api/v1/blocks?limit=25">blocks?limit=N&amp;before=</a></td><td>newest blocks (up to 200), or the next page below a height</td></tr>
+    <tr><td>block/height/{h}</td><td>block with its transactions (header only below the first recorded block)</td></tr>
     <tr><td>block/hash/{hash}</td><td>same, by hash</td></tr>
     <tr><td>tx/{txid}</td><td>transaction with inputs, outputs, receipt data and the fee split into miner share and burn</td></tr>
-    <tr><td>address/{a}?page=&amp;page_size=</td><td>recorded and live balance, transactions</td></tr>
+    <tr><td>address/{a}?page=&amp;page_size=</td><td>recorded and live balance, transactions, blocks mined</td></tr>
     <tr><td>address/{a}/utxos</td><td>the address's live UTXOs from the node</td></tr>
     <tr><td><a href="/api/v1/mempool">mempool</a></td><td>the node's pending transactions</td></tr>
     <tr><td><a href="/api/v1/richlist">richlist</a></td><td>top 100 addresses by live balance</td></tr>
+    <tr><td><a href="/api/v1/miners?period=all">miners?period=all|7d|24h</a></td><td>miners by blocks found, with their share</td></tr>
     <tr><td><a href="/api/v1/gaps">gaps</a></td><td>blocks recorded without a body</td></tr>
     <tr><td><a href="/api/v1/halving">halving</a></td><td>live-state occupancy, expansion window, header history</td></tr>
     <tr><td><a href="/api/v1/economics">economics</a></td><td>supply, burn, state pressure, development allocation, recorded activity</td></tr>

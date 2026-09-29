@@ -7,7 +7,7 @@
 //! µNOID, timestamps are Unix seconds plus a UTC string.
 
 use anyhow::{Context, Result};
-use permanode_core::queries;
+use permanode_core::{db, queries};
 use rusqlite::Connection;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -75,7 +75,10 @@ pub fn export_csv(conn: &Connection, dir: &Path) -> Result<ExportReport> {
             "SELECT height, hash, prev_hash, timestamp, datetime(timestamp,'unixepoch'), miner,
                     reward_micronoid, CAST(total_fees_micronoid AS INTEGER), log_slots, body_captured, body_source,
                     ({canonical}), (SELECT COUNT(*) FROM transactions t WHERE t.block_id = blocks.id)
-             FROM blocks ORDER BY height"
+             FROM blocks WHERE {archived} ORDER BY height",
+            // the recorded history only: header-only blocks below it are the
+            // node's headers, not something this permanode recorded
+            archived = db::ARCHIVED
         ),
     )?;
 
@@ -145,7 +148,9 @@ CSV export of a parano1d-permanode database.
 
 Amounts are in microNOID (1 NOID = 1 000 000 microNOID). Times are UTC.
 Coverage begins where this permanode started recording; blocks with
-body_captured = 0 have no known transactions.
+body_captured = 0 have no known transactions. The block headers from
+before that (copied from the node by the header backfill, no
+transactions) are not part of the export.
 
 Join key: tx_id (the database's own key), NOT txid. A transaction that
 survived a reorg is recorded once per block it was in, so joining on txid

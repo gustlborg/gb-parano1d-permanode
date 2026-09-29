@@ -2,7 +2,13 @@
 //! currently-canonical version of a block: a block's latest
 //! `block_status_log` entry must be `canonical`. Orphaned history is kept
 //! in the database but is not what a normal API response should show.
+//!
+//! Header-only blocks (see `db::HEADER_ONLY_SOURCE`) are canonical blocks
+//! too, so block lookups, block lists and mining statistics include them.
+//! Everything that describes the recorded archive - its coverage, counts,
+//! bodies, fees and burn - excludes them explicitly (`db::ARCHIVED`).
 
+use crate::db::{ARCHIVED, HEADER_ONLY_SOURCE};
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
@@ -12,6 +18,16 @@ const CANONICAL_BLOCK_FILTER: &str = "
      WHERE s.block_id = blocks.id
      ORDER BY s.id DESC LIMIT 1) = 'canonical'
 ";
+
+/// `CANONICAL_BLOCK_FILTER` without the status lookup for header-only rows,
+/// for scans over the whole chain: the backfill writes them canonical, only
+/// for final heights, and the reorg re-check never touches them, so they
+/// can never be orphaned (`header_only_rows_leave_the_archive_alone` checks
+/// the result against the full filter).
+const CANONICAL_OR_HEADER_ONLY: &str = "(blocks.body_source IS 'header' OR
+    (SELECT s.status FROM block_status_log s
+     WHERE s.block_id = blocks.id
+     ORDER BY s.id DESC LIMIT 1) = 'canonical')";
 
 #[derive(Debug, Serialize)]
 pub struct BlockSummary {
@@ -24,6 +40,9 @@ pub struct BlockSummary {
     pub total_fees_micronoid: Option<String>,
     pub tx_count: i64,
     pub body_captured: bool,
+    /// False for a header-only block below the archive: only its header is
+    /// on record, so `tx_count` is not a count of anything.
+    pub archived: bool,
     /// v2 contract calls in this block (0 before the fork).
     pub contract_calls: i64,
 }
@@ -40,9 +59,22 @@ pub struct BlockDetail {
     pub nonce_hex: String,
     pub difficulty_target: String,
     pub proof_class: Option<String>,
+    /// The coinbase value: subsidy plus the fees the miner claimed. `None`
+    /// where the body is not on record.
     pub reward_micronoid: Option<i64>,
     pub total_fees_micronoid: Option<String>,
+    /// What the consensus rules let this block's coinbase mint before
+    /// fees (development shares deducted), from its height and state size;
+    /// 0 for genesis, which mints nothing. Known for every block, body or not.
+    pub miner_subsidy_micronoid: u64,
     pub body_captured: bool,
+    /// False for a header-only block below the archive: the node keeps its
+    /// header for ever, but its transactions were never recorded here
+    /// (`transactions` is empty, reward and fees are unknown).
+    pub archived: bool,
+    /// Where the recorded archive begins; only on header-only blocks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archive_from_height: Option<i64>,
     /// Blocks on top of this one including itself, from the indexer's own
     /// tip; `None` if that isn't known yet. 18 and up is final on this
     /// chain (the protocol's maximum reorg depth is 17).
@@ -177,8 +209,19 @@ pub struct TxBlockRef {
 #[derive(Debug, Serialize)]
 pub struct ChainStats {
     pub last_processed_height: Option<i64>,
+    /// Canonical blocks of the recorded archive; header-only blocks below
+    /// it are counted separately in `header_only_blocks`.
     pub indexed_blocks: i64,
     pub indexed_transactions: i64,
+    /// First height of the recorded archive (the lowest block recorded as
+    /// it arrived, with a body or as a gap).
+    pub archive_from_height: Option<i64>,
+    /// Blocks below the archive whose header the backfill copied from the
+    /// node: canonical, but without any recorded transaction.
+    pub header_only_blocks: i64,
+    /// Lowest height with a block header on record, header-only or
+    /// archived; 0 once the backfill has reached genesis.
+    pub headers_from_height: Option<i64>,
     /// Still-unresolved gaps only - a gap the getBlock fallback decoder
     /// later recovered is no longer missing data, so it's not counted
     /// here anymore (see `gaps_resolved`).
@@ -191,6 +234,8 @@ pub struct ChainStats {
     /// getBlockDetails for a block both could decode - see
     /// indexer's `decoder_selfcheck` config option. Should stay 0.
     pub decoder_mismatches: i64,
+    /// Oldest block of the archive with a recorded body - where the
+    /// transaction history begins ("History since").
     pub oldest_retained_timestamp: Option<i64>,
     /// Transactions in canonical blocks of the last 24 hours (recorded
     /// bodies only).
@@ -235,20 +280,23 @@ pub struct GapEntry {
     pub resolution: Option<String>,
 }
 
-pub fn recent_blocks(conn: &Connection, limit: i64) -> Result<Vec<BlockSummary>> {
+/// Canonical blocks below `before` (all if `None`), newest first. Pages
+/// run on from the archive into the header-only blocks below it.
+pub fn recent_blocks(conn: &Connection, limit: i64, before: Option<i64>) -> Result<Vec<BlockSummary>> {
     let sql = format!(
         "SELECT blocks.height, blocks.hash, blocks.timestamp, blocks.miner,
                 blocks.proof_class, blocks.reward_micronoid, blocks.total_fees_micronoid,
                 blocks.body_captured,
                 (SELECT COUNT(*) FROM transactions t WHERE t.block_id = blocks.id) AS tx_count,
-                (SELECT COUNT(*) FROM transactions t WHERE t.block_id = blocks.id AND t.contract_flags != 0) AS contract_calls
+                (SELECT COUNT(*) FROM transactions t WHERE t.block_id = blocks.id AND t.contract_flags != 0) AS contract_calls,
+                blocks.body_source
          FROM blocks
-         WHERE {CANONICAL_BLOCK_FILTER}
+         WHERE blocks.height < ?2 AND {CANONICAL_BLOCK_FILTER}
          ORDER BY blocks.height DESC
          LIMIT ?1"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![limit], |row| {
+    let rows = stmt.query_map(params![limit, before.unwrap_or(i64::MAX)], |row| {
         Ok(BlockSummary {
             height: row.get(0)?,
             hash: row.get(1)?,
@@ -260,6 +308,7 @@ pub fn recent_blocks(conn: &Connection, limit: i64) -> Result<Vec<BlockSummary>>
             body_captured: row.get::<_, i64>(7)? != 0,
             tx_count: row.get(8)?,
             contract_calls: row.get(9)?,
+            archived: row.get::<_, Option<String>>(10)?.as_deref() != Some(HEADER_ONLY_SOURCE),
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -275,7 +324,8 @@ fn block_id_and_row(
                 blocks.tx_root, blocks.timestamp, blocks.miner, blocks.nonce_hex,
                 blocks.difficulty_target, blocks.proof_class, blocks.reward_micronoid,
                 blocks.total_fees_micronoid, blocks.body_captured,
-                ({CANONICAL_BLOCK_FILTER}) AS is_canonical
+                ({CANONICAL_BLOCK_FILTER}) AS is_canonical,
+                blocks.body_source, blocks.log_slots
          FROM blocks
          WHERE {where_clause}
          ORDER BY is_canonical DESC
@@ -284,10 +334,12 @@ fn block_id_and_row(
     let mut stmt = conn.prepare(&sql)?;
     let row = stmt
         .query_row(params![param], |row| {
+            let height: i64 = row.get(1)?;
+            let log_slots = row.get::<_, Option<i64>>(16)?.map_or(crate::emission::LOG_SLOTS_GENESIS, |l| l as u32);
             Ok((
                 row.get::<_, i64>(0)?,
                 BlockDetail {
-                    height: row.get(1)?,
+                    height,
                     hash: row.get(2)?,
                     prev_hash: row.get(3)?,
                     state_root: row.get(4)?,
@@ -299,7 +351,10 @@ fn block_id_and_row(
                     proof_class: row.get(10)?,
                     reward_micronoid: row.get(11)?,
                     total_fees_micronoid: row.get(12)?,
+                    miner_subsidy_micronoid: miner_subsidy_of(height, log_slots),
                     body_captured: row.get::<_, i64>(13)? != 0,
+                    archived: row.get::<_, Option<String>>(15)?.as_deref() != Some(HEADER_ONLY_SOURCE),
+                    archive_from_height: None,
                     confirmations: None,
                     canonical: row.get::<_, i64>(14)? != 0,
                     other_versions: vec![],
@@ -371,7 +426,23 @@ fn confirmations_for(tip: Option<i64>, height: i64) -> Option<i64> {
     tip.map(|t| (t - height + 1).max(0))
 }
 
+/// Subsidy of the primary coinbase at `height` (see
+/// `BlockDetail::miner_subsidy_micronoid`).
+fn miner_subsidy_of(height: i64, log_slots: u32) -> u64 {
+    match u64::try_from(height) {
+        Ok(h) if h > 0 => crate::emission::miner_subsidy(h, log_slots),
+        _ => 0,
+    }
+}
+
+fn archive_from_height(conn: &Connection) -> Result<Option<i64>> {
+    Ok(conn.query_row(&format!("SELECT MIN(height) FROM blocks WHERE {ARCHIVED}"), [], |r| r.get(0))?)
+}
+
 fn finish_block(conn: &Connection, block_id: i64, mut detail: BlockDetail) -> Result<BlockDetail> {
+    if !detail.archived {
+        detail.archive_from_height = archive_from_height(conn)?;
+    }
     detail.transactions = tx_summaries_for_block(conn, block_id)?;
     // A replaced block has no confirmations: it is not on the chain any
     // more, however deep its former height lies.
@@ -417,7 +488,7 @@ pub fn orphaned_blocks(conn: &Connection, limit: i64) -> Result<Vec<OrphanedBloc
                 (SELECT b2.hash FROM blocks b2 WHERE b2.height = blocks.height AND b2.id <> blocks.id
                    AND ({canonical_on_b2}) LIMIT 1) AS replaced_by
          FROM blocks
-         WHERE NOT ({CANONICAL_BLOCK_FILTER})
+         WHERE blocks.{ARCHIVED} AND NOT ({CANONICAL_BLOCK_FILTER})
          ORDER BY blocks.height DESC
          LIMIT ?1",
         canonical_on_b2 = canonical_filter_on("b2")
@@ -757,8 +828,11 @@ pub fn chain_stats(conn: &Connection) -> Result<ChainStats> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
-    let indexed_blocks: i64 =
-        conn.query_row(&format!("SELECT COUNT(*) FROM blocks WHERE {CANONICAL_BLOCK_FILTER}"), [], |r| r.get(0))?;
+    let indexed_blocks: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM blocks WHERE blocks.{ARCHIVED} AND {CANONICAL_BLOCK_FILTER}"),
+        [],
+        |r| r.get(0),
+    )?;
     let indexed_transactions: i64 =
         conn.query_row("SELECT COUNT(*) FROM transactions", [], |r| r.get(0))?;
     let gaps: i64 =
@@ -766,10 +840,17 @@ pub fn chain_stats(conn: &Connection) -> Result<ChainStats> {
     let gaps_resolved: i64 =
         conn.query_row("SELECT COUNT(*) FROM ingest_gaps WHERE resolved_at IS NOT NULL", [], |r| r.get(0))?;
     let oldest_retained_timestamp: Option<i64> = conn.query_row(
-        "SELECT MIN(timestamp) FROM blocks WHERE body_captured = 1",
+        &format!("SELECT MIN(timestamp) FROM blocks WHERE body_captured = 1 AND {ARCHIVED}"),
         [],
         |r| r.get(0),
     )?;
+    let archive_from_height = archive_from_height(conn)?;
+    // Header-only rows are written canonical and never re-checked (they
+    // are final long before the backfill reaches them), so no status
+    // lookup is needed to count them.
+    let header_only_blocks: i64 =
+        conn.query_row("SELECT COUNT(*) FROM blocks WHERE body_source = 'header'", [], |r| r.get(0))?;
+    let headers_from_height: Option<i64> = conn.query_row("SELECT MIN(height) FROM blocks", [], |r| r.get(0))?;
 
     let now_unix = chrono_now();
     let day_ago = now_unix - 86_400;
@@ -786,7 +867,7 @@ pub fn chain_stats(conn: &Connection) -> Result<ChainStats> {
         let mut stmt = conn.prepare(&format!(
             "SELECT height, reward_micronoid, CAST(total_fees_micronoid AS INTEGER), log_slots
              FROM blocks WHERE timestamp >= ?1 AND body_captured = 1 AND reward_micronoid IS NOT NULL
-               AND {CANONICAL_BLOCK_FILTER}"
+               AND {ARCHIVED} AND {CANONICAL_BLOCK_FILTER}"
         ))?;
         let rows = stmt.query_map(params![day_ago], |row| {
             Ok((
@@ -807,8 +888,10 @@ pub fn chain_stats(conn: &Connection) -> Result<ChainStats> {
     };
     let addresses_with_balance: i64 =
         conn.query_row("SELECT COUNT(*) FROM address_balance_cache WHERE live_utxo_count > 0", [], |r| r.get(0))?;
+    // Header-only rows are never orphaned (see `CANONICAL_OR_HEADER_ONLY`);
+    // leaving them out spares a status lookup for each of them.
     let orphaned_blocks: i64 = conn.query_row(
-        &format!("SELECT COUNT(*) FROM blocks WHERE NOT ({CANONICAL_BLOCK_FILTER})"),
+        &format!("SELECT COUNT(*) FROM blocks WHERE blocks.{ARCHIVED} AND NOT ({CANONICAL_BLOCK_FILTER})"),
         [],
         |r| r.get(0),
     )?;
@@ -837,6 +920,9 @@ pub fn chain_stats(conn: &Connection) -> Result<ChainStats> {
         last_processed_height,
         indexed_blocks,
         indexed_transactions,
+        archive_from_height,
+        header_only_blocks,
+        headers_from_height,
         gaps,
         gaps_resolved,
         decoder_mismatches,
@@ -853,7 +939,10 @@ pub fn chain_stats(conn: &Connection) -> Result<ChainStats> {
 /// `window_seconds`, i.e. (span between oldest and newest block in the
 /// window) / (count - 1). `None` if fewer than 2 blocks fall in the
 /// window - including, unavoidably, for a window that reaches further
-/// back than this permanode has been recording.
+/// back than this permanode has been recording. A chain figure, not one of
+/// the archive: header-only blocks below the archive count (their
+/// timestamps are the chain's own), so a young permanode with the header
+/// backfill done has a full 24-hour figure.
 pub fn avg_block_time_seconds(conn: &Connection, window_seconds: i64, now_unix: i64) -> Result<Option<f64>> {
     let cutoff = now_unix - window_seconds;
     let sql = format!(
@@ -934,7 +1023,7 @@ fn burned_in_block(height: i64, reward: i64, fees: i64, log_slots: Option<i64>) 
 pub fn burn_by_block(conn: &Connection) -> Result<Vec<(u64, u128)>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT height, reward_micronoid, CAST(total_fees_micronoid AS INTEGER), log_slots
-         FROM blocks WHERE body_captured = 1 AND reward_micronoid IS NOT NULL AND {CANONICAL_BLOCK_FILTER}
+         FROM blocks WHERE body_captured = 1 AND reward_micronoid IS NOT NULL AND {ARCHIVED} AND {CANONICAL_BLOCK_FILTER}
          ORDER BY height"
     ))?;
     let rows = stmt.query_map([], |row| {
@@ -984,7 +1073,7 @@ pub fn state_activity(conn: &Connection, since_unix: i64) -> Result<StateActivit
                    - (SELECT COUNT(*) FROM tx_outputs o WHERE o.tx_id = t.id))), 0)
                  FROM transactions t WHERE t.block_id = blocks.id)
          FROM blocks
-         WHERE timestamp >= ?1 AND body_captured = 1 AND reward_micronoid IS NOT NULL AND {CANONICAL_BLOCK_FILTER}
+         WHERE timestamp >= ?1 AND body_captured = 1 AND reward_micronoid IS NOT NULL AND {ARCHIVED} AND {CANONICAL_BLOCK_FILTER}
          ORDER BY height"
     ))?;
     let rows = stmt.query_map(params![since_unix], |row| {
@@ -1012,10 +1101,114 @@ pub fn state_activity(conn: &Connection, since_unix: i64) -> Result<StateActivit
     }
     a.burned_micronoid = burned.to_string();
     let oldest: Option<i64> = conn.query_row(
-        &format!("SELECT MIN(timestamp) FROM blocks WHERE body_captured = 1 AND {CANONICAL_BLOCK_FILTER}"),
+        &format!("SELECT MIN(timestamp) FROM blocks WHERE body_captured = 1 AND {ARCHIVED} AND {CANONICAL_BLOCK_FILTER}"),
         [],
         |r| r.get(0),
     )?;
     a.complete = oldest.is_some_and(|t| t <= since_unix);
     Ok(a)
+}
+
+/// Blocks an address mined, over every canonical block on record - the
+/// archive and the header-only blocks below it. Genesis is nobody's.
+#[derive(Debug, Serialize)]
+pub struct BlocksMined {
+    pub count: i64,
+    pub first_height: Option<i64>,
+    pub last_height: Option<i64>,
+    /// Lowest height the count covers: 1 once the header backfill has
+    /// reached genesis, higher while it is still running (or disabled).
+    pub counted_from_height: Option<i64>,
+}
+
+pub fn blocks_mined(conn: &Connection, address: &str) -> Result<BlocksMined> {
+    let (count, first_height, last_height): (i64, Option<i64>, Option<i64>) = conn.query_row(
+        &format!(
+            "SELECT COUNT(*), MIN(height), MAX(height) FROM blocks
+             WHERE miner = ?1 AND height >= 1 AND {CANONICAL_OR_HEADER_ONLY}"
+        ),
+        params![address],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    Ok(BlocksMined { count, first_height, last_height, counted_from_height: lowest_mined_height(conn)? })
+}
+
+/// Lowest height a mining count can cover: the lowest block on record,
+/// but never genesis.
+fn lowest_mined_height(conn: &Connection) -> Result<Option<i64>> {
+    let lowest: Option<i64> = conn.query_row("SELECT MIN(height) FROM blocks", [], |r| r.get(0))?;
+    Ok(lowest.map(|h| h.max(1)))
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct MinerEntry {
+    pub address: String,
+    pub blocks: i64,
+    /// Fraction of the period's blocks (0..1).
+    pub share: f64,
+    pub first_height: i64,
+    pub last_height: i64,
+}
+
+/// Miners by blocks found since `since_unix` (all of history if `None`).
+#[derive(Debug, Serialize, Clone)]
+pub struct MinersReport {
+    pub since_timestamp: Option<i64>,
+    /// Canonical blocks counted (genesis excluded).
+    pub blocks: i64,
+    pub from_height: Option<i64>,
+    pub to_height: Option<i64>,
+    /// Whether the blocks on record reach back to the start of the period
+    /// (for all of history: to block 1). If not, the figures only cover
+    /// the part from `counted_from_height` on.
+    pub complete: bool,
+    pub counted_from_height: Option<i64>,
+    /// Distinct miners in the period; `miners` holds the top `limit`.
+    pub miner_count: i64,
+    pub miners: Vec<MinerEntry>,
+}
+
+pub fn miners(conn: &Connection, since_unix: Option<i64>, limit: usize) -> Result<MinersReport> {
+    // The whole chain is counted from the miner index alone (it holds
+    // body_source and height); a period walks the timestamp index and
+    // groups in a temporary b-tree (`+miner`), which beats visiting the
+    // miner index for a small part of it.
+    let sql = match since_unix {
+        None => format!(
+            "SELECT miner, COUNT(*), MIN(height), MAX(height) FROM blocks
+             WHERE height >= 1 AND {CANONICAL_OR_HEADER_ONLY}
+             GROUP BY miner"
+        ),
+        Some(_) => format!(
+            "SELECT miner, COUNT(*), MIN(height), MAX(height) FROM blocks
+             WHERE timestamp >= ?1 AND height >= 1 AND {CANONICAL_OR_HEADER_ONLY}
+             GROUP BY +miner"
+        ),
+    };
+    let mut stmt = conn.prepare(&sql)?;
+    let row = |r: &rusqlite::Row| {
+        Ok(MinerEntry { address: r.get(0)?, blocks: r.get(1)?, share: 0.0, first_height: r.get(2)?, last_height: r.get(3)? })
+    };
+    let mut miners: Vec<MinerEntry> = match since_unix {
+        None => stmt.query_map([], row)?.collect::<rusqlite::Result<_>>()?,
+        Some(since) => stmt.query_map(params![since], row)?.collect::<rusqlite::Result<_>>()?,
+    };
+    let blocks: i64 = miners.iter().map(|m| m.blocks).sum();
+    for m in &mut miners {
+        m.share = if blocks > 0 { m.blocks as f64 / blocks as f64 } else { 0.0 };
+    }
+    miners.sort_by(|a, b| b.blocks.cmp(&a.blocks).then(b.last_height.cmp(&a.last_height)));
+    let from_height = miners.iter().map(|m| m.first_height).min();
+    let to_height = miners.iter().map(|m| m.last_height).max();
+    let miner_count = miners.len() as i64;
+    miners.truncate(limit);
+    let counted_from_height = lowest_mined_height(conn)?;
+    let complete = match since_unix {
+        None => counted_from_height == Some(1),
+        Some(since) => {
+            let oldest: Option<i64> = conn.query_row("SELECT MIN(timestamp) FROM blocks", [], |r| r.get(0))?;
+            oldest.is_some_and(|t| t <= since)
+        }
+    };
+    Ok(MinersReport { since_timestamp: since_unix, blocks, from_height, to_height, complete, counted_from_height, miner_count, miners })
 }
