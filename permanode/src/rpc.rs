@@ -116,6 +116,54 @@ impl RpcClient {
         let v = self.call("paranoid_getStateMap", json!([]))?;
         Ok(serde_json::from_value(v)?)
     }
+
+    /// `paranoid_verifyReceipt`: the node decodes a payment receipt, checks
+    /// its Merkle proof and compares the claimed root and time with its own
+    /// canonical header at the claimed height. It reads the first receipt
+    /// in the bytes and ignores anything after it - callers pass exactly
+    /// one (see receipts.rs).
+    pub fn verify_receipt(&self, receipt_hex: &str) -> Result<ReceiptVerdict> {
+        let v = self.call("paranoid_verifyReceipt", json!([receipt_hex]))?;
+        Ok(serde_json::from_value(v)?)
+    }
+}
+
+/// The node's answer to `paranoid_verifyReceipt`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReceiptVerdict {
+    pub merkle_valid: bool,
+    /// `None` if the node could not look the header up.
+    pub canonical: Option<bool>,
+    #[serde(default)]
+    pub error: Option<String>,
+    /// What the node authenticated; absent when the proof does not verify.
+    #[serde(default)]
+    pub authenticated_summary: Option<AuthenticatedSummary>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AuthenticatedSummary {
+    pub txid: String,
+    pub claimed_height: u64,
+    pub confirmed_unix: u64,
+    pub tx_index: u32,
+    pub tx_count: u32,
+    pub fee_micronoid: u64,
+    pub inputs: Vec<SummaryInput>,
+    pub outputs: Vec<SummaryOutput>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SummaryInput {
+    pub slot_index: u64,
+    pub owner: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SummaryOutput {
+    pub slot_index: u64,
+    pub amount_micronoid: u64,
+    pub owner: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

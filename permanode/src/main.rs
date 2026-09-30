@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use parano1d_permanode::config::Config;
 use parano1d_permanode::rpc::RpcClient;
-use parano1d_permanode::{export, import, indexer, serve};
+use parano1d_permanode::{export, import, indexer, receipts, serve};
 use permanode_core::db;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -45,6 +45,17 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         from_db: PathBuf,
     },
+    /// Complete the header-only blocks below the archive with the
+    /// transactions that Parano1d payment receipts prove. Reads wallet
+    /// receipt journals (wallet.receipts), JSON objects txid -> receipt hex
+    /// and text files with one receipt hex per line. Every receipt is
+    /// verified by the node and against the block header on record. Safe to
+    /// run while this permanode is running, and to run again.
+    ImportReceipts {
+        /// Receipt files.
+        #[arg(value_name = "FILE", required = true)]
+        files: Vec<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -69,6 +80,7 @@ fn main() -> Result<()> {
         Command::Serve => run_server(&cfg),
         Command::Run => run_both(cfg),
         Command::ImportBodies { from_db } => run_import(&cfg, &from_db),
+        Command::ImportReceipts { files } => run_import_receipts(&cfg, &files),
         Command::Export { dir } => run_export(&cfg, &dir),
     }
 }
@@ -101,6 +113,40 @@ fn run_import(cfg: &Config, from_db: &std::path::Path) -> Result<()> {
     );
     if r.rejected > 0 {
         bail!("{} block(s) rejected, see warnings above", r.rejected);
+    }
+    Ok(())
+}
+
+fn run_import_receipts(cfg: &Config, files: &[PathBuf]) -> Result<()> {
+    // Read every file before touching the database: a typo in the last
+    // path should not leave half the files imported.
+    let mut entries = Vec::new();
+    for file in files {
+        let found = receipts::read_receipt_file(file)?;
+        println!("{}: {} receipt(s)", file.display(), found.len());
+        entries.extend(found);
+    }
+    let conn = db::open(&cfg.db_path)?;
+    let rpc = RpcClient::new(cfg.rpc_url.clone());
+    let report = receipts::import_receipts(&conn, &entries, &mut |hex| rpc.verify_receipt(hex))?;
+    for r in &report.results {
+        println!("{}", receipts::describe(r));
+    }
+    use receipts::Outcome;
+    println!(
+        "import-receipts: {} receipt(s) read, {} listed twice; {} imported, {} already imported, \
+         {} in archive blocks, {} in gaps, {} without a header yet, {} rejected",
+        report.results.len(),
+        report.count(|o| *o == Outcome::Duplicate),
+        report.count(|o| *o == Outcome::Imported),
+        report.count(|o| *o == Outcome::AlreadyImported),
+        report.count(|o| matches!(o, Outcome::Archived { .. })),
+        report.count(|o| *o == Outcome::Gap),
+        report.count(|o| *o == Outcome::NoHeader),
+        report.rejected(),
+    );
+    if report.rejected() > 0 {
+        bail!("{} receipt(s) rejected, see above", report.rejected());
     }
     Ok(())
 }

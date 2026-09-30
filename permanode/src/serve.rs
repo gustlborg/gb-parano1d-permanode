@@ -555,6 +555,10 @@ struct AddressPage {
     page: i64,
     page_size: i64,
     total: i64,
+    /// Of `total`, transactions imported from payment receipts into blocks
+    /// below the archive (marked `source: "receipt"`); they do not count
+    /// toward `balance`.
+    receipt_transactions: i64,
     transactions: Vec<queries::TxSummary>,
     /// Computed from this permanode's own recorded history only.
     balance: queries::AddressBalance,
@@ -594,12 +598,13 @@ async fn get_address(
     }
     let page = q.page.unwrap_or(1).max(1);
     let page_size = q.page_size.unwrap_or(25).clamp(1, 200);
-    let (transactions, total, balance, blocks_mined) = {
+    let (transactions, total, receipt_transactions, balance, blocks_mined) = {
         let conn = state.db();
         let (transactions, total) = queries::txs_by_address(&conn, &address, page, page_size)?;
+        let receipt_transactions = queries::receipt_txs_by_address(&conn, &address)?;
         let balance = queries::address_balance(&conn, &address)?;
         let blocks_mined = queries::blocks_mined(&conn, &address)?;
-        (transactions, total, balance, blocks_mined)
+        (transactions, total, receipt_transactions, balance, blocks_mined)
     };
 
     // Just the summary here (balance + count) - the individual UTXOs are a
@@ -614,6 +619,7 @@ async fn get_address(
         page,
         page_size,
         total,
+        receipt_transactions,
         transactions,
         balance,
         live_balance_micronoid,

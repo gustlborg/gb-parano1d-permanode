@@ -23,7 +23,7 @@
   <table>
     <tr><td><a href="/api/v1/stats">stats</a></td><td>indexer state, chain and network figures</td></tr>
     <tr><td><a href="/api/v1/blocks?limit=25">blocks?limit=N&amp;before=</a></td><td>newest blocks (up to 200), or the next page below a height</td></tr>
-    <tr><td>block/height/{h}</td><td>block with its transactions (header only below the first recorded block)</td></tr>
+    <tr><td>block/height/{h}</td><td>block with its transactions (below the first recorded block: the header and any transactions imported from payment receipts)</td></tr>
     <tr><td>block/hash/{hash}</td><td>same, by hash</td></tr>
     <tr><td>tx/{txid}</td><td>transaction with inputs, outputs, receipt data and the fee split into miner share and burn</td></tr>
     <tr><td>address/{a}?page=&amp;page_size=</td><td>recorded and live balance, transactions, blocks mined</td></tr>

@@ -5,6 +5,10 @@
 //! join key — a transaction that survived a reorg is recorded once per
 //! block it was in, so joining on it double-counts. Amounts stay in
 //! µNOID, timestamps are Unix seconds plus a UTC string.
+//!
+//! The export holds the recorded history only: neither the header-only
+//! blocks below it nor the transactions imported into them from payment
+//! receipts (`db::RECORDED`).
 
 use anyhow::{Context, Result};
 use permanode_core::{db, queries};
@@ -66,6 +70,8 @@ pub fn export_csv(conn: &Connection, dir: &Path) -> Result<ExportReport> {
     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let canonical = queries::canonical_block_filter();
     let tip = queries::indexed_tip(conn)?.unwrap_or(0);
+    let recorded_t = db::recorded_filter_on("t");
+    let recorded_t2 = db::recorded_filter_on("t2");
 
     let blocks = write_query(
         conn,
@@ -94,6 +100,7 @@ pub fn export_csv(conn: &Connection, dir: &Path) -> Result<ExportReport> {
                     t.position, t.page_count,
                     CASE WHEN t.contract_flags & 2 != 0 THEN 'close' WHEN t.contract_flags != 0 THEN 'call' ELSE '' END
              FROM transactions t JOIN blocks b ON b.id = t.block_id
+             WHERE {recorded_t}
              ORDER BY b.height, t.position",
             canonical_b = queries::canonical_block_filter_on("b")
         ),
@@ -107,6 +114,7 @@ pub fn export_csv(conn: &Connection, dir: &Path) -> Result<ExportReport> {
             "SELECT t.id, t.txid, i.idx, t.input_owner, i.amount_micronoid, i.slot_index, i.creation_id,
                     b.height, ({canonical_b})
              FROM tx_inputs i JOIN transactions t ON t.id = i.tx_id JOIN blocks b ON b.id = t.block_id
+             WHERE {recorded_t}
              ORDER BY b.height, t.position, i.idx",
             canonical_b = queries::canonical_block_filter_on("b")
         ),
@@ -121,10 +129,11 @@ pub fn export_csv(conn: &Connection, dir: &Path) -> Result<ExportReport> {
                     b.height, ({canonical_b}),
                     CASE WHEN EXISTS (
                       SELECT 1 FROM tx_inputs i2 JOIN transactions t2 ON t2.id = i2.tx_id JOIN blocks b2 ON b2.id = t2.block_id
-                      WHERE i2.creation_id = o.creation_id AND ({canonical_b2})
+                      WHERE i2.creation_id = o.creation_id AND {recorded_t2} AND ({canonical_b2})
                     ) THEN 1 ELSE 0 END,
                     o.spent_in_gap
              FROM tx_outputs o JOIN transactions t ON t.id = o.tx_id JOIN blocks b ON b.id = t.block_id
+             WHERE {recorded_t}
              ORDER BY b.height, t.position, o.idx",
             canonical_b = queries::canonical_block_filter_on("b"),
             canonical_b2 = queries::canonical_block_filter_on("b2")
@@ -150,7 +159,8 @@ Amounts are in microNOID (1 NOID = 1 000 000 microNOID). Times are UTC.
 Coverage begins where this permanode started recording; blocks with
 body_captured = 0 have no known transactions. The block headers from
 before that (copied from the node by the header backfill, no
-transactions) are not part of the export.
+transactions) are not part of the export, and neither are transactions
+imported into those blocks from payment receipts (import-receipts).
 
 Join key: tx_id (the database's own key), NOT txid. A transaction that
 survived a reorg is recorded once per block it was in, so joining on txid

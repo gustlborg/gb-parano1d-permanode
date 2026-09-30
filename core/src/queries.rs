@@ -7,8 +7,13 @@
 //! too, so block lookups, block lists and mining statistics include them.
 //! Everything that describes the recorded archive - its coverage, counts,
 //! bodies, fees and burn - excludes them explicitly (`db::ARCHIVED`).
+//!
+//! Transactions imported from payment receipts into header-only blocks
+//! (`db::RECEIPT_SOURCE`) appear on block, transaction and address pages,
+//! marked `source: "receipt"`. Balances, counts and the live UTXO figures
+//! describe the recorded history and leave them out (`db::RECORDED`).
 
-use crate::db::{ARCHIVED, HEADER_ONLY_SOURCE};
+use crate::db::{recorded_filter_on, ARCHIVED, HEADER_ONLY_SOURCE, RECEIPT_SOURCE};
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
@@ -41,8 +46,14 @@ pub struct BlockSummary {
     pub tx_count: i64,
     pub body_captured: bool,
     /// False for a header-only block below the archive: only its header is
-    /// on record, so `tx_count` is not a count of anything.
+    /// on record, and `tx_count` counts just the transactions imported from
+    /// payment receipts (usually none).
     pub archived: bool,
+    /// Transactions in the block, coinbase included, as a payment receipt's
+    /// Merkle proof states it; only on header-only blocks with imported
+    /// receipts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_count_total: Option<i64>,
     /// v2 contract calls in this block (0 before the fork).
     pub contract_calls: i64,
 }
@@ -70,11 +81,18 @@ pub struct BlockDetail {
     pub body_captured: bool,
     /// False for a header-only block below the archive: the node keeps its
     /// header for ever, but its transactions were never recorded here
-    /// (`transactions` is empty, reward and fees are unknown).
+    /// (reward and fees are unknown; `transactions` holds only those
+    /// imported from payment receipts, marked `source: "receipt"`).
     pub archived: bool,
     /// Where the recorded archive begins; only on header-only blocks.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archive_from_height: Option<i64>,
+    /// Transactions in the block, coinbase included, as a payment receipt's
+    /// Merkle proof states it - how many `transactions` would hold if the
+    /// block were known in full. Only on header-only blocks with imported
+    /// receipts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_count_total: Option<i64>,
     /// Blocks on top of this one including itself, from the indexer's own
     /// tip; `None` if that isn't known yet. 18 and up is final on this
     /// chain (the protocol's maximum reorg depth is 17).
@@ -137,6 +155,15 @@ pub struct TxSummary {
     /// ordinary transactions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub contract: Option<&'static str>,
+    /// `"receipt"` for a transaction imported from a payment receipt into a
+    /// block below the archive; absent for recorded transactions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<&'static str>,
+}
+
+/// `transactions.source` as the API names it.
+fn source_kind(source: Option<String>) -> Option<&'static str> {
+    (source.as_deref() == Some(RECEIPT_SOURCE)).then_some(RECEIPT_SOURCE)
 }
 
 /// `transactions.contract_flags` as the API names it.
@@ -151,6 +178,13 @@ pub fn contract_kind(flags: i64) -> Option<&'static str> {
 #[derive(Debug, Serialize)]
 pub struct TxDetail {
     pub txid: String,
+    /// `"receipt"`: imported from a payment receipt into a header-only block
+    /// below the archive, which this permanode never recorded. Every field
+    /// comes from the receipt's pages, which its Merkle proof binds to the
+    /// block header; only the creation ids of the outputs are unknown
+    /// (null). Absent for recorded transactions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<&'static str>,
     pub position: i64,
     /// See `TxSummary::contract`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -195,7 +229,9 @@ pub struct TxOutput {
     pub slot_index: i64,
     pub amount_micronoid: i64,
     pub owner: String,
-    pub creation_id: String,
+    /// Null for the outputs of a transaction imported from a receipt: the
+    /// block assigns creation ids when it is applied.
+    pub creation_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -212,7 +248,12 @@ pub struct ChainStats {
     /// Canonical blocks of the recorded archive; header-only blocks below
     /// it are counted separately in `header_only_blocks`.
     pub indexed_blocks: i64,
+    /// Transactions recorded from block bodies (the archive), orphaned
+    /// blocks included; imported receipts are counted separately.
     pub indexed_transactions: i64,
+    /// Transactions imported from payment receipts into header-only blocks
+    /// below the archive (`import-receipts`).
+    pub receipt_transactions: i64,
     /// First height of the recorded archive (the lowest block recorded as
     /// it arrived, with a body or as a gap).
     pub archive_from_height: Option<i64>,
@@ -289,7 +330,7 @@ pub fn recent_blocks(conn: &Connection, limit: i64, before: Option<i64>) -> Resu
                 blocks.body_captured,
                 (SELECT COUNT(*) FROM transactions t WHERE t.block_id = blocks.id) AS tx_count,
                 (SELECT COUNT(*) FROM transactions t WHERE t.block_id = blocks.id AND t.contract_flags != 0) AS contract_calls,
-                blocks.body_source
+                blocks.body_source, blocks.tx_count_total
          FROM blocks
          WHERE blocks.height < ?2 AND {CANONICAL_BLOCK_FILTER}
          ORDER BY blocks.height DESC
@@ -309,6 +350,7 @@ pub fn recent_blocks(conn: &Connection, limit: i64, before: Option<i64>) -> Resu
             tx_count: row.get(8)?,
             contract_calls: row.get(9)?,
             archived: row.get::<_, Option<String>>(10)?.as_deref() != Some(HEADER_ONLY_SOURCE),
+            tx_count_total: row.get(11)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -325,7 +367,7 @@ fn block_id_and_row(
                 blocks.difficulty_target, blocks.proof_class, blocks.reward_micronoid,
                 blocks.total_fees_micronoid, blocks.body_captured,
                 ({CANONICAL_BLOCK_FILTER}) AS is_canonical,
-                blocks.body_source, blocks.log_slots
+                blocks.body_source, blocks.log_slots, blocks.tx_count_total
          FROM blocks
          WHERE {where_clause}
          ORDER BY is_canonical DESC
@@ -355,6 +397,7 @@ fn block_id_and_row(
                     body_captured: row.get::<_, i64>(13)? != 0,
                     archived: row.get::<_, Option<String>>(15)?.as_deref() != Some(HEADER_ONLY_SOURCE),
                     archive_from_height: None,
+                    tx_count_total: row.get(17)?,
                     confirmations: None,
                     canonical: row.get::<_, i64>(14)? != 0,
                     other_versions: vec![],
@@ -372,7 +415,7 @@ fn block_id_and_row(
 // list like that.
 const TX_SUMMARY_COLUMNS: &str = "
     t.position, t.txid, t.page_count, t.fee_micronoid, t.coinbase, t.development_payout,
-    t.input_owner, t.input_sum_micronoid, t.output_sum_micronoid, t.contract_flags,
+    t.input_owner, t.input_sum_micronoid, t.output_sum_micronoid, t.contract_flags, t.source,
     b.height, b.timestamp,
     (SELECT COUNT(*) FROM tx_inputs i WHERE i.tx_id = t.id) AS n_inputs,
     (SELECT COUNT(*) FROM tx_outputs o WHERE o.tx_id = t.id) AS n_outputs,
@@ -398,6 +441,7 @@ fn tx_summary_from_row(row: &rusqlite::Row) -> rusqlite::Result<TxSummary> {
         address_delta_micronoid: row.get::<_, Option<i64>>("address_delta").ok().flatten().map(|d| d.to_string()),
         counterparty: row.get::<_, Option<String>>("counterparty").ok().flatten(),
         contract: contract_kind(row.get("contract_flags")?),
+        source: source_kind(row.get("source")?),
     })
 }
 
@@ -529,7 +573,7 @@ pub fn tx_by_txid(conn: &Connection, txid: &str) -> Result<Option<TxDetail>> {
         "SELECT t.id, t.position, t.page_count, t.fee_micronoid, t.coinbase,
                 t.development_payout, t.epoch_anchor, t.input_owner, t.input_sum_micronoid,
                 t.output_sum_micronoid, b.height, b.hash, b.timestamp,
-                ({canonical_on_b}) AS is_canonical, t.contract_flags
+                ({canonical_on_b}) AS is_canonical, t.contract_flags, t.source
          FROM transactions t
          JOIN blocks b ON b.id = t.block_id
          WHERE t.txid = ?1
@@ -543,6 +587,7 @@ pub fn tx_by_txid(conn: &Connection, txid: &str) -> Result<Option<TxDetail>> {
                 row.get::<_, i64>(0)?,
                 TxDetail {
                     txid: txid.to_string(),
+                    source: source_kind(row.get(15)?),
                     position: row.get(1)?,
                     contract: contract_kind(row.get(14)?),
                     page_count: row.get(2)?,
@@ -636,7 +681,10 @@ pub fn tx_by_txid(conn: &Connection, txid: &str) -> Result<Option<TxDetail>> {
 
 /// Transactions where `address` appears as sender or as a recipient of at
 /// least one output, newest block first. Returns the page of summaries plus
-/// the total matching count for pagination.
+/// the total matching count for pagination. Transactions imported from
+/// payment receipts are part of an address's history too, marked
+/// `source: "receipt"` (their `address_delta_micronoid` is exact: the
+/// receipt holds the input amounts).
 pub fn txs_by_address(
     conn: &Connection,
     address: &str,
@@ -680,6 +728,21 @@ pub fn txs_by_address(
     let items: Vec<TxSummary> = rows.collect::<rusqlite::Result<_>>()?;
 
     Ok((items, total))
+}
+
+/// Of `txs_by_address`'s total, the transactions imported from payment
+/// receipts (older than the archive, not part of the recorded figures).
+pub fn receipt_txs_by_address(conn: &Connection, address: &str) -> Result<i64> {
+    // Walks only the imported rows (partial index idx_tx_receipt).
+    Ok(conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM transactions t
+             WHERE t.source = '{RECEIPT_SOURCE}'
+               AND (t.input_owner = ?1 OR EXISTS (SELECT 1 FROM tx_outputs o WHERE o.tx_id = t.id AND o.owner = ?1))"
+        ),
+        params![address],
+        |r| r.get(0),
+    )?)
 }
 
 fn chrono_now() -> i64 {
@@ -733,9 +796,13 @@ pub struct AddressBalance {
 /// creation_id is unique per creation event. This can only see spends and
 /// receipts that happened after this permanode started recording: a
 /// balance that already existed before that is not reflected here.
+/// Transactions imported from payment receipts are not part of the
+/// recorded history and count for none of these figures.
 pub fn address_balance(conn: &Connection, address: &str) -> Result<AddressBalance> {
     let canonical_on_b = canonical_filter_on("b");
     let canonical_on_b2 = canonical_filter_on("b2");
+    let recorded_t = recorded_filter_on("t");
+    let recorded_t2 = recorded_filter_on("t2");
 
     let total_received_micronoid: String = conn.query_row(
         &format!(
@@ -743,7 +810,7 @@ pub fn address_balance(conn: &Connection, address: &str) -> Result<AddressBalanc
              FROM tx_outputs o
              JOIN transactions t ON t.id = o.tx_id
              JOIN blocks b ON b.id = t.block_id
-             WHERE o.owner = ?1 AND {canonical_on_b}"
+             WHERE o.owner = ?1 AND {recorded_t} AND {canonical_on_b}"
         ),
         params![address],
         |row| row.get::<_, i64>(0),
@@ -757,12 +824,12 @@ pub fn address_balance(conn: &Connection, address: &str) -> Result<AddressBalanc
          FROM tx_outputs o
          JOIN transactions t ON t.id = o.tx_id
          JOIN blocks b ON b.id = t.block_id
-         WHERE o.owner = ?1 AND {canonical_on_b} AND o.spent_in_gap = ?2
+         WHERE o.owner = ?1 AND {recorded_t} AND {canonical_on_b} AND o.spent_in_gap = ?2
            AND NOT EXISTS (
              SELECT 1 FROM tx_inputs i
              JOIN transactions t2 ON t2.id = i.tx_id
              JOIN blocks b2 ON b2.id = t2.block_id
-             WHERE i.creation_id = o.creation_id AND {canonical_on_b2}
+             WHERE i.creation_id = o.creation_id AND {recorded_t2} AND {canonical_on_b2}
            )"
     );
     let (confirmed_utxos, confirmed_balance_micronoid): (i64, String) =
@@ -775,13 +842,14 @@ pub fn address_balance(conn: &Connection, address: &str) -> Result<AddressBalanc
             "SELECT COALESCE(SUM(CAST(t.input_sum_micronoid AS INTEGER)), 0)
              FROM transactions t
              JOIN blocks b ON b.id = t.block_id
-             WHERE t.input_owner = ?1 AND {canonical_on_b}"
+             WHERE t.input_owner = ?1 AND {recorded_t} AND {canonical_on_b}"
         ),
         params![address],
         |row| row.get::<_, i64>(0),
     )?
     .to_string();
 
+    // An imported output never matches here: its creation id is NULL.
     let sent_from_unrecorded_micronoid: String = conn
         .query_row(
             &format!(
@@ -789,7 +857,7 @@ pub fn address_balance(conn: &Connection, address: &str) -> Result<AddressBalanc
                  FROM tx_inputs i
                  JOIN transactions t ON t.id = i.tx_id
                  JOIN blocks b ON b.id = t.block_id
-                 WHERE t.input_owner = ?1 AND {canonical_on_b}
+                 WHERE t.input_owner = ?1 AND {recorded_t} AND {canonical_on_b}
                    AND NOT EXISTS (SELECT 1 FROM tx_outputs o WHERE o.creation_id = i.creation_id)"
             ),
             params![address],
@@ -833,8 +901,11 @@ pub fn chain_stats(conn: &Connection) -> Result<ChainStats> {
         [],
         |r| r.get(0),
     )?;
+    // All rows minus the imported ones: both counts come from an index
+    // alone, a filtered count would read the whole table.
+    let receipt_transactions = crate::db::receipt_transaction_count(conn)?;
     let indexed_transactions: i64 =
-        conn.query_row("SELECT COUNT(*) FROM transactions", [], |r| r.get(0))?;
+        conn.query_row("SELECT COUNT(*) FROM transactions", [], |r| r.get::<_, i64>(0))? - receipt_transactions;
     let gaps: i64 =
         conn.query_row("SELECT COUNT(*) FROM ingest_gaps WHERE resolved_at IS NULL", [], |r| r.get(0))?;
     let gaps_resolved: i64 =
@@ -857,7 +928,8 @@ pub fn chain_stats(conn: &Connection) -> Result<ChainStats> {
     let transactions_24h: i64 = conn.query_row(
         &format!(
             "SELECT COUNT(*) FROM transactions t JOIN blocks b ON b.id = t.block_id
-             WHERE b.timestamp >= ?1 AND {}",
+             WHERE b.timestamp >= ?1 AND {} AND {}",
+            recorded_filter_on("t"),
             canonical_filter_on("b")
         ),
         params![day_ago],
@@ -898,18 +970,20 @@ pub fn chain_stats(conn: &Connection) -> Result<ChainStats> {
 
     let canonical_on_b = canonical_filter_on("b");
     let canonical_on_b2 = canonical_filter_on("b2");
+    let recorded_t = recorded_filter_on("t");
+    let recorded_t2 = recorded_filter_on("t2");
     let live_utxos: i64 = conn.query_row(
         &format!(
             "SELECT COUNT(*)
              FROM tx_outputs o
              JOIN transactions t ON t.id = o.tx_id
              JOIN blocks b ON b.id = t.block_id
-             WHERE {canonical_on_b} AND o.spent_in_gap = 0
+             WHERE {recorded_t} AND {canonical_on_b} AND o.spent_in_gap = 0
                AND NOT EXISTS (
                  SELECT 1 FROM tx_inputs i
                  JOIN transactions t2 ON t2.id = i.tx_id
                  JOIN blocks b2 ON b2.id = t2.block_id
-                 WHERE i.creation_id = o.creation_id AND {canonical_on_b2}
+                 WHERE i.creation_id = o.creation_id AND {recorded_t2} AND {canonical_on_b2}
                )"
         ),
         [],
@@ -920,6 +994,7 @@ pub fn chain_stats(conn: &Connection) -> Result<ChainStats> {
         last_processed_height,
         indexed_blocks,
         indexed_transactions,
+        receipt_transactions,
         archive_from_height,
         header_only_blocks,
         headers_from_height,

@@ -4,6 +4,35 @@ Notable changes per release. Commit history has the details.
 
 ## Unreleased
 
+- **Old blocks completed from payment receipts.** New subcommand
+  `import-receipts <FILE>...` reads wallet receipt journals
+  (`wallet.receipts`), JSON objects txid -> receipt hex and text files with
+  one receipt per line, and adds the transaction each receipt proves to its
+  header-only block below the recorded history. Every receipt is decoded
+  exactly (trailing data is refused - the node would ignore it), checked
+  offline, verified by the node (`paranoid_verifyReceipt`, same data
+  required) and against the header on record; one input owner, the txid it
+  is filed under. Receipts for archive blocks, gaps and heights without a
+  header yet are skipped and reported; running it again changes nothing.
+- A receipt's pages hold the whole transaction, input amounts and creation
+  ids included (the txid commits to them), so imported transactions are
+  complete except for the creation ids of their outputs, which the block
+  assigns. Stored with `transactions.source = 'receipt'`, the receipt in
+  the new table `tx_receipts`, the block's transaction count in
+  `blocks.tx_count_total`. `tx_outputs.creation_id` may now be NULL: the
+  first start rebuilds that table once (rows and rowids kept).
+- The recorded history does not change: recorded balances and totals, the
+  UTXO sweep's picture of the live state and the rich list, spent-in-gap
+  flags, the known-address refresh, `indexed_transactions`,
+  `transactions_24h`, `live_utxos`, the CSV export and pruning leave
+  imported transactions out explicitly (`db::RECORDED`); tests check every
+  one of these filters.
+- API: `tx/{txid}` carries `"source": "receipt"` for imported transactions
+  (outputs with `creation_id: null`); `block/height|hash` of a header-only
+  block lists its known transactions and `tx_count_total`, `blocks` carries
+  `tx_count_total`; address histories include them, marked, and
+  `address/{a}` adds `receipt_transactions`; `stats` adds
+  `receipt_transactions`.
 - **Header backfill.** The node keeps every block header since genesis;
   a background thread now copies the headers from below the first
   recorded block, down to genesis, as header-only blocks (`body_source =

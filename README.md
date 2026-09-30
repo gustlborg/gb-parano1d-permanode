@@ -171,7 +171,10 @@ sudo systemctl start parano1d-permanode
 ```
 
 Database migrations run automatically on start. Never delete the database
-during an update - it is the whole point.
+during an update - it is the whole point. The first start of 0.3.0 rebuilds
+the `tx_outputs` table once (to allow unknown creation ids for outputs
+imported from receipts, see below): a few seconds for a few hundred thousand
+outputs, inside one transaction.
 
 ## What you get
 
@@ -203,6 +206,10 @@ during an update - it is the whole point.
   periodically (`paranoid_getStateMap` + `paranoid_getSlot`), so the rich
   list and address balances are complete and verified against the node's
   own totals, not reconstructed from partial history.
+- **Old blocks completed from payment receipts**: `import-receipts` adds
+  the transactions that wallet payment receipts prove to the blocks below
+  the recorded history, each verified by the node and against the block
+  header (see below).
 
 ## How it works
 
@@ -280,8 +287,9 @@ includes fees, which are unknown without the body), no fees.
   reorg re-check, pruning and the CSV export are exactly as they would be
   without them.
 - In the API, `block/height/{h}` and `block/hash/{h}` return them with
-  `"archived": false`, `"transactions": []`, `reward_micronoid` and
-  `total_fees_micronoid` null, and `archive_from_height`;
+  `"archived": false`, `reward_micronoid` and `total_fees_micronoid` null,
+  and `archive_from_height`; `transactions` is empty unless payment
+  receipts were imported for the block (see below);
   `miner_subsidy_micronoid` (what the consensus rules let the coinbase mint
   before fees, known for every block) is set. `blocks?before={h}` pages
   down the chain across the first recorded block. `address/{a}` carries
@@ -316,6 +324,57 @@ a body is accepted only for a block whose hash your own node reported and
 whose transactions add up (inputs, outputs, fees, coinbase). Imported
 blocks show `body_source = import` in the database and are logged as
 "recovered via import".
+
+## Completing old blocks from payment receipts
+
+Below its first recorded block the permanode has only block headers. A
+Parano1d wallet keeps a payment receipt for the payments it made
+(`wallet.receipts` next to the wallet), and a receipt proves one
+transaction of its block. `import-receipts` adds those transactions to the
+header-only blocks:
+
+```
+parano1d-permanode -c permanode.toml import-receipts wallet.receipts [more files]
+```
+
+- Input: wallet receipt journals (`wallet.receipts`, read like the wallet
+  reads them, checksums included), JSON objects
+  `{"<txid>": "<receipt hex>"}` (the wallet's older format) and text files
+  with one receipt hex per line. Several files at once; a receipt listed
+  twice counts once. A receipt holds public chain data only.
+- Every receipt must be exactly one receipt (nothing after it - the node
+  would check only the first of two), its Merkle proof must verify, the
+  node must confirm it (`paranoid_verifyReceipt`: proof valid, block on
+  the canonical chain, the same data), it must match the header on record
+  at its height (`tx_root` and time), and all its inputs must have one
+  owner. Where a file files it under a txid, it must prove that txid.
+- Only header-only blocks are completed. Receipts for blocks of the
+  recorded history, for gaps (fill those with `import-bodies`) and for
+  heights whose header is not on record yet are skipped. The command
+  prints one line per receipt and the totals, exits with an error if a
+  receipt was rejected, and imports nothing twice when run again. It can
+  run while the permanode is running; update the running permanode to
+  this version first.
+
+A receipt proves the whole transaction - sender, inputs with their amounts
+and creation ids, outputs, fee, pages - its position in that canonical
+block and how many transactions the block has. It says nothing about the
+block's other transactions, its reward and fees, or what happened to the
+outputs later; the creation ids of its outputs are unknown (the block
+assigns them when it is applied) and stay null.
+
+- Stored with `transactions.source = 'receipt'`, the receipt itself in
+  `tx_receipts` (so it can be verified again), the block's transaction
+  count in `blocks.tx_count_total`.
+- In the API, `tx/{txid}` returns them with `"source": "receipt"`;
+  `block/height/{h}` lists the known transactions of a header-only block
+  with `tx_count_total`, which `blocks` carries too; address histories
+  include them, marked, and `address/{a}` counts them in
+  `receipt_transactions`; `stats.receipt_transactions` counts them all.
+- They are not part of the recorded history: the recorded balances and
+  totals, the UTXO sweep and the rich list, the known-address refresh,
+  `indexed_transactions`, `transactions_24h`, `live_utxos`, the CSV
+  export and pruning are exactly what they would be without them.
 
 ## Building
 
@@ -391,6 +450,9 @@ re-downloaded from the network.
   answer, or answered with a header that does not fit the chain on
   record. The backfill tries again by itself; nothing it stored is
   affected.
+- `import-receipts` skips a receipt with "no block header on record at
+  this height yet": the header backfill has not reached that height; run
+  the import again once it is done (`stats.headers_from_height` is 0).
 - Building from source fails in bindgen: see Building below.
 
 ## License

@@ -22,6 +22,13 @@
 //!   They are not part of the recorded archive, and every query about it
 //!   (coverage, counts, gaps, balances, export, pruning) excludes them
 //!   explicitly with `ARCHIVED` / `archived_filter_on`.
+//! - `import-receipts` adds transactions proven by Parano1d payment
+//!   receipts to header-only blocks (`transactions.source = 'receipt'`, see
+//!   `RECEIPT_SOURCE`), with the receipt itself in `tx_receipts`. They are
+//!   not part of the recorded archive either: balances, the UTXO sweep, the
+//!   known-address refresh, counts and the export leave them out with
+//!   `RECORDED` / `recorded_filter_on`; block, transaction and address
+//!   pages show them, marked.
 
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -42,6 +49,25 @@ pub const ARCHIVED: &str = "body_source IS NOT 'header'";
 /// `ARCHIVED` for a table alias, e.g. `archived_filter_on("b")`.
 pub fn archived_filter_on(alias: &str) -> String {
     format!("{alias}.{ARCHIVED}")
+}
+
+/// `transactions.source` of a transaction imported from a Parano1d payment
+/// receipt (`import-receipts`) into a header-only block. Everything else the
+/// permanode stores came from a block body and has `source` NULL.
+pub const RECEIPT_SOURCE: &str = "receipt";
+
+/// SQL predicate on the `transactions` table: the row was recorded from a
+/// block body (the indexer, a gap backfill, `import-bodies`), not
+/// reconstructed from a receipt. NULL-safe like `ARCHIVED`. Every query
+/// about the recorded history - balances, the live-state picture, the
+/// known-address set, counts, the export - filters with it: a receipt
+/// proves one transaction of a block this permanode never recorded, and
+/// the creation ids of its outputs are unknown.
+pub const RECORDED: &str = "source IS NOT 'receipt'";
+
+/// `RECORDED` for a table alias, e.g. `recorded_filter_on("t")`.
+pub fn recorded_filter_on(alias: &str) -> String {
+    format!("{alias}.{RECORDED}")
 }
 
 pub fn open(path: &str) -> Result<Connection> {
@@ -84,14 +110,24 @@ pub fn write_tx(conn: &Connection) -> Result<rusqlite::Transaction<'_>> {
 /// PRAGMA table_info check so it's safe against the live systemd-managed
 /// database, not just a fresh one from init_schema.
 fn migrate(conn: &Connection) -> Result<()> {
-    // The indexer, the API server and the sweep each open their own
-    // connection, often at the same moment. Taking the write lock up front
-    // makes the second opener wait and then see the columns the first one
-    // added, instead of both racing into "duplicate column name".
-    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
-    migrate_locked(&tx)?;
-    tx.commit()?;
-    Ok(())
+    // A table rebuild (`relax_output_creation_id`) follows SQLite's
+    // documented procedure, which runs with foreign-key enforcement off.
+    // The pragma has no effect inside a transaction, so it is switched
+    // around it and always switched back on.
+    conn.pragma_update(None, "foreign_keys", "OFF")?;
+    let result = (|| -> Result<()> {
+        // The indexer, the API server and the sweep each open their own
+        // connection, often at the same moment. Taking the write lock up
+        // front makes the second opener wait and then see the columns the
+        // first one added, instead of both racing into "duplicate column
+        // name".
+        let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+        migrate_locked(&tx)?;
+        tx.commit()?;
+        Ok(())
+    })();
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    result
 }
 
 fn migrate_locked(conn: &Connection) -> Result<()> {
@@ -154,6 +190,77 @@ fn migrate_locked(conn: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS idx_blocks_header_only ON blocks(height) WHERE body_source = 'header';
          CREATE INDEX IF NOT EXISTS idx_blocks_archive_height ON blocks(height, body_source) WHERE body_source IS NOT 'header';
          CREATE INDEX IF NOT EXISTS idx_blocks_archive_timestamp ON blocks(timestamp, body_source) WHERE body_source IS NOT 'header';",
+    )?;
+    // Receipt imports: a transaction proven by a payment receipt, stored in
+    // its header-only block with `source = 'receipt'` (see `RECORDED`), the
+    // receipt kept in `tx_receipts` so it can be verified again, and the
+    // block's transaction count as the receipt's Merkle proof binds it in
+    // `blocks.tx_count_total` (NULL everywhere else). The partial index
+    // makes counting them, and leaving them out, cost nothing.
+    add_column_if_missing(conn, "transactions", "source", "TEXT")?;
+    add_column_if_missing(conn, "blocks", "tx_count_total", "INTEGER")?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS tx_receipts (
+             tx_id        INTEGER PRIMARY KEY REFERENCES transactions(id),
+             receipt_hex  TEXT NOT NULL,
+             imported_at  TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_tx_receipt ON transactions(block_id) WHERE source = 'receipt';",
+    )?;
+    relax_output_creation_id(conn)?;
+    Ok(())
+}
+
+fn column_is_not_null(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let flags: Vec<(String, i64)> = stmt.query_map([], |row| Ok((row.get(1)?, row.get(3)?)))?.collect::<rusqlite::Result<_>>()?;
+    Ok(flags.iter().any(|(name, notnull)| name == column && *notnull != 0))
+}
+
+/// The creation id of an output is assigned when its block is applied (a
+/// running counter over every output of the block), so a transaction
+/// reconstructed from a payment receipt cannot know it: such outputs store
+/// NULL. Databases from before receipt imports declared the column NOT
+/// NULL, and SQLite cannot drop a constraint in place, so the table is
+/// rebuilt once, the documented way (sqlite.org/lang_altertable.html,
+/// "Making Other Kinds Of Table Schema Changes"): create the new table,
+/// copy every row with its rowid, drop the old one, rename, recreate the
+/// indexes - all inside the migration's transaction, so a failure leaves
+/// the old table as it was. Nothing references `tx_outputs`, and the
+/// column keeps its type and every other constraint.
+fn relax_output_creation_id(conn: &Connection) -> Result<()> {
+    if !column_is_not_null(conn, "tx_outputs", "creation_id")? {
+        return Ok(());
+    }
+    let rows: i64 = conn.query_row("SELECT COUNT(*) FROM tx_outputs", [], |r| r.get(0))?;
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS tx_outputs_new;
+         CREATE TABLE tx_outputs_new (
+             tx_id               INTEGER NOT NULL REFERENCES transactions(id),
+             idx                 INTEGER NOT NULL,
+             page                INTEGER NOT NULL,
+             lane                INTEGER NOT NULL,
+             slot_index          INTEGER NOT NULL,
+             amount_micronoid    INTEGER NOT NULL,
+             owner               TEXT NOT NULL,
+             creation_id         TEXT,
+             spent_in_gap        INTEGER NOT NULL DEFAULT 0,
+             spent_in_gap_at     TEXT,
+             PRIMARY KEY(tx_id, idx)
+         );
+         INSERT INTO tx_outputs_new (rowid, tx_id, idx, page, lane, slot_index, amount_micronoid, owner, creation_id, spent_in_gap, spent_in_gap_at)
+             SELECT rowid, tx_id, idx, page, lane, slot_index, amount_micronoid, owner, creation_id, spent_in_gap, spent_in_gap_at FROM tx_outputs;",
+    )?;
+    let copied: i64 = conn.query_row("SELECT COUNT(*) FROM tx_outputs_new", [], |r| r.get(0))?;
+    if copied != rows {
+        bail!("tx_outputs rebuild copied {copied} of {rows} rows");
+    }
+    conn.execute_batch(
+        "DROP TABLE tx_outputs;
+         ALTER TABLE tx_outputs_new RENAME TO tx_outputs;
+         CREATE INDEX IF NOT EXISTS idx_outputs_owner ON tx_outputs(owner);
+         CREATE INDEX IF NOT EXISTS idx_outputs_creation ON tx_outputs(creation_id);
+         CREATE INDEX IF NOT EXISTS idx_outputs_slot ON tx_outputs(slot_index);",
     )?;
     Ok(())
 }
@@ -244,6 +351,8 @@ fn init_schema(conn: &Connection) -> Result<()> {
             PRIMARY KEY(tx_id, idx)
         );
 
+        -- creation_id is NULL only for outputs of a transaction imported
+        -- from a payment receipt (see relax_output_creation_id).
         CREATE TABLE IF NOT EXISTS tx_outputs (
             tx_id               INTEGER NOT NULL REFERENCES transactions(id),
             idx                 INTEGER NOT NULL,
@@ -252,7 +361,7 @@ fn init_schema(conn: &Connection) -> Result<()> {
             slot_index          INTEGER NOT NULL,
             amount_micronoid    INTEGER NOT NULL,
             owner               TEXT NOT NULL,
-            creation_id         TEXT NOT NULL,
+            creation_id         TEXT,
             PRIMARY KEY(tx_id, idx)
         );
         CREATE INDEX IF NOT EXISTS idx_outputs_owner ON tx_outputs(owner);
@@ -415,6 +524,156 @@ pub fn insert_header_only_block(conn: &Connection, b: &HeaderOnlyBlock, now: &st
     Ok(true)
 }
 
+/// The canonical block on record at a height, with what a receipt is
+/// checked against.
+#[derive(Debug, Clone)]
+pub struct CanonicalBlock {
+    pub id: i64,
+    pub hash: String,
+    pub tx_root: String,
+    pub timestamp: u64,
+    pub body_captured: bool,
+    pub header_only: bool,
+}
+
+pub fn canonical_block_at(conn: &Connection, height: u64) -> Result<Option<CanonicalBlock>> {
+    let Some((id, hash)) = canonical_hash_at(conn, height)? else {
+        return Ok(None);
+    };
+    let (tx_root, timestamp, body_captured, source): (String, i64, i64, Option<String>) = conn.query_row(
+        "SELECT tx_root, timestamp, body_captured, body_source FROM blocks WHERE id = ?1",
+        params![id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
+    Ok(Some(CanonicalBlock {
+        id,
+        hash,
+        tx_root,
+        timestamp: timestamp as u64,
+        body_captured: body_captured != 0,
+        header_only: source.as_deref() == Some(HEADER_ONLY_SOURCE),
+    }))
+}
+
+/// A transaction proven by a Parano1d payment receipt: its pages hold every
+/// field of the transaction, input amounts and creation ids included, and
+/// the receipt's Merkle proof binds them to the block's `tx_root`. Only the
+/// creation ids of its outputs are unknown - the block assigns them when it
+/// is applied, counting over all its outputs - and stay NULL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiptTransaction {
+    /// Logical position in the block (`tx_index`), 0 being the coinbase.
+    pub position: u32,
+    /// The block's logical transactions, coinbase and development payout
+    /// included (`tx_count`).
+    pub tx_count: u32,
+    pub txid: String,
+    pub page_count: u32,
+    pub fee_micronoid: u64,
+    pub epoch_anchor: String,
+    pub input_owner: String,
+    pub input_sum_micronoid: String,
+    pub output_sum_micronoid: String,
+    pub contract_flags: u8,
+    pub page_hashes: Vec<String>,
+    pub inputs: Vec<ReceiptInput>,
+    pub outputs: Vec<ReceiptOutput>,
+    /// The receipt as the wallet stores it, kept so it can be verified again.
+    pub receipt_hex: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiptInput {
+    pub page: u32,
+    pub lane: u32,
+    pub slot_index: u64,
+    pub amount_micronoid: u64,
+    pub creation_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiptOutput {
+    pub page: u32,
+    pub lane: u32,
+    pub slot_index: u64,
+    pub amount_micronoid: u64,
+    pub owner: String,
+}
+
+/// Stores `tx` in the header-only block `block_id`. Returns `false` and
+/// writes nothing if that transaction is on record there already. Refuses
+/// (error) anything but a header-only block, a position another
+/// transaction holds, and a transaction count that disagrees with an
+/// earlier receipt of the same block. The caller has verified the receipt
+/// against the block; this only keeps the rows consistent.
+pub fn insert_receipt_transaction(conn: &Connection, block_id: i64, tx: &ReceiptTransaction, now: &str) -> Result<bool> {
+    if !is_header_only(conn, block_id)? {
+        bail!("block row {block_id} is not a header-only block; receipts only complete blocks below the archive");
+    }
+    if tx.position == 0 || tx.position >= tx.tx_count {
+        bail!("position {} does not fit a block of {} transactions", tx.position, tx.tx_count);
+    }
+    let known: Option<i64> = conn.query_row("SELECT tx_count_total FROM blocks WHERE id = ?1", params![block_id], |r| r.get(0))?;
+    if let Some(n) = known.filter(|n| *n != tx.tx_count as i64) {
+        bail!("the block holds {n} transactions per an earlier receipt, this one says {}", tx.tx_count);
+    }
+    let existing: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT txid, source FROM transactions WHERE block_id = ?1 AND position = ?2",
+            params![block_id, tx.position as i64],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    match existing {
+        Some((txid, Some(source))) if txid == tx.txid && source == RECEIPT_SOURCE => return Ok(false),
+        Some((txid, _)) => bail!("position {} holds {txid} already", tx.position),
+        None => {}
+    }
+    conn.execute(
+        "INSERT INTO transactions (block_id, position, txid, page_count, fee_micronoid, coinbase, development_payout,
+            epoch_anchor, input_owner, input_sum_micronoid, output_sum_micronoid, contract_flags, source)
+         VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            block_id,
+            tx.position as i64,
+            tx.txid,
+            tx.page_count as i64,
+            tx.fee_micronoid as i64,
+            tx.epoch_anchor,
+            tx.input_owner,
+            tx.input_sum_micronoid,
+            tx.output_sum_micronoid,
+            tx.contract_flags as i64,
+            RECEIPT_SOURCE,
+        ],
+    )?;
+    let tx_id = conn.last_insert_rowid();
+    for (idx, hash) in tx.page_hashes.iter().enumerate() {
+        conn.execute("INSERT INTO tx_page_hashes (tx_id, idx, page_hash) VALUES (?1, ?2, ?3)", params![tx_id, idx as i64, hash])?;
+    }
+    for (idx, i) in tx.inputs.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO tx_inputs (tx_id, idx, page, lane, slot_index, amount_micronoid, creation_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![tx_id, idx as i64, i.page as i64, i.lane as i64, i.slot_index as i64, i.amount_micronoid as i64, i.creation_id.to_string()],
+        )?;
+    }
+    for (idx, o) in tx.outputs.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO tx_outputs (tx_id, idx, page, lane, slot_index, amount_micronoid, owner, creation_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+            params![tx_id, idx as i64, o.page as i64, o.lane as i64, o.slot_index as i64, o.amount_micronoid as i64, o.owner],
+        )?;
+    }
+    conn.execute("INSERT INTO tx_receipts (tx_id, receipt_hex, imported_at) VALUES (?1, ?2, ?3)", params![tx_id, tx.receipt_hex, now])?;
+    conn.execute("UPDATE blocks SET tx_count_total = ?2 WHERE id = ?1", params![block_id, tx.tx_count as i64])?;
+    Ok(true)
+}
+
+/// Transactions imported from receipts.
+pub fn receipt_transaction_count(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row("SELECT COUNT(*) FROM transactions WHERE source = 'receipt'", [], |r| r.get(0))?)
+}
+
 pub fn mark_orphaned(conn: &Connection, block_id: i64, now: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO block_status_log (block_id, status, observed_at) VALUES (?1, 'orphaned', ?2)",
@@ -509,7 +768,8 @@ pub fn mark_body_recovered(conn: &Connection, block_id: i64, body_source: &str) 
 
 /// Delete transaction-level detail for blocks older than `cutoff_unix`,
 /// keeping the block header row itself. Returns the number of blocks
-/// pruned.
+/// pruned. Archive blocks only: header-only blocks, and the transactions
+/// imported from receipts into them, are never pruned.
 pub fn prune_older_than(conn: &Connection, cutoff_unix: i64) -> Result<usize> {
     let mut stmt = conn.prepare(&format!(
         "SELECT id FROM blocks WHERE timestamp < ?1 AND body_captured = 1 AND {ARCHIVED}"
@@ -545,13 +805,14 @@ pub fn prune_older_than(conn: &Connection, cutoff_unix: i64) -> Result<usize> {
 /// Every distinct address this permanode has ever recorded, as a sender,
 /// a receiver, or a block's miner. The set the live-balance cache refresh
 /// works through (one node call each). Miners of header-only blocks below
-/// the archive do not count: they were not recorded as the chain went by,
-/// and the sweep covers every address holding anything anyway.
+/// the archive, and the parties of transactions imported from receipts,
+/// do not count: they were not recorded as the chain went by, and the
+/// sweep covers every address holding anything anyway.
 pub fn known_addresses(conn: &Connection) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT input_owner FROM transactions WHERE input_owner IS NOT NULL
+        "SELECT input_owner FROM transactions WHERE input_owner IS NOT NULL AND {RECORDED}
          UNION
-         SELECT owner FROM tx_outputs
+         SELECT owner FROM tx_outputs WHERE tx_id NOT IN (SELECT id FROM transactions WHERE source = '{RECEIPT_SOURCE}')
          UNION
          SELECT miner FROM blocks WHERE {ARCHIVED}"
     ))?;
@@ -578,10 +839,13 @@ pub fn upsert_address_balance_cache(
     Ok(())
 }
 
-// The live-state queries below all reach `blocks` through a recorded
-// transaction (tx_outputs/tx_inputs -> transactions -> blocks). Header-only
-// rows have no transactions, so they can never take part - no extra filter
-// needed; `header_only_rows_leave_the_archive_alone` checks it.
+// The live-state queries below all reach `blocks` through a transaction
+// (tx_outputs/tx_inputs -> transactions -> blocks). Header-only rows have no
+// transactions of their own; the only ones they can hold are imported from
+// receipts, and every query here leaves those out (`RECORDED` on `t`/`t2`):
+// the picture of the live state is built from recorded blocks and the
+// node's state alone. `header_only_rows_leave_the_archive_alone` and
+// `receipt_transactions_leave_the_archive_alone` check it.
 const CANONICAL_B: &str = "(SELECT s.status FROM block_status_log s WHERE s.block_id = b.id ORDER BY s.id DESC LIMIT 1) = 'canonical'";
 
 /// "No input in a canonical block at or below height ?1 spends the coin
@@ -592,7 +856,7 @@ fn not_spent_by_recorded_input(cid: &str) -> String {
            SELECT 1 FROM tx_inputs i
            JOIN transactions t2 ON t2.id = i.tx_id
            JOIN blocks b2 ON b2.id = t2.block_id
-           WHERE i.creation_id = {cid} AND b2.height <= ?1
+           WHERE i.creation_id = {cid} AND b2.height <= ?1 AND t2.{RECORDED}
              AND (SELECT s.status FROM block_status_log s WHERE s.block_id = b2.id ORDER BY s.id DESC LIMIT 1) = 'canonical'
          )"
     )
@@ -609,7 +873,7 @@ pub fn unspent_recorded_outputs(conn: &Connection, max_height: u64, slots: std::
          JOIN transactions t ON t.id = o.tx_id
          JOIN blocks b ON b.id = t.block_id
          WHERE b.height <= ?1 AND o.slot_index >= ?2 AND o.slot_index < ?3
-           AND o.spent_in_gap = 0
+           AND o.spent_in_gap = 0 AND t.{RECORDED}
            AND {CANONICAL_B}
            AND {}",
         not_spent_by_recorded_input("o.creation_id")
@@ -634,7 +898,7 @@ pub fn live_count_per_segment(conn: &Connection, height: u64, segment_size: u64)
          FROM tx_outputs o
          JOIN transactions t ON t.id = o.tx_id
          JOIN blocks b ON b.id = t.block_id
-         WHERE b.height <= ?1 AND o.spent_in_gap = 0 AND {CANONICAL_B} AND {}
+         WHERE b.height <= ?1 AND o.spent_in_gap = 0 AND t.{RECORDED} AND {CANONICAL_B} AND {}
          GROUP BY seg",
         not_spent_by_recorded_input("o.creation_id")
     );
@@ -665,7 +929,7 @@ pub fn recorded_creation_ids(conn: &Connection, slots: std::ops::Range<u64>) -> 
         "SELECT o.creation_id FROM tx_outputs o
          JOIN transactions t ON t.id = o.tx_id
          JOIN blocks b ON b.id = t.block_id
-         WHERE o.slot_index >= ?1 AND o.slot_index < ?2 AND {CANONICAL_B}"
+         WHERE o.slot_index >= ?1 AND o.slot_index < ?2 AND t.{RECORDED} AND {CANONICAL_B}"
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params![slots.start as i64, slots.end as i64], |row| row.get::<_, String>(0))?;
@@ -703,7 +967,7 @@ pub fn live_balances(conn: &Connection) -> Result<std::collections::HashMap<Stri
          FROM tx_outputs o
          JOIN transactions t ON t.id = o.tx_id
          JOIN blocks b ON b.id = t.block_id
-         WHERE b.height <= ?1 AND o.spent_in_gap = 0 AND {CANONICAL_B} AND {}",
+         WHERE b.height <= ?1 AND o.spent_in_gap = 0 AND t.{RECORDED} AND {CANONICAL_B} AND {}",
         not_spent_by_recorded_input("o.creation_id")
     );
     let foreign = format!("SELECT f.owner, f.amount_micronoid FROM state_slots f WHERE {}", not_spent_by_recorded_input("f.creation_id"));
@@ -743,18 +1007,20 @@ pub fn zero_balance_cache_except(conn: &Connection, keep: &std::collections::Has
 /// judged it), so they count as ordinary spent outputs again. Returns how
 /// many were cleared.
 pub fn clear_spent_in_gap_with_recorded_spend(conn: &Connection) -> Result<usize> {
-    // Only a spend in a canonical block counts; orphaned blocks keep their
-    // transactions on record and may well spend the same output.
+    // Only a recorded spend in a canonical block counts; orphaned blocks
+    // keep their transactions on record and may well spend the same output.
     Ok(conn.execute(
-        "UPDATE tx_outputs SET spent_in_gap = 0, spent_in_gap_at = NULL
-         WHERE spent_in_gap = 1
-           AND EXISTS (
-             SELECT 1 FROM tx_inputs i
-             JOIN transactions t ON t.id = i.tx_id
-             JOIN blocks b ON b.id = t.block_id
-             WHERE i.creation_id = tx_outputs.creation_id
-               AND (SELECT s.status FROM block_status_log s WHERE s.block_id = b.id ORDER BY s.id DESC LIMIT 1) = 'canonical'
-           )",
+        &format!(
+            "UPDATE tx_outputs SET spent_in_gap = 0, spent_in_gap_at = NULL
+             WHERE spent_in_gap = 1
+               AND EXISTS (
+                 SELECT 1 FROM tx_inputs i
+                 JOIN transactions t ON t.id = i.tx_id
+                 JOIN blocks b ON b.id = t.block_id
+                 WHERE i.creation_id = tx_outputs.creation_id AND t.{RECORDED}
+                   AND (SELECT s.status FROM block_status_log s WHERE s.block_id = b.id ORDER BY s.id DESC LIMIT 1) = 'canonical'
+               )"
+        ),
         [],
     )?)
 }
@@ -782,7 +1048,12 @@ pub fn resolve_gaps_with_bodies(conn: &Connection, now: &str) -> Result<usize> {
 /// fresh read found live after all (an earlier sweep could not read their
 /// slot). Returns how many were taken back.
 pub fn unmark_live_outputs(conn: &Connection, slots: std::ops::Range<u64>, live: &std::collections::HashSet<&str>) -> Result<usize> {
-    let mut stmt = conn.prepare("SELECT rowid, creation_id FROM tx_outputs WHERE spent_in_gap = 1 AND slot_index >= ?1 AND slot_index < ?2")?;
+    // Only recorded outputs are ever flagged (see `unspent_recorded_outputs`).
+    let mut stmt = conn.prepare(&format!(
+        "SELECT rowid, creation_id FROM tx_outputs
+         WHERE spent_in_gap = 1 AND slot_index >= ?1 AND slot_index < ?2
+           AND tx_id NOT IN (SELECT id FROM transactions WHERE source = '{RECEIPT_SOURCE}')"
+    ))?;
     let flagged: Vec<(i64, String)> = stmt
         .query_map(params![slots.start as i64, slots.end as i64], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
@@ -940,8 +1211,8 @@ mod tests {
     }
 
     /// Everything that describes the recorded archive: the API's figures,
-    /// the sweep's picture of the live state, the gap bookkeeping and the
-    /// payment service's coverage query.
+    /// the sweep's picture of the live state, the gap bookkeeping, the
+    /// recorded balances and the payment service's coverage query.
     fn archive_view(c: &Connection) -> serde_json::Value {
         use crate::queries;
         let stats = queries::chain_stats(c).unwrap();
@@ -956,6 +1227,10 @@ mod tests {
         segments.sort();
         let mut unspent = unspent_recorded_outputs(c, 100, 0..65_536).unwrap();
         unspent.sort();
+        let addresses: Vec<serde_json::Value> = ["o1x", "o1y", "o1z", "o1w", "o1new"]
+            .iter()
+            .map(|a| serde_json::to_value(queries::address_balance(c, a).unwrap()).unwrap())
+            .collect();
         serde_json::json!({
             "indexed_blocks": stats.indexed_blocks,
             "indexed_transactions": stats.indexed_transactions,
@@ -975,8 +1250,8 @@ mod tests {
             "unspent": unspent,
             "recorded_ids": sorted(recorded_creation_ids(c, 0..65_536).unwrap().into_iter().collect()),
             "open_gaps": open_gap_heights(c, 0).unwrap(),
-            "address": serde_json::to_value(queries::address_balance(c, "o1x").unwrap()).unwrap(),
-            "address_txs": serde_json::to_value(queries::txs_by_address(c, "o1y", 1, 50).unwrap()).unwrap(),
+            "addresses": addresses,
+            "flagged": c.query_row("SELECT COUNT(*) FROM tx_outputs WHERE spent_in_gap = 1", [], |r| r.get::<_, i64>(0)).unwrap(),
             "burn_by_block": queries::burn_by_block(c).unwrap(),
             "state_activity": serde_json::to_value(queries::state_activity(c, 0).unwrap()).unwrap(),
         })
@@ -1010,13 +1285,13 @@ mod tests {
         assert_eq!(n, 600);
     }
 
-    #[test]
-    fn header_only_rows_leave_the_archive_alone() {
-        use crate::queries;
-        let d = db("headers");
-        let c = &d.conn;
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-        // the archive: #10..#13, a reorg at #11, a gap at #12, a resolved one at #11
+    fn now_unix() -> i64 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
+    }
+
+    /// The archive: #10..#13, a reorg at #11, a gap at #12, a resolved one
+    /// at #11, and two live UTXOs found by the sweep.
+    fn archive(c: &Connection, now: i64) {
         block_at(c, 10, "a10", "canonical", now - 500, &[], &[(5, "o1x", 100, "1"), (70_000, "o1y", 50, "2")]);
         block_at(c, 11, "a11", "canonical", now - 400, &["1"], &[(6, "o1y", 90, "3")]);
         block_at(c, 11, "b11", "orphaned", now - 400, &["2"], &[]);
@@ -1035,9 +1310,10 @@ mod tests {
         c.execute("UPDATE blocks SET miner = 'o1pool' WHERE hash = 'a13'", []).unwrap();
         c.execute("UPDATE blocks SET reward_micronoid = 45000100, total_fees_micronoid = '300' WHERE body_captured = 1", []).unwrap();
         replace_state_slots(c, 0, &[slot(7, "9", "o1z", 40), slot(8, "8", "o1w", 10)], 9, "t").unwrap();
-        let before = archive_view(c);
+    }
 
-        // the backfill below it: genesis and #1..#9, older than the archive
+    /// The header backfill below the archive: genesis and #1..#9.
+    fn headers_below(c: &Connection, now: i64) {
         for h in 0..10u64 {
             let miner = match h {
                 0 => "o1genesis",
@@ -1046,7 +1322,21 @@ mod tests {
             };
             assert!(header(c, h, miner, (now - 100_000) as u64 + h).unwrap());
         }
+    }
+
+    #[test]
+    fn header_only_rows_leave_the_archive_alone() {
+        use crate::queries;
+        let d = db("headers");
+        let c = &d.conn;
+        let now = now_unix();
+        archive(c, now);
+        let before = archive_view(c);
+        let txs_before = serde_json::to_value(queries::txs_by_address(c, "o1y", 1, 50).unwrap()).unwrap();
+
+        headers_below(c, now);
         assert_eq!(archive_view(c), before, "the archive's figures must not move");
+        assert_eq!(serde_json::to_value(queries::txs_by_address(c, "o1y", 1, 50).unwrap()).unwrap(), txs_before);
 
         // idempotent, and never on top of a block on record
         assert!(!header(c, 5, "o1old", 0).unwrap(), "same block again: nothing written");
@@ -1126,5 +1416,177 @@ mod tests {
         assert_eq!(prune_older_than(c, now + 1).unwrap(), 4, "#10, #11 (both versions), #13");
         let headers: i64 = c.query_row("SELECT COUNT(*) FROM blocks WHERE body_source = 'header' AND body_captured = 0", [], |r| r.get(0)).unwrap();
         assert_eq!(headers, 10);
+    }
+
+    /// A transaction as a receipt proves it: inputs (slot, amount, creation
+    /// id), outputs (slot, amount, owner).
+    fn receipt_tx(position: u32, tx_count: u32, txid: &str, owner: &str, inputs: &[(u64, u64, u64)], outputs: &[(u64, u64, &str)], fee: u64) -> ReceiptTransaction {
+        let out_sum: u64 = outputs.iter().map(|o| o.1).sum();
+        ReceiptTransaction {
+            position,
+            tx_count,
+            txid: txid.into(),
+            page_count: 1,
+            fee_micronoid: fee,
+            epoch_anchor: "ea".into(),
+            input_owner: owner.into(),
+            input_sum_micronoid: (out_sum + fee).to_string(),
+            output_sum_micronoid: out_sum.to_string(),
+            contract_flags: 0,
+            page_hashes: vec![format!("ph{txid}")],
+            inputs: inputs.iter().enumerate().map(|(lane, &(slot_index, amount_micronoid, creation_id))| ReceiptInput { page: 0, lane: lane as u32, slot_index, amount_micronoid, creation_id }).collect(),
+            outputs: outputs.iter().enumerate().map(|(lane, &(slot_index, amount_micronoid, owner))| ReceiptOutput { page: 0, lane: lane as u32, slot_index, amount_micronoid, owner: owner.into() }).collect(),
+            receipt_hex: format!("00{txid}"),
+        }
+    }
+
+    /// Transactions imported from receipts show on block, transaction and
+    /// address pages, but the recorded archive - balances, the sweep's
+    /// picture of the live state, spent-in-gap flags, the known-address set,
+    /// counts - does not move. The receipts below touch archive addresses and
+    /// spend creation ids of live archive outputs and of a UTXO the sweep
+    /// found (impossible on a real chain: they are older than the archive),
+    /// so every missing filter shows.
+    #[test]
+    fn receipt_transactions_leave_the_archive_alone() {
+        use crate::queries;
+        let d = db("receipts");
+        let c = &d.conn;
+        let now = now_unix();
+        archive(c, now);
+        headers_below(c, now);
+        // a young permanode: the blocks right below its archive are recent
+        c.execute("UPDATE blocks SET timestamp = ?1 WHERE height = 7", params![now - 600]).unwrap();
+        // B (creation id 2) is gone from the node's state per the sweep
+        let b_row: i64 = c.query_row("SELECT rowid FROM tx_outputs WHERE creation_id = '2'", [], |r| r.get(0)).unwrap();
+        mark_spent_in_gap(c, &[b_row], "t").unwrap();
+        let before = archive_view(c);
+        let txs_before = queries::txs_by_address(c, "o1y", 1, 50).unwrap().1;
+
+        let block_id = |h: u64| canonical_block_at(c, h).unwrap().unwrap().id;
+        // spends C (3, live) and D (9, a sweep slot); pays o1new and o1y
+        let r1 = receipt_tx(1, 3, "r1", "o1x", &[(6, 90, 3), (7, 40, 9)], &[(20, 70, "o1new"), (70_001, 59, "o1y")], 1);
+        // spends B (2, flagged as spent in a gap)
+        let r2 = receipt_tx(2, 3, "r2", "o1y", &[(70_000, 50, 2)], &[(21, 49, "o1x")], 1);
+        let r3 = receipt_tx(1, 2, "r3", "o1new", &[(20, 70, 77)], &[(22, 69, "o1w")], 1);
+        assert!(insert_receipt_transaction(c, block_id(5), &r1, "now").unwrap());
+        assert!(insert_receipt_transaction(c, block_id(5), &r2, "now").unwrap());
+        assert!(insert_receipt_transaction(c, block_id(7), &r3, "now").unwrap());
+
+        assert_eq!(archive_view(c), before, "the archive's figures must not move");
+        assert_eq!(clear_spent_in_gap_with_recorded_spend(c).unwrap(), 0, "a receipt is no recorded spend");
+        assert_eq!(unmark_live_outputs(c, 0..65_536 * 2, &HashSet::from(["2"])).unwrap(), 1, "B is live after all");
+        mark_spent_in_gap(c, &[b_row], "t").unwrap();
+        assert_eq!(archive_view(c), before);
+
+        // idempotent; never on top of another transaction, a different
+        // count, the coinbase position, or a block of the archive
+        assert!(!insert_receipt_transaction(c, block_id(5), &r1, "now").unwrap(), "same receipt again: nothing written");
+        assert!(insert_receipt_transaction(c, block_id(5), &receipt_tx(1, 3, "rx", "o1x", &[(1, 2, 3)], &[(4, 1, "o1x")], 1), "now").is_err());
+        assert!(insert_receipt_transaction(c, block_id(5), &receipt_tx(3, 4, "ry", "o1x", &[(1, 2, 3)], &[(4, 1, "o1x")], 1), "now").is_err());
+        assert!(insert_receipt_transaction(c, block_id(9), &receipt_tx(0, 2, "rz", "o1x", &[(1, 2, 3)], &[(4, 1, "o1x")], 1), "now").is_err());
+        assert!(insert_receipt_transaction(c, block_id(10), &receipt_tx(1, 3, "ra", "o1x", &[(1, 2, 3)], &[(4, 1, "o1x")], 1), "now").is_err());
+        assert!(insert_receipt_transaction(c, block_id(12), &receipt_tx(1, 3, "rg", "o1x", &[(1, 2, 3)], &[(4, 1, "o1x")], 1), "now").is_err());
+        assert_eq!(archive_view(c), before);
+
+        // what the pages show
+        let stats = queries::chain_stats(c).unwrap();
+        assert_eq!((stats.receipt_transactions, stats.indexed_transactions), (3, 4));
+        let b5 = queries::block_by_height(c, 5).unwrap().unwrap();
+        assert!(!b5.archived && b5.reward_micronoid.is_none());
+        assert_eq!(b5.tx_count_total, Some(3));
+        assert_eq!(b5.transactions.iter().map(|t| (t.position, t.txid.as_str(), t.source)).collect::<Vec<_>>(), vec![(1, "r1", Some("receipt")), (2, "r2", Some("receipt"))]);
+        assert_eq!(queries::block_by_height(c, 6).unwrap().unwrap().tx_count_total, None);
+        assert_eq!(queries::block_by_height(c, 10).unwrap().unwrap().tx_count_total, None);
+        let listed = queries::recent_blocks(c, 10, Some(8)).unwrap();
+        let b5_row = listed.iter().find(|b| b.height == 5).unwrap();
+        assert_eq!((b5_row.tx_count, b5_row.tx_count_total, b5_row.archived), (2, Some(3), false));
+        let t = queries::tx_by_txid(c, "r1").unwrap().unwrap();
+        assert_eq!((t.source, t.block.height, t.position, t.input_sum_micronoid.as_str()), (Some("receipt"), 5, 1, "130"));
+        assert_eq!(t.inputs.iter().map(|i| (i.amount_micronoid, i.creation_id.as_str())).collect::<Vec<_>>(), vec![(90, "3"), (40, "9")]);
+        assert!(t.outputs.iter().all(|o| o.creation_id.is_none()));
+        assert_eq!(t.page_hashes, vec!["phr1"]);
+        assert_eq!(queries::tx_by_txid(c, "txa11").unwrap().unwrap().source, None, "recorded transactions carry no source");
+        let (new_txs, total) = queries::txs_by_address(c, "o1new", 1, 50).unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(
+            new_txs.iter().map(|t| (t.txid.as_str(), t.source, t.address_delta_micronoid.as_deref())).collect::<Vec<_>>(),
+            vec![("r3", Some("receipt"), Some("-70")), ("r1", Some("receipt"), Some("70"))]
+        );
+        let (y_txs, y_total) = queries::txs_by_address(c, "o1y", 1, 50).unwrap();
+        assert_eq!(y_total, txs_before + 2, "the address history shows them");
+        assert_eq!(y_txs.iter().filter(|t| t.source.is_some()).count(), 2);
+        assert_eq!(queries::receipt_txs_by_address(c, "o1y").unwrap(), 2);
+        assert_eq!(queries::receipt_txs_by_address(c, "o1new").unwrap(), 2);
+        assert_eq!(queries::receipt_txs_by_address(c, "o1z").unwrap(), 0);
+
+        // retention never touches them
+        assert_eq!(prune_older_than(c, now + 1).unwrap(), 4);
+        assert_eq!(receipt_transaction_count(c).unwrap(), 3);
+        let kept: i64 = c.query_row("SELECT COUNT(*) FROM tx_receipts", [], |r| r.get(0)).unwrap();
+        assert_eq!(kept, 3);
+    }
+
+    /// A database from before receipt imports declares
+    /// `tx_outputs.creation_id NOT NULL`; opening it rebuilds the table once
+    /// without that constraint and keeps every row, rowid and index.
+    #[test]
+    fn output_creation_ids_become_nullable_once() {
+        let d = db("rebuild");
+        let c = &d.conn;
+        block(c, 10, "a10", "canonical", &[], &[(5, "o1x", 100, "1"), (70_000, "o1y", 50, "2")]);
+        block(c, 11, "a11", "canonical", &["1"], &[(6, "o1y", 90, "3")]);
+        let rows = |c: &Connection| -> Vec<(i64, i64, i64, String, String, i64)> {
+            let mut stmt = c.prepare("SELECT rowid, tx_id, idx, owner, creation_id, spent_in_gap FROM tx_outputs ORDER BY rowid").unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))).unwrap().map(|r| r.unwrap()).collect()
+        };
+        // the table as it was before: creation_id NOT NULL, rowids with a hole
+        c.execute("DELETE FROM tx_outputs WHERE creation_id = '2'", []).unwrap();
+        c.execute("UPDATE tx_outputs SET spent_in_gap = 1, spent_in_gap_at = 't' WHERE creation_id = '1'", []).unwrap();
+        c.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             CREATE TABLE old_outputs (
+                 tx_id INTEGER NOT NULL REFERENCES transactions(id), idx INTEGER NOT NULL, page INTEGER NOT NULL,
+                 lane INTEGER NOT NULL, slot_index INTEGER NOT NULL, amount_micronoid INTEGER NOT NULL, owner TEXT NOT NULL,
+                 creation_id TEXT NOT NULL, spent_in_gap INTEGER NOT NULL DEFAULT 0, spent_in_gap_at TEXT, PRIMARY KEY(tx_id, idx));
+             INSERT INTO old_outputs (rowid, tx_id, idx, page, lane, slot_index, amount_micronoid, owner, creation_id, spent_in_gap, spent_in_gap_at)
+                 SELECT rowid, tx_id, idx, page, lane, slot_index, amount_micronoid, owner, creation_id, spent_in_gap, spent_in_gap_at FROM tx_outputs;
+             DROP TABLE tx_outputs;
+             ALTER TABLE old_outputs RENAME TO tx_outputs;
+             CREATE INDEX idx_outputs_owner ON tx_outputs(owner);
+             PRAGMA foreign_keys = ON;",
+        )
+        .unwrap();
+        assert!(column_is_not_null(c, "tx_outputs", "creation_id").unwrap());
+        let before = rows(c);
+        assert_eq!(before.len(), 2);
+
+        let reopened = open(d.path.to_str().unwrap()).unwrap();
+        assert!(!column_is_not_null(&reopened, "tx_outputs", "creation_id").unwrap());
+        assert!(column_is_not_null(&reopened, "tx_outputs", "owner").unwrap(), "the other constraints stay");
+        assert_eq!(rows(&reopened), before, "every row with its rowid");
+        let indexes: Vec<String> = reopened
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'tx_outputs' AND sql IS NOT NULL ORDER BY name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(indexes, vec!["idx_outputs_creation", "idx_outputs_owner", "idx_outputs_slot"]);
+        let fk: i64 = reopened.pragma_query_value(None, "foreign_keys", |r| r.get(0)).unwrap();
+        assert_eq!(fk, 1, "foreign keys are enforced again");
+        let problems: i64 = reopened.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0)).unwrap();
+        assert_eq!(problems, 0);
+        let ok: String = reopened.query_row("PRAGMA integrity_check", [], |r| r.get(0)).unwrap();
+        assert_eq!(ok, "ok");
+        // a NULL creation id is accepted now, and a second open changes nothing
+        reopened.execute("INSERT INTO tx_outputs (tx_id, idx, page, lane, slot_index, amount_micronoid, owner, creation_id) VALUES (1, 9, 0, 0, 1, 1, 'o1r', NULL)", []).unwrap();
+        drop(reopened);
+        let again = open(d.path.to_str().unwrap()).unwrap();
+        assert_eq!(rows_with_null(&again), 3);
+    }
+
+    fn rows_with_null(c: &Connection) -> i64 {
+        c.query_row("SELECT COUNT(*) FROM tx_outputs", [], |r| r.get(0)).unwrap()
     }
 }
