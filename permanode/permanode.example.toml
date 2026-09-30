@@ -82,3 +82,14 @@ listen = "127.0.0.1:8420"
 # Your donation address, returned by /api/v1/stats for a frontend to show.
 # Leave empty for none.
 donation_address = ""
+
+# Gap filling between your own permanodes. A permanode that was offline
+# longer than its node keeps block bodies has gaps; another one that ran
+# meanwhile has the bodies. `peer_listen` serves this permanode's bodies to
+# others (/peer/v1/body/<height>/<hash>, /peer/v1/status) - put it on a
+# private network address only, e.g. a WireGuard tunnel. `backfill_peers`
+# are the other permanodes' peer endpoints; every body taken over must
+# rebuild the tx_root of the header this permanode's own node gave it.
+# peer_listen = "[fd00::1]:8421"
+backfill_peers = []
+peer_backfill_interval_seconds = 300

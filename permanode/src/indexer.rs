@@ -40,6 +40,12 @@ pub fn run(conn: &Connection, rpc: &RpcClient, cfg: &Config) -> Result<()> {
             .name("header-backfill".into())
             .spawn(move || header_backfill_thread(&db_path, &rpc, per_second, reorg_check_depth))?;
     }
+    if !cfg.backfill_peers.is_empty() {
+        let db_path = cfg.db_path.clone();
+        let peers = cfg.backfill_peers.clone();
+        let every = Duration::from_secs(cfg.peer_backfill_interval_seconds.max(30));
+        thread::Builder::new().name("peer-backfill".into()).spawn(move || peer_backfill_thread(&db_path, &peers, every))?;
+    }
     loop {
         if let Err(e) = poll_once(conn, rpc, cfg) {
             warn!("poll cycle failed, will retry: {e:#}");
@@ -437,7 +443,7 @@ fn record_gap(conn: &Connection, height: u64, hash: Option<&str>, now: &str, not
 /// Inserts (or no-ops if already present) the `blocks` row for a header
 /// that has no usable body, and records the gap. Idempotent the same way
 /// `store_block` is.
-fn record_gap_block(conn: &Connection, details: &BlockDetailsInfo, note: &str) -> Result<()> {
+pub fn record_gap_block(conn: &Connection, details: &BlockDetailsInfo, note: &str) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     let h = &details.header;
 
@@ -457,7 +463,7 @@ fn record_gap_block(conn: &Connection, details: &BlockDetailsInfo, note: &str) -
 /// `Some`), from whichever source. `body_source` is `"details"` when it
 /// came straight from getBlockDetails, `"getblock"` when the fallback
 /// decoder had to reconstruct it.
-fn store_block(conn: &Connection, details: &BlockDetailsInfo, body_source: &str) -> Result<()> {
+pub fn store_block(conn: &Connection, details: &BlockDetailsInfo, body_source: &str) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     let h = &details.header;
     let retained = details
@@ -857,6 +863,35 @@ fn read_segment(conn: &Connection, rpc: &RpcClient, slots: std::ops::Range<u64>,
 /// Headers fetched per database transaction: the write lock is held for
 /// milliseconds, a pause for the indexer takes effect within seconds, and
 /// the fsync per commit does not matter.
+/// Gaps offered to the peers per round.
+const PEER_BACKFILL_BATCH: usize = 500;
+
+/// Offers the open gaps to `peers` every `every`, on its own connection.
+/// Quiet while nothing changes; says so when a peer becomes unreachable or
+/// reachable again.
+fn peer_backfill_thread(db_path: &str, peers: &[String], every: Duration) {
+    info!("peer backfill: filling gaps from {} every {} s", peers.join(", "), every.as_secs());
+    let mut unreachable: Vec<String> = Vec::new();
+    loop {
+        match db::open(db_path).and_then(|conn| crate::import::fill_from_peers(&conn, peers, PEER_BACKFILL_BATCH)) {
+            Ok(r) => {
+                if r.imported > 0 || r.rejected > 0 {
+                    info!("peer backfill: {} gap(s) filled, {} rejected, {} not on any peer, {} open before", r.imported, r.rejected, r.not_in_source, r.gaps);
+                }
+                for p in r.unreachable.iter().filter(|p| !unreachable.contains(p)) {
+                    warn!("peer backfill: {p} unreachable");
+                }
+                for p in unreachable.iter().filter(|p| !r.unreachable.contains(p)) {
+                    info!("peer backfill: {p} reachable again");
+                }
+                unreachable = r.unreachable;
+            }
+            Err(e) => warn!("peer backfill round failed: {e:#}"),
+        }
+        thread::sleep(every);
+    }
+}
+
 const HEADER_BATCH: u64 = 200;
 /// The protocol's maximum reorg depth is 17; from 18 confirmations on a
 /// block can no longer change.

@@ -320,10 +320,34 @@ parano1d-permanode -c permanode.toml import-bodies --from-db other-permanode.sql
 ```
 
 This can run while your permanode is running. Only gaps are touched, and
-a body is accepted only for a block whose hash your own node reported and
-whose transactions add up (inputs, outputs, fees, coinbase). Imported
-blocks show `body_source = import` in the database and are logged as
-"recovered via import".
+a body is accepted only for a block whose hash your own node reported,
+whose transactions in order rebuild the `tx_root` of that header (so the
+list of transactions is complete and genuine) and add up (inputs,
+outputs, fees, coinbase). Imported blocks show `body_source = import` in
+the database and are logged as "recovered via import".
+
+If you run two or more permanodes, they can fill each other's gaps
+continuously over a private network (for example a WireGuard tunnel)
+instead:
+
+```toml
+# on permanode A
+peer_listen = "[fd00::1]:8421"
+backfill_peers = ["http://[fd00::2]:8421"]
+# on permanode B
+peer_listen = "[fd00::2]:8421"
+backfill_peers = ["http://[fd00::1]:8421"]
+```
+
+`peer_listen` serves this permanode's recorded bodies
+(`/peer/v1/body/<height>/<hash>`) and a short status (`/peer/v1/status`:
+tip, first archived block, open gaps); keep it on the private network and
+let only the other permanodes reach it. Every `peer_backfill_interval_seconds`
+(300) the open gaps are offered to `backfill_peers`, checked exactly like an
+import and stored with `body_source = peer`. Once by hand:
+`parano1d-permanode -c permanode.toml fill-from-peer --peer http://[fd00::1]:8421`.
+The decoded contents of a body (amounts, owners) are taken as the other
+permanode recorded them - fill only from permanodes you run or trust.
 
 ## Completing old blocks from payment receipts
 

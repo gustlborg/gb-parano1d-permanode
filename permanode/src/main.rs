@@ -45,6 +45,14 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         from_db: PathBuf,
     },
+    /// Fill gaps from other permanodes' peer endpoints (their
+    /// `peer_listen`), once; `backfill_peers` does the same continuously.
+    /// Safe to run while this permanode is running.
+    FillFromPeer {
+        /// Peer endpoint, e.g. http://[fd00::1]:8421 (repeatable).
+        #[arg(long = "peer", value_name = "URL", required = true)]
+        peers: Vec<String>,
+    },
     /// Complete the header-only blocks below the archive with the
     /// transactions that Parano1d payment receipts prove. Reads wallet
     /// receipt journals (wallet.receipts), JSON objects txid -> receipt hex
@@ -80,6 +88,7 @@ fn main() -> Result<()> {
         Command::Serve => run_server(&cfg),
         Command::Run => run_both(cfg),
         Command::ImportBodies { from_db } => run_import(&cfg, &from_db),
+        Command::FillFromPeer { peers } => run_fill_from_peer(&cfg, &peers),
         Command::ImportReceipts { files } => run_import_receipts(&cfg, &files),
         Command::Export { dir } => run_export(&cfg, &dir),
     }
@@ -111,6 +120,26 @@ fn run_import(cfg: &Config, from_db: &std::path::Path) -> Result<()> {
         r.rejected,
         r.flags_cleared
     );
+    if r.rejected > 0 {
+        bail!("{} block(s) rejected, see warnings above", r.rejected);
+    }
+    Ok(())
+}
+
+fn run_fill_from_peer(cfg: &Config, peers: &[String]) -> Result<()> {
+    let conn = db::open(&cfg.db_path)?;
+    let r = import::fill_from_peers(&conn, peers, usize::MAX)?;
+    log::info!(
+        "fill from peer finished: {} gap(s), {} filled, {} not on any peer, {} rejected, {} spent-in-gap flag(s) cleared",
+        r.gaps,
+        r.imported,
+        r.not_in_source,
+        r.rejected,
+        r.flags_cleared
+    );
+    if !r.unreachable.is_empty() {
+        bail!("unreachable: {}", r.unreachable.join(", "));
+    }
     if r.rejected > 0 {
         bail!("{} block(s) rejected, see warnings above", r.rejected);
     }

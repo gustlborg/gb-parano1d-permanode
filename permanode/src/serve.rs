@@ -164,10 +164,94 @@ pub async fn run(cfg: &Config) -> Result<()> {
     .layer(CorsLayer::permissive())
     .with_state(state);
 
+    if let Some(peer_listen) = cfg.peer_listen.clone() {
+        tokio::spawn(run_peer(peer_listen, cfg.db_path.clone()));
+    }
+
     log::info!("api listening on http://{}", cfg.listen);
     let listener = tokio::net::TcpListener::bind(&cfg.listen).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+// ---------------------------------------------------------------- peer endpoint
+
+/// The peer endpoint (`peer_listen`): this permanode's block bodies for
+/// other permanodes that fill their gaps from it, and a short status. Its
+/// own read-only connection. A failed bind (the private network not up
+/// yet) is retried and never takes the API down.
+async fn run_peer(listen: String, db_path: String) {
+    let conn = loop {
+        match Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX) {
+            Ok(c) => break c,
+            Err(e) => {
+                log::warn!("peer endpoint: cannot open {db_path} ({e}), retrying in 30 s");
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            }
+        }
+    };
+    let app = Router::new()
+        .route("/peer/v1/body/{height}/{hash}", get(peer_body))
+        .route("/peer/v1/status", get(peer_status))
+        .with_state(Arc::new(Mutex::new(conn)));
+    loop {
+        match tokio::net::TcpListener::bind(&listen).await {
+            Ok(listener) => {
+                log::info!("peer endpoint listening on http://{listen}");
+                if let Err(e) = axum::serve(listener, app.clone()).await {
+                    log::warn!("peer endpoint stopped: {e}");
+                }
+            }
+            Err(e) => log::warn!("peer endpoint: cannot listen on {listen} ({e}), retrying in 30 s"),
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    }
+}
+
+type PeerDb = Arc<Mutex<Connection>>;
+
+fn peer_error(status: StatusCode, msg: &str) -> Response {
+    (status, Json(serde_json::json!({ "error": msg }))).into_response()
+}
+
+/// The recorded body of block `(height, hash)` in the format of the node's
+/// `getBlockDetails`, or 404.
+async fn peer_body(State(db): State<PeerDb>, Path((height, hash)): Path<(u64, String)>) -> Response {
+    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return peer_error(StatusCode::BAD_REQUEST, "hash must be 64 hex digits");
+    }
+    let hash = hash.to_ascii_lowercase();
+    let found = tokio::task::spawn_blocking(move || {
+        let conn = db.lock().unwrap_or_else(|p| p.into_inner());
+        crate::import::body_from_db(&conn, height, &hash)
+    })
+    .await;
+    match found {
+        Ok(Ok(Some(body))) => Json(body).into_response(),
+        Ok(Ok(None)) => peer_error(StatusCode::NOT_FOUND, "no body on record for this block"),
+        Ok(Err(e)) => {
+            log::warn!("peer endpoint: body of #{height}: {e:#}");
+            peer_error(StatusCode::INTERNAL_SERVER_ERROR, "recorded body unreadable")
+        }
+        Err(_) => peer_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+    }
+}
+
+/// Highest block with a body on record, the archive's first one and the
+/// open gaps - enough for the other side to see this permanode is alive.
+async fn peer_status(State(db): State<PeerDb>) -> Response {
+    let status = tokio::task::spawn_blocking(move || -> rusqlite::Result<serde_json::Value> {
+        let conn = db.lock().unwrap_or_else(|p| p.into_inner());
+        let (tip, first): (Option<i64>, Option<i64>) =
+            conn.query_row("SELECT MAX(height), MIN(height) FROM blocks WHERE body_captured = 1", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let gaps: i64 = conn.query_row("SELECT COUNT(*) FROM ingest_gaps WHERE resolved_at IS NULL", [], |r| r.get(0))?;
+        Ok(serde_json::json!({ "tip": tip, "archive_from": first, "open_gaps": gaps }))
+    })
+    .await;
+    match status {
+        Ok(Ok(v)) => Json(v).into_response(),
+        _ => peer_error(StatusCode::INTERNAL_SERVER_ERROR, "status unreadable"),
+    }
 }
 
 /// An unknown path under /api/ is a client asking for an endpoint this

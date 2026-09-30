@@ -97,8 +97,27 @@ pub struct Config {
     /// frontend to show. Empty or absent = none.
     #[serde(default)]
     pub donation_address: Option<String>,
+
+    /// Address of the peer endpoint, from which other permanodes fill
+    /// their gaps with this one's block bodies (`/peer/v1/...`). Meant for
+    /// a private network between your own permanodes; absent = off.
+    #[serde(default)]
+    pub peer_listen: Option<String>,
+
+    /// Peer endpoints of other permanodes (e.g. "http://[fd00::1]:8421")
+    /// this one fills its own gaps from. Every body taken over must
+    /// rebuild the tx_root of the header this permanode's node gave it.
+    #[serde(default)]
+    pub backfill_peers: Vec<String>,
+
+    /// How often open gaps are offered to `backfill_peers`.
+    #[serde(default = "default_peer_backfill_interval")]
+    pub peer_backfill_interval_seconds: u64,
 }
 
+fn default_peer_backfill_interval() -> u64 {
+    300
+}
 fn default_state_scan_max_per_second() -> u64 {
     500
 }
@@ -154,6 +173,9 @@ impl Default for Config {
             listen: default_listen(),
             site_dir: None,
             donation_address: None,
+            peer_listen: None,
+            backfill_peers: Vec::new(),
+            peer_backfill_interval_seconds: default_peer_backfill_interval(),
         }
     }
 }
@@ -186,7 +208,12 @@ impl Config {
                  # API listen address (put a TLS reverse proxy in front for the public)\n\
                  listen = {:?}\n\
                  # your donation address, returned by /api/v1/stats for a frontend to show (leave empty for none)\n\
-                 donation_address = \"\"\n",
+                 donation_address = \"\"\n\
+                 # peer endpoint other permanodes fill their gaps from (a private network address), unset = off\n\
+                 # peer_listen = \"[fd00::1]:8421\"\n\
+                 # peer endpoints this permanode fills its own gaps from\n\
+                 backfill_peers = []\n\
+                 peer_backfill_interval_seconds = {}\n",
                 cfg.rpc_url,
                 cfg.db_path,
                 cfg.poll_interval_seconds,
@@ -200,6 +227,7 @@ impl Config {
                 cfg.state_scan_max_per_second,
                 cfg.header_backfill_per_second,
                 cfg.listen,
+                cfg.peer_backfill_interval_seconds,
             );
             std::fs::write(path, toml_str)?;
             return Ok(cfg);

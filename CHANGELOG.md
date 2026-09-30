@@ -4,6 +4,18 @@ Notable changes per release. Commit history has the details.
 
 ## Unreleased
 
+- **Permanodes fill each other's gaps.** With `peer_listen` a permanode
+  serves its recorded block bodies (`/peer/v1/body/<height>/<hash>`) and a
+  status (`/peer/v1/status`) on a private address; with `backfill_peers`
+  it offers its own open gaps to other permanodes every
+  `peer_backfill_interval_seconds` (300) and records what they return
+  (`body_source = peer`). One-off: `fill-from-peer --peer URL`. Off by
+  default. A peer listener that cannot bind yet (private network not up)
+  retries instead of stopping the API.
+- Bodies from another permanode, over the network or from its database
+  (`import-bodies`), must now also rebuild the header's `tx_root` from
+  their transactions in order, besides fitting the block hash and adding
+  up; block totals and transaction positions are checked too.
 - **Old blocks completed from payment receipts.** New subcommand
   `import-receipts <FILE>...` reads wallet receipt journals
   (`wallet.receipts`), JSON objects txid -> receipt hex and text files with
