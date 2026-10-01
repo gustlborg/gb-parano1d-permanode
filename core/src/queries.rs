@@ -78,6 +78,15 @@ pub struct BlockDetail {
     /// fees (development shares deducted), from its height and state size;
     /// 0 for genesis, which mints nothing. Known for every block, body or not.
     pub miner_subsidy_micronoid: u64,
+    /// Slot-space depth from the header (`log₂` of the State capacity);
+    /// `None` on rows recorded before it was kept.
+    pub log_slots: Option<u32>,
+    /// Live slots after this block, and every live output ever created up
+    /// to it (the allocation counter) - header fields the database does not
+    /// keep; the API reads them from the node, which keeps every header, or
+    /// from the block's kept raw bytes. `None` where neither has them.
+    pub active_slot_count: Option<u64>,
+    pub alloc_counter: Option<u64>,
     pub body_captured: bool,
     /// False for a header-only block below the archive: the node keeps its
     /// header for ever, but its transactions were never recorded here
@@ -394,6 +403,9 @@ fn block_id_and_row(
                     reward_micronoid: row.get(11)?,
                     total_fees_micronoid: row.get(12)?,
                     miner_subsidy_micronoid: miner_subsidy_of(height, log_slots),
+                    log_slots: row.get::<_, Option<i64>>(16)?.map(|l| l as u32),
+                    active_slot_count: None,
+                    alloc_counter: None,
                     body_captured: row.get::<_, i64>(13)? != 0,
                     archived: row.get::<_, Option<String>>(15)?.as_deref() != Some(HEADER_ONLY_SOURCE),
                     archive_from_height: None,

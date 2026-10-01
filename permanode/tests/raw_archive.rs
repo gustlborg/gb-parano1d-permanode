@@ -280,3 +280,29 @@ fn the_switch_is_on_by_default() {
     let off: Config = toml::from_str("archive_raw_blocks = false").unwrap();
     assert!(!off.archive_raw_blocks);
 }
+
+#[test]
+fn a_block_page_reads_its_header_figures_from_the_kept_bytes() {
+    // node unreachable: the figures come from the raw bytes
+    let dir = TempDir::new("header");
+    let conn = db::open(&dir.path("p.sqlite3")).unwrap();
+    let header: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(fixture("block_108537_marker.getBlockHeader.json")).unwrap()).unwrap();
+    let d = details("block_108537_marker");
+    indexer::record_gap_block(&conn, &d, "test").unwrap();
+    assert!(raw::store(&conn, d.header.height, &d.header.hash, &bytes("block_108537_marker"), "node").unwrap());
+    drop(conn);
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let cfg = Config { db_path: dir.path("p.sqlite3"), rpc_url: "http://127.0.0.1:1".into(), listen: format!("127.0.0.1:{port}"), ..Config::default() };
+    std::thread::spawn(move || tokio::runtime::Runtime::new().unwrap().block_on(serve::run(&cfg)));
+    let url = format!("http://127.0.0.1:{port}/api/v1/block/height/{}", d.header.height);
+    let block: serde_json::Value = (0..50)
+        .find_map(|_| {
+            std::thread::sleep(Duration::from_millis(100));
+            ureq::get(&url).call().ok()?.body_mut().read_json().ok()
+        })
+        .expect("api up");
+    for k in ["log_slots", "active_slot_count", "alloc_counter"] {
+        assert_eq!(block[k], header[k], "{k}");
+    }
+}
+

@@ -63,6 +63,10 @@ struct AppState {
     /// block on record (which moves while the header backfill runs); a
     /// scan of the whole chain takes a noticeable fraction of a second.
     miners_cache: Mutex<std::collections::HashMap<&'static str, MinersCacheEntry>>,
+    /// Whether each pending transaction is a contract call, asked of the
+    /// node once per transaction (`getMempoolEntry`) and dropped when it
+    /// leaves the mempool - the mempool view polls every second.
+    mempool_contracts: Mutex<std::collections::HashMap<String, bool>>,
 }
 
 struct MinersCacheEntry {
@@ -133,6 +137,7 @@ pub async fn run(cfg: &Config) -> Result<()> {
         window_cache: Mutex::new(None),
         period_cache: Mutex::new(None),
         miners_cache: Mutex::new(std::collections::HashMap::new()),
+        mempool_contracts: Mutex::new(std::collections::HashMap::new()),
     });
 
     let api = Router::new()
@@ -583,14 +588,8 @@ async fn get_block_by_height(
     if height < 0 {
         return Err(ApiErrorOr404::NotFound);
     }
-    let conn = state.db();
-    match queries::block_by_height(&conn, height)? {
-        Some(b) => {
-            let is_final = b.confirmations.is_some_and(|c| c >= FINAL_CONFIRMATIONS);
-            Ok(cached_json(b, is_final))
-        }
-        None => Err(ApiErrorOr404::NotFound),
-    }
+    let found = queries::block_by_height(&state.db(), height)?;
+    block_response(state, found).await
 }
 
 async fn get_block_by_hash(
@@ -600,14 +599,40 @@ async fn get_block_by_hash(
     if !is_hex64(&hash) {
         return Err(ApiErrorOr404::NotFound);
     }
-    let conn = state.db();
-    match queries::block_by_hash(&conn, &hash)? {
-        Some(b) => {
-            let is_final = b.confirmations.is_some_and(|c| c >= FINAL_CONFIRMATIONS);
-            Ok(cached_json(b, is_final))
-        }
-        None => Err(ApiErrorOr404::NotFound),
+    let found = queries::block_by_hash(&state.db(), &hash)?;
+    block_response(state, found).await
+}
+
+/// A block with the header figures the database does not keep added
+/// (`header_figures`); cached for long only once it is final and they are
+/// known.
+async fn block_response(state: Arc<AppState>, found: Option<queries::BlockDetail>) -> Result<Response, ApiErrorOr404> {
+    let Some(mut b) = found else {
+        return Err(ApiErrorOr404::NotFound);
+    };
+    let (height, hash) = (b.height as u64, b.hash.clone());
+    let figures = tokio::task::spawn_blocking(move || header_figures(&state, height, &hash)).await.ok().flatten();
+    if let Some((log_slots, active, alloc)) = figures {
+        b.log_slots = Some(log_slots);
+        b.active_slot_count = Some(active);
+        b.alloc_counter = Some(alloc);
     }
+    let is_final = b.confirmations.is_some_and(|c| c >= FINAL_CONFIRMATIONS);
+    Ok(cached_json(b, is_final && figures.is_some()))
+}
+
+/// `(log_slots, active_slot_count, alloc_counter)` of block `(height,
+/// hash)`: from the node's permanent header when the node reports this very
+/// block, else from the block's kept raw bytes (a block a reorg replaced).
+fn header_figures(state: &AppState, height: u64, hash: &str) -> Option<(u32, u64, u64)> {
+    match state.rpc.get_block_header(height) {
+        Ok(Some(h)) if h.hash == hash => return Some((h.log_slots, h.active_slot_count, h.alloc_counter)),
+        Ok(_) => {}
+        Err(e) => log::warn!("block #{height}: header from the node: {e:#}"),
+    }
+    let bytes = crate::raw::load(&state.db(), height, hash).ok().flatten()?;
+    let block = noid_chain::Block::from_bytes(&bytes).ok()?;
+    Some((block.header.log_slots, block.header.active_slot_count, block.header.alloc_counter))
 }
 
 async fn get_tx(
@@ -832,12 +857,32 @@ async fn get_miners(State(state): State<Arc<AppState>>, Query(q): Query<MinersQu
 }
 
 async fn get_mempool(State(state): State<Arc<AppState>>) -> ApiResult<live_rpc::MempoolInfo> {
-    // Runs the blocking RPC call on a blocking-safe thread so it can't
+    // Runs the blocking RPC calls on a blocking-safe thread so they can't
     // stall the async runtime's other requests.
-    let rpc_client = state.rpc.clone();
-    let info = tokio::task::spawn_blocking(move || rpc_client.get_mempool_info())
-        .await
-        .map_err(anyhow::Error::from)??;
+    let info = tokio::task::spawn_blocking(move || -> Result<live_rpc::MempoolInfo> {
+        let mut info = state.rpc.get_mempool_info()?;
+        let known: std::collections::HashMap<String, bool> = state.mempool_contracts.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let mut now = std::collections::HashMap::with_capacity(info.txs.len());
+        for tx in &mut info.txs {
+            let contract = match known.get(&tx.tx_hash) {
+                Some(c) => *c,
+                // gone meanwhile (mined or dropped): a payment as far as this answer goes
+                None => match state.rpc.get_mempool_entry(&tx.tx_hash) {
+                    Ok(entry) => entry.is_some_and(|e| e.contract_opening_hex.is_some()),
+                    Err(e) => {
+                        log::warn!("mempool entry {}: {e:#}", tx.tx_hash);
+                        continue;
+                    }
+                },
+            };
+            tx.contract = contract;
+            now.insert(tx.tx_hash.clone(), contract);
+        }
+        *state.mempool_contracts.lock().unwrap_or_else(|e| e.into_inner()) = now;
+        Ok(info)
+    })
+    .await
+    .map_err(anyhow::Error::from)??;
     Ok(Json(info))
 }
 

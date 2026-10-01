@@ -4,6 +4,13 @@ Notable changes per release. Commit history has the details.
 
 ## Unreleased
 
+- API: `block/height|hash` adds the header figures `log_slots`,
+  `active_slot_count` and `alloc_counter` - read from the node, which keeps
+  every header (so header-only blocks have them too), or from the block's
+  kept raw bytes for a block a reorg replaced; `null` where neither has
+  them. `mempool` adds per transaction `minimum_proof_class`,
+  `requires_b255_miner` and `contract` (a v2 contract call, asked of the
+  node once per pending transaction with `getMempoolEntry`).
 - **Raw block archive.** New `archive_raw_blocks` (on by default) keeps
   every block's bytes exactly as the node served them (`getBlock`),
   zlib-compressed in the new table `raw_blocks` - about 0.4 KB per block

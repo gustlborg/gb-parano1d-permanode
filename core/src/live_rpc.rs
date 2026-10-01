@@ -62,6 +62,17 @@ impl RpcClient {
         Ok(serde_json::from_value(v)?)
     }
 
+    /// One pending transaction in full (`None` once it left the mempool).
+    /// Only this call tells a v2 contract call from a payment: it carries
+    /// the call's public opening.
+    pub fn get_mempool_entry(&self, tx_hash: &str) -> Result<Option<MempoolEntryInfo>> {
+        let v = self.call("paranoid_getMempoolEntry", json!([tx_hash]))?;
+        if v.is_null() {
+            return Ok(None);
+        }
+        Ok(serde_json::from_value(v)?)
+    }
+
     /// The node's own count of currently-live (unspent) slots across the
     /// entire chain, tracked natively since genesis. There is no RPC to
     /// list them all - only this aggregate count, or per-address/per-index
@@ -206,4 +217,44 @@ pub struct MempoolTxInfo {
     pub n_outputs: u32,
     pub page_count: u32,
     pub admitted_height: u64,
+    /// Smallest block class that can carry it (from node v2.0 on).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum_proof_class: Option<String>,
+    #[serde(default)]
+    pub requires_b255_miner: bool,
+    /// A v2 contract call. Not part of `getMempoolInfo`: the API fills it
+    /// in from `getMempoolEntry`, once per transaction.
+    #[serde(default)]
+    pub contract: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MempoolEntryInfo {
+    /// The call's 699-byte public opening; `None` for a payment.
+    #[serde(default)]
+    pub contract_opening_hex: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mempool_entries_from_old_and_new_nodes() {
+        // v1.1: no class fields; v2: class and B255 flag; neither carries `contract`
+        let old: MempoolTxInfo = serde_json::from_value(json!({
+            "tx_hash": "ab", "fee_micronoid": 9000, "fee_rate": 4500, "n_inputs": 1, "n_outputs": 1, "page_count": 1, "admitted_height": 7
+        }))
+        .unwrap();
+        assert_eq!((old.minimum_proof_class.as_deref(), old.requires_b255_miner, old.contract), (None, false, false));
+        let new: MempoolTxInfo = serde_json::from_value(json!({
+            "tx_hash": "ab", "fee_micronoid": 9000, "fee_rate": 4500, "n_inputs": 1, "n_outputs": 1, "page_count": 1, "admitted_height": 7,
+            "minimum_proof_class": "B25", "requires_b255_miner": true, "has_authorization": true
+        }))
+        .unwrap();
+        assert_eq!((new.minimum_proof_class.as_deref(), new.requires_b255_miner), (Some("B25"), true));
+        let call: MempoolEntryInfo = serde_json::from_value(json!({ "tx_hash": "ab", "contract_opening_hex": "4e4f" })).unwrap();
+        let payment: MempoolEntryInfo = serde_json::from_value(json!({ "tx_hash": "ab", "contract_opening_hex": null })).unwrap();
+        assert!(call.contract_opening_hex.is_some() && payment.contract_opening_hex.is_none());
+    }
 }
