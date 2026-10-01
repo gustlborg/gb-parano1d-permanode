@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::decode;
+use crate::raw;
 use crate::rpc::{BlockDetailsInfo, BlockHeaderInfo, RetainedBlockInfo, RpcClient, StateMapInfo};
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
@@ -17,7 +18,7 @@ use std::time::{Duration, Instant};
 /// `repro_retained_null.py 42` against a live node). Only used
 /// to bound how far back the gap-backfill sweep still bothers looking -
 /// anything older than this is permanently gone even via getBlock.
-const GETBLOCK_SERVING_WINDOW: u64 = 42;
+pub const GETBLOCK_SERVING_WINDOW: u64 = 42;
 
 pub fn run(conn: &Connection, rpc: &RpcClient, cfg: &Config) -> Result<()> {
     let mut cycles: u64 = 0;
@@ -44,7 +45,8 @@ pub fn run(conn: &Connection, rpc: &RpcClient, cfg: &Config) -> Result<()> {
         let db_path = cfg.db_path.clone();
         let peers = cfg.backfill_peers.clone();
         let every = Duration::from_secs(cfg.peer_backfill_interval_seconds.max(30));
-        thread::Builder::new().name("peer-backfill".into()).spawn(move || peer_backfill_thread(&db_path, &peers, every))?;
+        let keep_raw = cfg.archive_raw_blocks;
+        thread::Builder::new().name("peer-backfill".into()).spawn(move || peer_backfill_thread(&db_path, &peers, every, keep_raw))?;
     }
     loop {
         if let Err(e) = poll_once(conn, rpc, cfg) {
@@ -129,11 +131,43 @@ fn poll_once(conn: &Connection, rpc: &RpcClient, cfg: &Config) -> Result<()> {
     if cfg.getblock_fallback {
         let min_height = tip.saturating_sub(GETBLOCK_SERVING_WINDOW);
         for height in db::open_gap_heights(conn, min_height)? {
-            backfill_gap(conn, rpc, height)?;
+            backfill_gap(conn, rpc, cfg, height)?;
+        }
+    }
+
+    // Raw bytes that could not be kept at first ingest (getBlock failed,
+    // or answered for a block a reorg had just replaced), and on the first
+    // run after an upgrade the blocks the node still serves: fetched again
+    // while the node has them.
+    if cfg.archive_raw_blocks {
+        let min_height = tip.saturating_sub(GETBLOCK_SERVING_WINDOW);
+        for (height, hash) in db::blocks_missing_raw(conn, min_height, tip, GETBLOCK_SERVING_WINDOW as usize + 1)? {
+            if let Some(bytes) = fetch_raw(rpc, height) {
+                let tx = db::write_tx(conn)?;
+                keep_raw(&tx, cfg, height, &hash, Some(&bytes), "node");
+                tx.commit()?;
+            }
         }
     }
 
     Ok(())
+}
+
+/// Keeps a block's raw bytes (`archive_raw_blocks`) in the caller's
+/// transaction. Bytes that turn out not to be the block on record (getBlock
+/// answered after a reorg replaced it) are left out with a warning - the
+/// block itself is stored either way, and `poll_once` asks again while the
+/// node still serves the body.
+fn keep_raw(conn: &Connection, cfg: &Config, height: u64, hash: &str, bytes: Option<&[u8]>, source: &str) {
+    if !cfg.archive_raw_blocks {
+        return;
+    }
+    let Some(bytes) = bytes else {
+        return;
+    };
+    if let Err(e) = raw::store(conn, height, hash, bytes, source) {
+        warn!("height {height}: raw bytes not kept: {e:#}");
+    }
 }
 
 /// What happened when we tried the getBlock fallback for a height whose
@@ -183,7 +217,7 @@ fn fetch_raw(rpc: &RpcClient, height: u64) -> Option<Vec<u8>> {
 /// Stores the contract calls of a v2 block, read from its raw bytes. Left
 /// unscanned (`contracts_scanned` NULL) if the bytes are missing or do not
 /// decode - the block itself is stored either way.
-fn record_contract_flags(conn: &Connection, height: u64, hash: &str, raw: Option<&[u8]>) -> Result<()> {
+pub(crate) fn record_contract_flags(conn: &Connection, height: u64, hash: &str, raw: Option<&[u8]>) -> Result<()> {
     if !permanode_core::emission::v2_active(height) {
         return Ok(());
     }
@@ -262,7 +296,7 @@ fn ingest_height(conn: &Connection, rpc: &RpcClient, cfg: &Config, height: u64) 
 
     match resolve_body(rpc, cfg, details, "body already pruned by node on first ingest attempt") {
         BodyOutcome::Store(details, source, raw) => {
-            let wants_raw = cfg.decoder_selfcheck || permanode_core::emission::v2_active(height);
+            let wants_raw = cfg.decoder_selfcheck || cfg.archive_raw_blocks || permanode_core::emission::v2_active(height);
             let raw = match raw {
                 Some(raw) => Some(raw),
                 None if wants_raw => fetch_raw(rpc, height),
@@ -271,6 +305,7 @@ fn ingest_height(conn: &Connection, rpc: &RpcClient, cfg: &Config, height: u64) 
             let tx = db::write_tx(conn)?;
             store_block(&tx, &details, source)?;
             record_contract_flags(&tx, height, &details.header.hash, raw.as_deref())?;
+            keep_raw(&tx, cfg, height, &details.header.hash, raw.as_deref(), "node");
             tx.commit()?;
             if source == "getblock" {
                 info!("height {height}: body recovered via getBlock ({} tx)", details.retained.as_ref().map_or(0, |r| r.transactions.len()));
@@ -337,11 +372,12 @@ fn recheck_height(conn: &Connection, rpc: &RpcClient, cfg: &Config, height: u64)
                 Some(BodyOutcome::Store(details, source, raw)) => {
                     let raw = match raw {
                         Some(raw) => Some(raw),
-                        None if permanode_core::emission::v2_active(height) => fetch_raw(rpc, height),
+                        None if cfg.archive_raw_blocks || permanode_core::emission::v2_active(height) => fetch_raw(rpc, height),
                         None => None,
                     };
                     store_block(&tx, &details, source)?;
                     record_contract_flags(&tx, height, &details.header.hash, raw.as_deref())?;
+                    keep_raw(&tx, cfg, height, &details.header.hash, raw.as_deref(), "node");
                     if source == "getblock" {
                         let n = details.retained.as_ref().map_or(0, |r| r.transactions.len());
                         info!("height {height}: reorg replacement body recovered via getBlock ({n} tx)");
@@ -366,7 +402,7 @@ fn recheck_height(conn: &Connection, rpc: &RpcClient, cfg: &Config, height: u64)
 /// serving window. Leaves the gap open (tries again next cycle) if
 /// getBlock still has nothing or decode fails - `ingest_gaps` already has
 /// the original detection note, no need to overwrite it on every retry.
-fn backfill_gap(conn: &Connection, rpc: &RpcClient, height: u64) -> Result<()> {
+fn backfill_gap(conn: &Connection, rpc: &RpcClient, cfg: &Config, height: u64) -> Result<()> {
     let Some((_block_id, hash)) = db::canonical_hash_at(conn, height)? else {
         return Ok(());
     };
@@ -382,6 +418,7 @@ fn backfill_gap(conn: &Connection, rpc: &RpcClient, height: u64) -> Result<()> {
             insert_transactions(&tx, uncaptured_id, &retained)?;
             db::mark_body_recovered(&tx, uncaptured_id, "getblock")?;
             record_contract_flags(&tx, height, &hash, Some(&raw))?;
+            keep_raw(&tx, cfg, height, &hash, Some(&raw), "node");
             let now = Utc::now().to_rfc3339();
             db::resolve_gap(&tx, height, &now, "recovered via getBlock")?;
             tx.commit()?;
@@ -866,17 +903,31 @@ fn read_segment(conn: &Connection, rpc: &RpcClient, slots: std::ops::Range<u64>,
 /// Gaps offered to the peers per round.
 const PEER_BACKFILL_BATCH: usize = 500;
 
-/// Offers the open gaps to `peers` every `every`, on its own connection.
-/// Quiet while nothing changes; says so when a peer becomes unreachable or
-/// reachable again.
-fn peer_backfill_thread(db_path: &str, peers: &[String], every: Duration) {
+/// Offers the open gaps to `peers` every `every`, on its own connection,
+/// and with `keep_raw` asks them for the raw bytes this permanode missed
+/// (`import::fill_raw_from_peers`). Quiet while nothing changes; says so
+/// when a peer becomes unreachable or reachable again.
+fn peer_backfill_thread(db_path: &str, peers: &[String], every: Duration, keep_raw: bool) {
     info!("peer backfill: filling gaps from {} every {} s", peers.join(", "), every.as_secs());
     let mut unreachable: Vec<String> = Vec::new();
     loop {
-        match db::open(db_path).and_then(|conn| crate::import::fill_from_peers(&conn, peers, PEER_BACKFILL_BATCH)) {
-            Ok(r) => {
+        let round = db::open(db_path).and_then(|conn| {
+            let gaps = crate::import::fill_from_peers(&conn, peers, PEER_BACKFILL_BATCH, keep_raw)?;
+            let raw = if keep_raw {
+                let below = processed_height(&conn)?.saturating_sub(GETBLOCK_SERVING_WINDOW);
+                Some(crate::import::fill_raw_from_peers(&conn, peers, below, PEER_BACKFILL_BATCH)?)
+            } else {
+                None
+            };
+            Ok((gaps, raw))
+        });
+        match round {
+            Ok((r, raw)) => {
                 if r.imported > 0 || r.rejected > 0 {
                     info!("peer backfill: {} gap(s) filled, {} rejected, {} not on any peer, {} open before", r.imported, r.rejected, r.not_in_source, r.gaps);
+                }
+                if let Some(raw) = raw.filter(|x| x.kept > 0 || x.rejected > 0) {
+                    info!("peer backfill: raw bytes of {} block(s) taken over, {} rejected, {} not on any peer", raw.kept, raw.rejected, raw.not_in_source);
                 }
                 for p in r.unreachable.iter().filter(|p| !unreachable.contains(p)) {
                     warn!("peer backfill: {p} unreachable");

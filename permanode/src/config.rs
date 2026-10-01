@@ -49,6 +49,15 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub decoder_selfcheck: bool,
 
+    /// Keep every block's raw bytes as the node served them (getBlock),
+    /// compressed, next to the decoded tables (`raw.rs`): about 0.4 KB per
+    /// block today. With them the archive can be read again later - by a
+    /// newer version, after a decoder fix - although the node pruned the
+    /// body long ago, and gaps filled from a peer are checked byte for
+    /// byte. `retention_days` prunes them with the transactions.
+    #[serde(default = "default_true")]
+    pub archive_raw_blocks: bool,
+
     /// How often to refresh the live-balance cache for every address this
     /// permanode has ever recorded, in poll cycles. One paranoid_getSlotsByOwner
     /// call per known address, so this scales with the address count -
@@ -105,8 +114,9 @@ pub struct Config {
     pub peer_listen: Option<String>,
 
     /// Peer endpoints of other permanodes (e.g. "http://[fd00::1]:8421")
-    /// this one fills its own gaps from. Every body taken over must
-    /// rebuild the tx_root of the header this permanode's node gave it.
+    /// this one fills its own gaps (and, with `archive_raw_blocks`, the raw
+    /// bytes it missed) from. Every body taken over must rebuild the
+    /// tx_root of the header this permanode's node gave it.
     #[serde(default)]
     pub backfill_peers: Vec<String>,
 
@@ -166,6 +176,7 @@ impl Default for Config {
             prune_every_cycles: default_prune_every_cycles(),
             getblock_fallback: default_true(),
             decoder_selfcheck: default_true(),
+            archive_raw_blocks: default_true(),
             refresh_addresses_every_cycles: default_refresh_addresses_every_cycles(),
             scan_slots_every_cycles: default_scan_slots_every_cycles(),
             state_scan_max_per_second: default_state_scan_max_per_second(),
@@ -198,6 +209,8 @@ impl Config {
                  prune_every_cycles = {}\n\
                  getblock_fallback = {}\n\
                  decoder_selfcheck = {}\n\
+                 # keep every block's raw bytes (compressed, ~0.4 KB per block) next to the decoded tables\n\
+                 archive_raw_blocks = {}\n\
                  refresh_addresses_every_cycles = {}\n\
                  # 0 disables the live-state sweep\n\
                  scan_slots_every_cycles = {}\n\
@@ -222,6 +235,7 @@ impl Config {
                 cfg.prune_every_cycles,
                 cfg.getblock_fallback,
                 cfg.decoder_selfcheck,
+                cfg.archive_raw_blocks,
                 cfg.refresh_addresses_every_cycles,
                 cfg.scan_slots_every_cycles,
                 cfg.state_scan_max_per_second,

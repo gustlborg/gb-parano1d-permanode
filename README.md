@@ -124,6 +124,9 @@ must not fall behind the node's pruning: an outage longer than roughly
   CDN. Leave it unset to serve the API only.
 - `retention_days` — how long to keep transaction detail (0 = forever,
   the default). Block headers are always kept.
+- `archive_raw_blocks` — keep every block's raw bytes next to the
+  decoded tables (default on, about 0.4 KB per block). See "Raw block
+  archive" below.
 - `poll_interval_seconds` — how often to check the node (default 5).
   Keep this well below the node's body window.
 - `scan_slots_every_cycles` — how often the UTXO sweep runs, in polls
@@ -310,6 +313,35 @@ Writes `blocks.csv`, `transactions.csv`, `inputs.csv`, `outputs.csv`,
 was in, so joining on the protocol id double-counts. `canonical = 1`
 selects the chain as it stands.
 
+## Raw block archive
+
+The node prunes a block's body a few minutes after it was mined; what
+the permanode decoded from it is all that is left. With
+`archive_raw_blocks` (on by default) it also keeps the block's bytes
+exactly as the node served them (`paranoid_getBlock`), zlib-compressed in
+the table `raw_blocks` - about 0.4 KB per block at today's block sizes,
+one extra `getBlock` call per block. With them the archive can be read
+again at any time: by a newer version that understands more of a block,
+after a decoder fix, or to hand the original bytes to someone else.
+
+Bytes are kept only once they prove to be the block on record: they must
+decode to its height and hash, their pages must rebuild the header's
+`tx_root`, and they must be the block's one canonical encoding (nothing
+appended, nothing encoded differently). They are checked again whenever
+they are read. Bytes the indexer could not keep at once are fetched again
+while the node still serves the body; the first start after an upgrade
+picks up the blocks still inside that window. Older blocks have no bytes.
+`retention_days` prunes them with the transactions. The proof is not part
+of the bytes (`getBlock` does not serve it).
+
+Print a block's kept bytes as hex, the way `getBlock` returns them, or
+write them to a file:
+
+```
+parano1d-permanode -c permanode.toml raw-block 168950
+parano1d-permanode -c permanode.toml raw-block 168950 --out 168950.bin
+```
+
 ## Filling gaps from another permanode
 
 Any permanode that stayed online has the bodies yours missed. Copy its
@@ -324,7 +356,10 @@ a body is accepted only for a block whose hash your own node reported,
 whose transactions in order rebuild the `tx_root` of that header (so the
 list of transactions is complete and genuine) and add up (inputs,
 outputs, fees, coinbase). Imported blocks show `body_source = import` in
-the database and are logged as "recovered via import".
+the database and are logged as "recovered via import". Where the other
+database kept a block's raw bytes, those are taken instead and decoded
+here, and with `archive_raw_blocks` the bytes it kept for blocks you
+have no bytes of are copied over as well (checked the same way).
 
 If you run two or more permanodes, they can fill each other's gaps
 continuously over a private network (for example a WireGuard tunnel)
@@ -340,14 +375,20 @@ backfill_peers = ["http://[fd00::1]:8421"]
 ```
 
 `peer_listen` serves this permanode's recorded bodies
-(`/peer/v1/body/<height>/<hash>`) and a short status (`/peer/v1/status`:
-tip, first archived block, open gaps); keep it on the private network and
-let only the other permanodes reach it. Every `peer_backfill_interval_seconds`
-(300) the open gaps are offered to `backfill_peers`, checked exactly like an
-import and stored with `body_source = peer`. Once by hand:
-`parano1d-permanode -c permanode.toml fill-from-peer --peer http://[fd00::1]:8421`.
-The decoded contents of a body (amounts, owners) are taken as the other
-permanode recorded them - fill only from permanodes you run or trust.
+(`/peer/v1/body/<height>/<hash>`), its kept raw bytes
+(`/peer/v1/raw/<height>/<hash>`) and a short status (`/peer/v1/status`:
+tip, first archived block, open gaps, first block with raw bytes); keep it
+on the private network and let only the other permanodes reach it. Every
+`peer_backfill_interval_seconds` (300) the open gaps are offered to
+`backfill_peers`, checked exactly like an import and stored with
+`body_source = peer`; with `archive_raw_blocks` the peers are also asked
+for the raw bytes this permanode missed (blocks it has a body of, from the
+first block a peer kept bytes for, below the node's serving window). Once
+by hand: `parano1d-permanode -c permanode.toml fill-from-peer --peer http://[fd00::1]:8421`.
+Where a peer kept a block's raw bytes, they are taken and decoded here, so
+every field is checked against your own header. Otherwise the decoded
+contents of a body (amounts, owners) are taken as the other permanode
+recorded them - fill only from permanodes you run or trust.
 
 ## Completing old blocks from payment receipts
 

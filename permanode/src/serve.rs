@@ -176,8 +176,9 @@ pub async fn run(cfg: &Config) -> Result<()> {
 
 // ---------------------------------------------------------------- peer endpoint
 
-/// The peer endpoint (`peer_listen`): this permanode's block bodies for
-/// other permanodes that fill their gaps from it, and a short status. Its
+/// The peer endpoint (`peer_listen`): this permanode's block bodies and
+/// kept raw bytes for other permanodes that fill their gaps from it, and a
+/// short status. Its
 /// own read-only connection. A failed bind (the private network not up
 /// yet) is retried and never takes the API down.
 async fn run_peer(listen: String, db_path: String) {
@@ -192,6 +193,7 @@ async fn run_peer(listen: String, db_path: String) {
     };
     let app = Router::new()
         .route("/peer/v1/body/{height}/{hash}", get(peer_body))
+        .route("/peer/v1/raw/{height}/{hash}", get(peer_raw))
         .route("/peer/v1/status", get(peer_status))
         .with_state(Arc::new(Mutex::new(conn)));
     loop {
@@ -237,15 +239,40 @@ async fn peer_body(State(db): State<PeerDb>, Path((height, hash)): Path<(u64, St
     }
 }
 
-/// Highest block with a body on record, the archive's first one and the
-/// open gaps - enough for the other side to see this permanode is alive.
+/// The raw bytes kept for block `(height, hash)` (`archive_raw_blocks`),
+/// exactly as its node served them, or 404.
+async fn peer_raw(State(db): State<PeerDb>, Path((height, hash)): Path<(u64, String)>) -> Response {
+    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return peer_error(StatusCode::BAD_REQUEST, "hash must be 64 hex digits");
+    }
+    let hash = hash.to_ascii_lowercase();
+    let found = tokio::task::spawn_blocking(move || {
+        let conn = db.lock().unwrap_or_else(|p| p.into_inner());
+        crate::raw::load(&conn, height, &hash)
+    })
+    .await;
+    match found {
+        Ok(Ok(Some(bytes))) => ([(header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response(),
+        Ok(Ok(None)) => peer_error(StatusCode::NOT_FOUND, "no raw bytes on record for this block"),
+        Ok(Err(e)) => {
+            log::warn!("peer endpoint: raw bytes of #{height}: {e:#}");
+            peer_error(StatusCode::INTERNAL_SERVER_ERROR, "kept raw bytes unreadable")
+        }
+        Err(_) => peer_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+    }
+}
+
+/// Highest block with a body on record, the archive's first one, the open
+/// gaps and what the raw block archive holds - enough for the other side
+/// to see this permanode is alive, and from where to ask it for raw bytes.
 async fn peer_status(State(db): State<PeerDb>) -> Response {
-    let status = tokio::task::spawn_blocking(move || -> rusqlite::Result<serde_json::Value> {
+    let status = tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
         let conn = db.lock().unwrap_or_else(|p| p.into_inner());
         let (tip, first): (Option<i64>, Option<i64>) =
             conn.query_row("SELECT MAX(height), MIN(height) FROM blocks WHERE body_captured = 1", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
         let gaps: i64 = conn.query_row("SELECT COUNT(*) FROM ingest_gaps WHERE resolved_at IS NULL", [], |r| r.get(0))?;
-        Ok(serde_json::json!({ "tip": tip, "archive_from": first, "open_gaps": gaps }))
+        let raw = permanode_core::db::raw_coverage(&conn)?;
+        Ok(serde_json::json!({ "tip": tip, "archive_from": first, "open_gaps": gaps, "raw_from": raw.from_height, "raw_blocks": raw.blocks }))
     })
     .await;
     match status {

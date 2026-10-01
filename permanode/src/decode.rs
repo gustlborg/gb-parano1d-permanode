@@ -236,7 +236,13 @@ pub const CONTRACT_CLOSE: u8 = 2;
 
 /// Decodes `paranoid_getBlock` bytes and binds them to the canonical
 /// height and hash from a trusted source (see `decode_retained_block`).
-fn decode_bound_block(bytes: &[u8], expected_height: u64, expected_hash_hex: &str) -> Result<noid_chain::Block> {
+///
+/// The hash covers the header only, so the pages are bound to it through
+/// the header's `tx_root`: the logical transactions they form must rebuild
+/// it. And the bytes must be the block's one canonical encoding - nothing
+/// appended, nothing encoded differently - so bytes that pass are the
+/// block itself, whoever handed them over (`raw.rs` keeps them).
+pub(crate) fn decode_bound_block(bytes: &[u8], expected_height: u64, expected_hash_hex: &str) -> Result<noid_chain::Block> {
     let block = noid_chain::Block::from_bytes(bytes).map_err(|e| anyhow!("decode block: {e:?}"))?;
     if block.header.height != expected_height {
         bail!("height mismatch: body claims {}, expected {expected_height}", block.header.height);
@@ -244,6 +250,15 @@ fn decode_bound_block(bytes: &[u8], expected_height: u64, expected_hash_hex: &st
     let hash = hex::encode(noid_chain::block_header::block_id(&block.header));
     if hash != expected_hash_hex {
         bail!("body hash {hash} != canonical {expected_hash_hex}");
+    }
+    if !block.transactions.is_empty() {
+        let root = noid_chain::try_compute_tx_root(&block.transactions).map_err(|e| anyhow!("tx_root: {e:?}"))?;
+        if root != block.header.tx_root {
+            bail!("the pages rebuild tx_root {}, the header says {}", hex::encode(root), hex::encode(block.header.tx_root));
+        }
+    }
+    if block.to_bytes() != bytes {
+        bail!("not the canonical encoding of the block");
     }
     Ok(block)
 }

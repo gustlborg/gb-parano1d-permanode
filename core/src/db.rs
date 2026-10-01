@@ -208,6 +208,21 @@ fn migrate_locked(conn: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS idx_tx_receipt ON transactions(block_id) WHERE source = 'receipt';",
     )?;
     relax_output_creation_id(conn)?;
+    // Raw block archive (`archive_raw_blocks`): each block's bytes as the
+    // node served them, compressed (`codec`), with their length before
+    // compression; `source` says where they came from (node, peer,
+    // import). One row per block row, so a block that was reorged away
+    // keeps its bytes as well.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS raw_blocks (
+             block_id   INTEGER PRIMARY KEY REFERENCES blocks(id),
+             codec      TEXT NOT NULL,
+             raw_len    INTEGER NOT NULL,
+             data       BLOB NOT NULL,
+             source     TEXT NOT NULL,
+             stored_at  TEXT NOT NULL
+         );",
+    )?;
     Ok(())
 }
 
@@ -758,6 +773,80 @@ pub fn set_contract_flags(conn: &Connection, height: u64, hash: &str, flags: &[(
     Ok(())
 }
 
+/// Id of the block row `(height, hash)`, canonical or not.
+pub fn block_id(conn: &Connection, height: u64, hash: &str) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row("SELECT id FROM blocks WHERE height = ?1 AND hash = ?2", params![height as i64, hash], |r| r.get(0))
+        .optional()?)
+}
+
+pub fn has_raw_block(conn: &Connection, block_id: i64) -> Result<bool> {
+    Ok(conn.query_row("SELECT EXISTS (SELECT 1 FROM raw_blocks WHERE block_id = ?1)", params![block_id], |r| r.get(0))?)
+}
+
+/// Keeps a block's raw bytes (already checked and compressed by the
+/// caller). A second copy of the same block is ignored.
+pub fn insert_raw_block(conn: &Connection, block_id: i64, codec: &str, raw_len: usize, data: &[u8], source: &str, now: &str) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO raw_blocks (block_id, codec, raw_len, data, source, stored_at) VALUES (?1,?2,?3,?4,?5,?6)",
+        params![block_id, codec, raw_len as i64, data, source, now],
+    )?;
+    Ok(())
+}
+
+/// `(codec, raw length, compressed bytes)` kept for block `(height, hash)`.
+pub fn raw_block(conn: &Connection, height: u64, hash: &str) -> Result<Option<(String, usize, Vec<u8>)>> {
+    Ok(conn
+        .query_row(
+            "SELECT r.codec, r.raw_len, r.data FROM raw_blocks r JOIN blocks b ON b.id = r.block_id WHERE b.height = ?1 AND b.hash = ?2",
+            params![height as i64, hash],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize, r.get::<_, Vec<u8>>(2)?)),
+        )
+        .optional()?)
+}
+
+/// Canonical blocks with a body on record but no raw bytes, between
+/// `from` and `to` (inclusive), lowest first, at most `limit`.
+pub fn blocks_missing_raw(conn: &Connection, from: u64, to: u64, limit: usize) -> Result<Vec<(u64, String)>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT b.height, b.hash FROM blocks b
+         WHERE b.height BETWEEN ?1 AND ?2 AND b.body_captured = 1 AND b.{ARCHIVED}
+           AND NOT EXISTS (SELECT 1 FROM raw_blocks r WHERE r.block_id = b.id)
+           AND {canonical}
+         ORDER BY b.height LIMIT ?3",
+        canonical = crate::queries::canonical_block_filter_on("b")
+    ))?;
+    let clamp = |h: u64| h.min(i64::MAX as u64) as i64;
+    let rows = stmt.query_map(params![clamp(from), clamp(to), clamp(limit as u64)], |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, String>(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// What the raw block archive holds: blocks, their size before and after
+/// compression, and the lowest height with bytes (`None` while empty).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct RawCoverage {
+    pub blocks: u64,
+    pub raw_bytes: u64,
+    pub stored_bytes: u64,
+    pub from_height: Option<u64>,
+}
+
+pub fn raw_coverage(conn: &Connection) -> Result<RawCoverage> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(r.raw_len), 0), COALESCE(SUM(LENGTH(r.data)), 0), MIN(b.height)
+         FROM raw_blocks r JOIN blocks b ON b.id = r.block_id",
+        [],
+        |r| {
+            Ok(RawCoverage {
+                blocks: r.get::<_, i64>(0)? as u64,
+                raw_bytes: r.get::<_, i64>(1)? as u64,
+                stored_bytes: r.get::<_, i64>(2)? as u64,
+                from_height: r.get::<_, Option<i64>>(3)?.map(|h| h as u64),
+            })
+        },
+    )?)
+}
+
 pub fn mark_body_recovered(conn: &Connection, block_id: i64, body_source: &str) -> Result<()> {
     conn.execute(
         "UPDATE blocks SET body_captured = 1, body_source = ?2 WHERE id = ?1",
@@ -766,8 +855,8 @@ pub fn mark_body_recovered(conn: &Connection, block_id: i64, body_source: &str) 
     Ok(())
 }
 
-/// Delete transaction-level detail for blocks older than `cutoff_unix`,
-/// keeping the block header row itself. Returns the number of blocks
+/// Delete transaction-level detail (and the raw bytes) for blocks older
+/// than `cutoff_unix`, keeping the block header row itself. Returns the number of blocks
 /// pruned. Archive blocks only: header-only blocks, and the transactions
 /// imported from receipts into them, are never pruned.
 pub fn prune_older_than(conn: &Connection, cutoff_unix: i64) -> Result<usize> {
@@ -793,6 +882,7 @@ pub fn prune_older_than(conn: &Connection, cutoff_unix: i64) -> Result<usize> {
             params![block_id],
         )?;
         tx.execute("DELETE FROM transactions WHERE block_id = ?1", params![block_id])?;
+        tx.execute("DELETE FROM raw_blocks WHERE block_id = ?1", params![block_id])?;
         tx.execute(
             "UPDATE blocks SET body_captured = 0 WHERE id = ?1",
             params![block_id],

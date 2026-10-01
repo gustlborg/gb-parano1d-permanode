@@ -85,7 +85,7 @@ fn gaps_are_filled_from_another_database_exactly() {
     let dir = TempDir::new("db");
     let (source, target) = source_and_target(&dir);
     assert_eq!(open_gaps(&target), 3);
-    let r = import::import_bodies(&target, std::path::Path::new(&dir.path("source.sqlite3"))).unwrap();
+    let r = import::import_bodies(&target, std::path::Path::new(&dir.path("source.sqlite3")), true).unwrap();
     assert_eq!((r.gaps, r.imported, r.rejected, r.not_in_source), (3, 3, 0, 0));
     assert_eq!(open_gaps(&target), 0);
     for b in BLOCKS {
@@ -93,7 +93,7 @@ fn gaps_are_filled_from_another_database_exactly() {
         assert_eq!(body_rows(&target, h), body_rows(&source, h), "{b}: body differs from the source");
     }
     // a second run finds nothing to do
-    let r = import::import_bodies(&target, std::path::Path::new(&dir.path("source.sqlite3"))).unwrap();
+    let r = import::import_bodies(&target, std::path::Path::new(&dir.path("source.sqlite3")), true).unwrap();
     assert_eq!((r.gaps, r.imported), (0, 0));
 }
 
@@ -159,7 +159,7 @@ fn gaps_are_filled_from_a_peer_endpoint() {
 
     // an unreachable peer is reported, the next one asked
     let dead = "http://127.0.0.1:1".to_string();
-    let r = import::fill_from_peers(&target, &[dead.clone(), peer.clone()], usize::MAX).unwrap();
+    let r = import::fill_from_peers(&target, &[dead.clone(), peer.clone()], usize::MAX, true).unwrap();
     assert_eq!((r.gaps, r.imported, r.rejected), (3, 3, 0));
     assert_eq!(r.unreachable, vec![dead]);
     assert_eq!(open_gaps(&target), 0);
@@ -176,7 +176,7 @@ fn gaps_are_filled_from_a_peer_endpoint() {
     let mut d = details("block_108552");
     d.header.hash = "ab".repeat(32);
     indexer::record_gap_block(&t2, &d, "test").unwrap();
-    let r = import::fill_from_peers(&t2, &[peer.clone()], usize::MAX).unwrap();
+    let r = import::fill_from_peers(&t2, &[peer.clone()], usize::MAX, true).unwrap();
     assert_eq!((r.imported, r.not_in_source), (0, 1));
     assert_eq!(open_gaps(&t2), 1);
 

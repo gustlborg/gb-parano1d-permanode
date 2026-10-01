@@ -4,6 +4,27 @@ Notable changes per release. Commit history has the details.
 
 ## Unreleased
 
+- **Raw block archive.** New `archive_raw_blocks` (on by default) keeps
+  every block's bytes exactly as the node served them (`getBlock`),
+  zlib-compressed in the new table `raw_blocks` - about 0.4 KB per block
+  today, one extra `getBlock` call per block - so the archive can be read
+  again after the node pruned the body: by a newer version, after a
+  decoder fix, or to hand the original on. Bytes are kept only once they
+  decode to the block's height and hash, rebuild its `tx_root` and are its
+  canonical encoding, and are checked again whenever read. Bytes missed at
+  ingest are fetched again while the node still serves the body (also the
+  blocks inside that window on the first start). `retention_days` prunes
+  them with the transactions. New subcommand `raw-block <HEIGHT> [--hash]
+  [--out FILE]`.
+- The getBlock decoder (fallback, contract flags, self-check) now also
+  requires the pages to rebuild the header's `tx_root` and the bytes to be
+  the block's canonical encoding.
+- Peers: `/peer/v1/raw/<height>/<hash>` serves the kept bytes,
+  `/peer/v1/status` adds `raw_from` and `raw_blocks`. Gaps are filled from
+  a peer's raw bytes where it kept them - decoded here, every field checked
+  against the own header, contract flags included - else from its recorded
+  body as before. With `archive_raw_blocks` the peers (and `import-bodies`)
+  also hand over the raw bytes this permanode missed.
 - **Permanodes fill each other's gaps.** With `peer_listen` a permanode
   serves its recorded block bodies (`/peer/v1/body/<height>/<hash>`) and a
   status (`/peer/v1/status`) on a private address; with `backfill_peers`

@@ -40,6 +40,16 @@ getblock_fallback = true
 # quiet for a while.
 decoder_selfcheck = true
 
+# Keep every block's raw bytes as the node served them (getBlock),
+# compressed (about 0.4 KB per block today), next to the decoded tables.
+# The node prunes a body after a few minutes; with the bytes kept, the
+# archive can be read again later - by a newer version that understands
+# more, or after a decoder fix - and gaps filled from a peer are checked
+# byte for byte. Bytes are kept only once they prove to be the block on
+# record (its hash, its tx_root, its canonical encoding). One extra
+# getBlock call per block; retention_days prunes them with the rest.
+archive_raw_blocks = true
+
 # How often (in poll cycles) to refresh the live current-balance cache for
 # every address this permanode has ever recorded (paranoid_getSlotsByOwner,
 # one call per known address - powers the rich list).
@@ -86,10 +96,14 @@ donation_address = ""
 # Gap filling between your own permanodes. A permanode that was offline
 # longer than its node keeps block bodies has gaps; another one that ran
 # meanwhile has the bodies. `peer_listen` serves this permanode's bodies to
-# others (/peer/v1/body/<height>/<hash>, /peer/v1/status) - put it on a
-# private network address only, e.g. a WireGuard tunnel. `backfill_peers`
-# are the other permanodes' peer endpoints; every body taken over must
-# rebuild the tx_root of the header this permanode's own node gave it.
+# others (/peer/v1/body/<height>/<hash>, /peer/v1/raw/<height>/<hash>,
+# /peer/v1/status) - put it on a private network address only, e.g. a
+# WireGuard tunnel. `backfill_peers` are the other permanodes' peer
+# endpoints; every body taken over must rebuild the tx_root of the header
+# this permanode's own node gave it. Where the peer kept a block's raw
+# bytes, they are taken instead and decoded here, and with
+# archive_raw_blocks the raw bytes this permanode missed (it was offline)
+# are fetched from the peers as well.
 # peer_listen = "[fd00::1]:8421"
 backfill_peers = []
 peer_backfill_interval_seconds = 300

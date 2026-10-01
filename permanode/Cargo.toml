@@ -21,6 +21,8 @@ blake3 = "1"
 chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.7", features = ["derive"] }
 env_logger = "0.11.11"
+# raw block archive (src/raw.rs): blocks kept zlib-compressed
+flate2 = "1"
 hex = "0.4"
 include_dir = "0.7"
 log = "0.4.34"
