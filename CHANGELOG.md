@@ -2,7 +2,14 @@
 
 Notable changes per release. Commit history has the details.
 
-## Unreleased
+## 0.3.0 - 2026-10-02
+
+Ready for the Parano1d v2 fork at block 210 537: v2 blocks, contract
+calls, the height-based reward schedule and development allocation; a raw
+block archive; header backfill since genesis; permanodes that fill each
+other's gaps; old blocks completed from payment receipts. Needs a node on
+v2.0.1 or later.
+
 
 - API: `block/height|hash` adds the header figures `log_slots`,
   `active_slot_count` and `alloc_counter` - read from the node, which keeps

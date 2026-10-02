@@ -16,7 +16,8 @@ it at (`site_dir`).
 
 ## Requirements
 
-- A Parano1d node (v1.1.0 or later), fully synced, with its JSON-RPC on
+- A Parano1d node (v2.0.1 or later - required for the v2 fork at block
+  210 537), fully synced, with its JSON-RPC on
   the default `127.0.0.1:9601`. Install it first following the official
   guide: <https://docs.parano1d.org/operate/node>. The permanode must run
   on the same machine (or reach the RPC over a private, authenticated
@@ -29,11 +30,11 @@ it at (`site_dir`).
 
 ## Install
 
-Replace `0.2.0` with the latest version from the
+Replace `0.3.0` with the latest version from the
 [releases page](https://github.com/gustlborg/gb-parano1d-permanode/releases):
 
 ```sh
-V=0.2.0
+V=0.3.0
 curl -sSLO https://github.com/gustlborg/gb-parano1d-permanode/releases/download/v$V/parano1d-permanode-$V-linux-x86_64.tar.gz
 curl -sSLO https://github.com/gustlborg/gb-parano1d-permanode/releases/download/v$V/SHA256SUMS
 sha256sum --check SHA256SUMS          # must print: ... OK
