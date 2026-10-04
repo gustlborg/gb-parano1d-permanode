@@ -2,6 +2,11 @@
 
 Notable changes per release. Commit history has the details.
 
+## Unreleased
+
+- `richlist` takes `?limit=` (default 100, up to 10 000), so a client can
+  read every funded address from the balance sweep in one request.
+
 ## 0.3.0 - 2026-10-02
 
 Ready for the Parano1d v2 fork at block 210 537: v2 blocks, contract

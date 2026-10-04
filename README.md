@@ -192,7 +192,7 @@ outputs, inside one transaction.
   `block/height/{h}`, `block/hash/{h}`, `tx/{txid}` with the fee split
   into miner share and consensus burn, `address/{a}` (recorded and live
   balance, transactions, notices when the recorded figures cannot be
-  complete, blocks mined), `address/{a}/utxos`, `mempool`, `richlist`,
+  complete, blocks mined), `address/{a}/utxos`, `mempool`, `richlist` (top 100, `?limit=` up to 10 000),
   `miners` (miners by blocks found, whole chain or the last 7 days /
   24 hours), `gaps`,
   `orphans` (blocks a reorg replaced, with what took their height),

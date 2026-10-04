@@ -794,10 +794,14 @@ async fn get_orphans(State(state): State<Arc<AppState>>, Query(q): Query<LimitQu
     Ok(Json(queries::orphaned_blocks(&conn, q.limit.unwrap_or(100))?))
 }
 
-async fn get_richlist(State(state): State<Arc<AppState>>) -> ApiResult<Vec<queries::RichListEntry>> {
+/// The balance sweep's addresses, richest first: 100 by default, `?limit=`
+/// up to [`RICHLIST_MAX`] (more than every funded address on the chain today).
+async fn get_richlist(State(state): State<Arc<AppState>>, Query(q): Query<LimitQuery>) -> ApiResult<Vec<queries::RichListEntry>> {
     let conn = state.db();
-    Ok(Json(queries::richlist(&conn, 100)?))
+    Ok(Json(queries::richlist(&conn, q.limit.unwrap_or(100).clamp(1, RICHLIST_MAX))?))
 }
+
+const RICHLIST_MAX: i64 = 10_000;
 
 #[derive(Deserialize)]
 struct MinersQuery {
