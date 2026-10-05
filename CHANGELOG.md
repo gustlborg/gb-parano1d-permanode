@@ -12,6 +12,12 @@ Notable changes per release. Commit history has the details.
   hash was found, while `timestamp` is when the pool built the template,
   typically half a minute earlier - and a new block is on record within
   about a second instead of up to `poll_interval_seconds`.
+  A new tip that brings blocks below it (a reorg, two blocks within one
+  second) gives them the same arrival time; a replaced block keeps its own.
+  Each permanode keeps its own observation; one that was not watching
+  (restart, outage) takes the time over from a sister permanode
+  (`/peer/v1/seen/{from}/{to}`, `seen_from` in `/peer/v1/status`), never
+  overwriting its own.
 - `stats` computes its archive figures (counts, recorded live UTXOs) once
   per indexed tip and at most every 30 s instead of on every request:
   every open page asks every 20 s, and counting the live UTXOs alone took

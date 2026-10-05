@@ -267,6 +267,43 @@ fn fetch_peer_raw(agent: &ureq::Agent, peer: &str, height: u64, hash: &str) -> R
     }
 }
 
+/// Arrival times (`seen_at_ms`) for recorded blocks this permanode did not
+/// see arrive - it was restarting or down - taken from sister permanodes
+/// that did. Its own observation always wins; a peer's only fills a gap.
+/// Returns how many it took over.
+pub fn fill_seen_from_peers(conn: &Connection, peers: &[String]) -> Result<usize> {
+    let agent = peer_agent();
+    let tip = db::seen_fill_tip(conn)?;
+    let mut adopted = 0;
+    for peer in peers {
+        let Ok(Some(from)) = peer_status_u64(&agent, peer, "seen_from") else { continue };
+        let missing = db::blocks_missing_seen(conn, from, tip, 2_000)?;
+        let (Some(lo), Some(hi)) = (missing.first().map(|m| m.0), missing.last().map(|m| m.0)) else { continue };
+        let url = format!("{}/peer/v1/seen/{lo}/{hi}", peer.trim_end_matches('/'));
+        let Ok(mut resp) = agent.get(&url).call() else { continue };
+        if resp.status().as_u16() != 200 {
+            continue;
+        }
+        let rows: Vec<(u64, String, i64)> = resp.body_mut().with_config().limit(16 * 1024 * 1024).read_json()?;
+        for (height, hash, at_ms) in rows {
+            if db::adopt_tip_seen(conn, height, &hash, at_ms)? {
+                adopted += 1;
+            }
+        }
+    }
+    Ok(adopted)
+}
+
+fn peer_status_u64(agent: &ureq::Agent, peer: &str, field: &str) -> Result<Option<u64>> {
+    let url = format!("{}/peer/v1/status", peer.trim_end_matches('/'));
+    let mut resp = agent.get(&url).call()?;
+    if resp.status().as_u16() != 200 {
+        bail!("HTTP {} for {url}", resp.status().as_u16());
+    }
+    let status: serde_json::Value = resp.body_mut().read_json()?;
+    Ok(status.get(field).and_then(|v| v.as_u64()))
+}
+
 /// The lowest height the peer kept raw bytes for, `None` if it kept none
 /// (or is too old to say).
 fn peer_raw_from(agent: &ureq::Agent, peer: &str) -> Result<Option<u64>> {

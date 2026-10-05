@@ -147,16 +147,44 @@ type Sightings = Arc<Mutex<Vec<(u64, String, i64)>>>;
 /// block and then writes the sighting (`note_sightings`), so the block never
 /// appears without it. The tip present at start is skipped: when it arrived
 /// was not seen.
+///
+/// A new tip can bring more than itself: a reorg swaps in several blocks
+/// at once, and two blocks can arrive within one tick. So the watcher walks
+/// down from the tip (at most `TIP_WALK` blocks) to the first block it has
+/// already handled, and everything it passes arrived at this moment too.
+/// A block a reorg replaced keeps the time it was seen.
 fn tip_watch_thread(rpc_url: &str, every: Duration, sightings: Sightings, wake: mpsc::Sender<()>) {
+    const TIP_WALK: u64 = 20;
+    const KNOWN_MAX: usize = 256;
     let rpc = permanode_core::live_rpc::RpcClient::new(rpc_url.to_string());
     let mut last: Option<(u64, String)> = None;
+    let mut known: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     loop {
         if let Ok(info) = rpc.get_chain_info() {
             let tip = (info.height, info.best_hash);
             if last.as_ref() != Some(&tip) {
+                let mut fresh = vec![tip.clone()];
+                let mut h = tip.0;
+                while h > 0 && tip.0 - h < TIP_WALK {
+                    h -= 1;
+                    match rpc.get_block_header(h) {
+                        Ok(Some(hd)) if !known.contains(&hd.hash) => fresh.push((h, hd.hash)),
+                        _ => break,
+                    }
+                }
+                // the first look only learns where the chain stands
                 if last.is_some() {
-                    sightings.lock().unwrap_or_else(|e| e.into_inner()).push((tip.0, tip.1.clone(), Utc::now().timestamp_millis()));
+                    let at = Utc::now().timestamp_millis();
+                    sightings.lock().unwrap_or_else(|e| e.into_inner()).extend(fresh.iter().map(|(h, hash)| (*h, hash.clone(), at)));
                     let _ = wake.send(());
+                }
+                for (_, hash) in fresh {
+                    if !known.contains(&hash) {
+                        known.push_back(hash);
+                    }
+                }
+                while known.len() > KNOWN_MAX {
+                    known.pop_front();
                 }
                 last = Some(tip);
             }
@@ -1001,10 +1029,14 @@ fn peer_backfill_thread(db_path: &str, peers: &[String], every: Duration, keep_r
             } else {
                 None
             };
-            Ok((gaps, raw))
+            let seen = crate::import::fill_seen_from_peers(&conn, peers)?;
+            Ok((gaps, raw, seen))
         });
         match round {
-            Ok((r, raw)) => {
+            Ok((r, raw, seen)) => {
+                if seen > 0 {
+                    info!("peer backfill: arrival times of {seen} block(s) taken over");
+                }
                 if r.imported > 0 || r.rejected > 0 {
                     info!("peer backfill: {} gap(s) filled, {} rejected, {} not on any peer, {} open before", r.imported, r.rejected, r.not_in_source, r.gaps);
                 }

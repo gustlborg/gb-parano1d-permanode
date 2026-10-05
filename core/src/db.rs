@@ -203,6 +203,7 @@ fn migrate_locked(conn: &Connection) -> Result<()> {
     // noted by the tip watcher: the closest observable moment to when its
     // hash was found. NULL for blocks it did not see arrive.
     add_column_if_missing(conn, "blocks", "tip_seen_at_ms", "INTEGER")?;
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_blocks_seen ON blocks(height) WHERE tip_seen_at_ms IS NOT NULL;")?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS tx_receipts (
              tx_id        INTEGER PRIMARY KEY REFERENCES transactions(id),
@@ -433,6 +434,54 @@ pub fn set_tip_seen(conn: &Connection, height: u64, hash: &str, at_ms: i64) -> R
         params![height as i64, hash, at_ms],
     )?;
     Ok(n > 0)
+}
+
+/// Takes over an arrival time another permanode noted - only where this one
+/// has none, its own observation always wins. Returns whether it was taken.
+pub fn adopt_tip_seen(conn: &Connection, height: u64, hash: &str, at_ms: i64) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE blocks SET tip_seen_at_ms = ?3 WHERE height = ?1 AND hash = ?2 AND tip_seen_at_ms IS NULL",
+        params![height as i64, hash, at_ms],
+    )?;
+    Ok(n > 0)
+}
+
+/// The highest recorded block - where filling arrival times from peers stops.
+pub fn seen_fill_tip(conn: &Connection) -> Result<u64> {
+    let h: Option<i64> = conn.query_row("SELECT MAX(height) FROM blocks", [], |r| r.get(0))?;
+    Ok(h.unwrap_or(0).max(0) as u64)
+}
+
+/// The lowest height with a noted arrival time; `None` before any.
+pub fn seen_from(conn: &Connection) -> Result<Option<u64>> {
+    let h: Option<i64> = conn.query_row("SELECT MIN(height) FROM blocks WHERE tip_seen_at_ms IS NOT NULL", [], |r| r.get(0))?;
+    Ok(h.map(|h| h as u64))
+}
+
+/// Noted arrival times in `from..=to`, `(height, hash, unix ms)`, orphaned
+/// blocks included, at most `max`.
+pub fn seen_in_range(conn: &Connection, from: u64, to: u64, max: usize) -> Result<Vec<(u64, String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT height, hash, tip_seen_at_ms FROM blocks
+         WHERE height BETWEEN ?1 AND ?2 AND tip_seen_at_ms IS NOT NULL ORDER BY height LIMIT ?3",
+    )?;
+    let rows = stmt.query_map(params![from.min(i64::MAX as u64) as i64, to.min(i64::MAX as u64) as i64, max as i64], |r| {
+        Ok((r.get::<_, i64>(0)? as u64, r.get(1)?, r.get(2)?))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Recorded blocks in `from..=to` without an arrival time, lowest first,
+/// at most `max`.
+pub fn blocks_missing_seen(conn: &Connection, from: u64, to: u64, max: usize) -> Result<Vec<(u64, String)>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT height, hash FROM blocks
+         WHERE height BETWEEN ?1 AND ?2 AND tip_seen_at_ms IS NULL AND {ARCHIVED} ORDER BY height LIMIT ?3"
+    ))?;
+    let rows = stmt.query_map(params![from.min(i64::MAX as u64) as i64, to.min(i64::MAX as u64) as i64, max as i64], |r| {
+        Ok((r.get::<_, i64>(0)? as u64, r.get(1)?))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 pub fn set_state(conn: &Connection, key: &str, value: &str) -> Result<()> {

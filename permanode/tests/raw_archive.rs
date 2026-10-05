@@ -306,3 +306,35 @@ fn a_block_page_reads_its_header_figures_from_the_kept_bytes() {
     }
 }
 
+
+#[test]
+fn arrival_times_fill_gaps_from_a_sister_permanode_and_never_overwrite() {
+    // the source saw all three blocks arrive, the target (restarting at the
+    // time) only the last one - with its own, different moment
+    let dir = TempDir::new("seen");
+    let source = db::open(&dir.path("source.sqlite3")).unwrap();
+    let target = db::open(&dir.path("target.sqlite3")).unwrap();
+    let ids: Vec<(u64, String)> = BLOCKS.iter().map(|b| id(b)).collect();
+    for (i, b) in BLOCKS.iter().enumerate() {
+        let d = details(b);
+        indexer::store_block(&source, &d, "details").unwrap();
+        indexer::store_block(&target, &d, "details").unwrap();
+        assert!(db::set_tip_seen(&source, ids[i].0, &ids[i].1, 1_000 + i as i64).unwrap());
+    }
+    assert!(db::set_tip_seen(&target, ids[2].0, &ids[2].1, 5_000).unwrap());
+    // a second sighting of a block (a reorg back to it) keeps the first
+    assert!(db::set_tip_seen(&target, ids[2].0, &ids[2].1, 9_000).unwrap());
+    drop(source);
+
+    let peer = start_peer(&dir, "source.sqlite3");
+    let status: serde_json::Value = ureq::get(&format!("{peer}/peer/v1/status")).call().unwrap().body_mut().read_json().unwrap();
+    assert_eq!(status["seen_from"].as_u64(), Some(ids[0].0));
+    let served: Vec<(u64, String, i64)> =
+        ureq::get(&format!("{peer}/peer/v1/seen/{}/{}", ids[0].0, ids[2].0)).call().unwrap().body_mut().read_json().unwrap();
+    assert_eq!(served.len(), 3);
+
+    assert_eq!(import::fill_seen_from_peers(&target, std::slice::from_ref(&peer)).unwrap(), 2);
+    let seen = |h: u64| -> Option<i64> { target.query_row("SELECT tip_seen_at_ms FROM blocks WHERE height = ?1", params![h as i64], |r| r.get(0)).unwrap() };
+    assert_eq!((seen(ids[0].0), seen(ids[1].0), seen(ids[2].0)), (Some(1_000), Some(1_001), Some(5_000)));
+    assert_eq!(import::fill_seen_from_peers(&target, std::slice::from_ref(&peer)).unwrap(), 0);
+}

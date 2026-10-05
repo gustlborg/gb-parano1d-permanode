@@ -204,6 +204,7 @@ async fn run_peer(listen: String, db_path: String) {
         .route("/peer/v1/body/{height}/{hash}", get(peer_body))
         .route("/peer/v1/raw/{height}/{hash}", get(peer_raw))
         .route("/peer/v1/status", get(peer_status))
+        .route("/peer/v1/seen/{from}/{to}", get(peer_seen))
         .with_state(Arc::new(Mutex::new(conn)));
     loop {
         match tokio::net::TcpListener::bind(&listen).await {
@@ -271,6 +272,26 @@ async fn peer_raw(State(db): State<PeerDb>, Path((height, hash)): Path<(u64, Str
     }
 }
 
+/// The arrival times this permanode noted in `from..=to` (at most
+/// `PEER_SEEN_MAX` heights' worth), `[[height, hash, unix ms], ...]`, for a
+/// sister permanode that was not watching then.
+async fn peer_seen(State(db): State<PeerDb>, Path((from, to)): Path<(u64, u64)>) -> Response {
+    if to < from {
+        return peer_error(StatusCode::BAD_REQUEST, "to must not be below from");
+    }
+    let to = to.min(from.saturating_add(PEER_SEEN_MAX));
+    let found = tokio::task::spawn_blocking(move || {
+        let conn = db.lock().unwrap_or_else(|p| p.into_inner());
+        permanode_core::db::seen_in_range(&conn, from, to, PEER_SEEN_MAX as usize * 2)
+    })
+    .await;
+    match found {
+        Ok(Ok(rows)) => Json(rows).into_response(),
+        _ => peer_error(StatusCode::INTERNAL_SERVER_ERROR, "arrival times unreadable"),
+    }
+}
+const PEER_SEEN_MAX: u64 = 20_000;
+
 /// Highest block with a body on record, the archive's first one, the open
 /// gaps and what the raw block archive holds - enough for the other side
 /// to see this permanode is alive, and from where to ask it for raw bytes.
@@ -281,7 +302,8 @@ async fn peer_status(State(db): State<PeerDb>) -> Response {
             conn.query_row("SELECT MAX(height), MIN(height) FROM blocks WHERE body_captured = 1", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
         let gaps: i64 = conn.query_row("SELECT COUNT(*) FROM ingest_gaps WHERE resolved_at IS NULL", [], |r| r.get(0))?;
         let raw = permanode_core::db::raw_coverage(&conn)?;
-        Ok(serde_json::json!({ "tip": tip, "archive_from": first, "open_gaps": gaps, "raw_from": raw.from_height, "raw_blocks": raw.blocks }))
+        let seen_from = permanode_core::db::seen_from(&conn)?;
+        Ok(serde_json::json!({ "tip": tip, "archive_from": first, "open_gaps": gaps, "raw_from": raw.from_height, "raw_blocks": raw.blocks, "seen_from": seen_from }))
     })
     .await;
     match status {
