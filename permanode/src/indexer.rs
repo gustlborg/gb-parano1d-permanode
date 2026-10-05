@@ -9,7 +9,8 @@ use permanode_core::db;
 use rusqlite::{params, Connection};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -48,10 +49,26 @@ pub fn run(conn: &Connection, rpc: &RpcClient, cfg: &Config) -> Result<()> {
         let keep_raw = cfg.archive_raw_blocks;
         thread::Builder::new().name("peer-backfill".into()).spawn(move || peer_backfill_thread(&db_path, &peers, every, keep_raw))?;
     }
+    // The tip watcher wakes the loop below as soon as a new block is on the
+    // node and leaves its sighting for the next poll to write; without it
+    // the receiver just times out every poll interval.
+    let (wake_tx, wake_rx) = mpsc::channel::<()>();
+    let sightings: Sightings = Arc::new(Mutex::new(Vec::new()));
+    if cfg.tip_watch_ms > 0 {
+        let rpc_url = cfg.rpc_url.clone();
+        let every = Duration::from_millis(cfg.tip_watch_ms.max(200));
+        let seen = Arc::clone(&sightings);
+        thread::Builder::new()
+            .name("tip-watch".into())
+            .spawn(move || tip_watch_thread(&rpc_url, every, seen, wake_tx))?;
+    } else {
+        drop(wake_tx);
+    }
     loop {
         if let Err(e) = poll_once(conn, rpc, cfg) {
             warn!("poll cycle failed, will retry: {e:#}");
         }
+        note_sightings(conn, &sightings);
 
         cycles += 1;
         if cfg.retention_days > 0 && cycles % cfg.prune_every_cycles == 0 {
@@ -95,8 +112,73 @@ pub fn run(conn: &Connection, rpc: &RpcClient, cfg: &Config) -> Result<()> {
             }
         }
 
-        thread::sleep(Duration::from_secs(cfg.poll_interval_seconds));
+        // Wait out the poll interval, but record a new block at once when
+        // the tip watcher reports one. The cycle count - and with it the
+        // pruning, balance refresh and state sweep cadence - still advances
+        // once per poll interval.
+        let deadline = Instant::now() + Duration::from_secs(cfg.poll_interval_seconds);
+        loop {
+            match wake_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(()) => {
+                    while wake_rx.try_recv().is_ok() {}
+                    if let Err(e) = poll_once(conn, rpc, cfg) {
+                        warn!("poll cycle failed, will retry: {e:#}");
+                    }
+                    note_sightings(conn, &sightings);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                    break;
+                }
+            }
+        }
     }
+}
+
+/// New tips the watcher saw, `(height, hash, unix ms)`, waiting for their
+/// block to be on record.
+type Sightings = Arc<Mutex<Vec<(u64, String, i64)>>>;
+
+/// Asks the node for its tip every `every` and notes the moment each new
+/// tip block arrived: the closest observable time to when its hash was
+/// found - a block's own timestamp is when the pool built its template,
+/// typically half a minute earlier. Wakes the indexer, which records the
+/// block and then writes the sighting (`note_sightings`), so the block never
+/// appears without it. The tip present at start is skipped: when it arrived
+/// was not seen.
+fn tip_watch_thread(rpc_url: &str, every: Duration, sightings: Sightings, wake: mpsc::Sender<()>) {
+    let rpc = permanode_core::live_rpc::RpcClient::new(rpc_url.to_string());
+    let mut last: Option<(u64, String)> = None;
+    loop {
+        if let Ok(info) = rpc.get_chain_info() {
+            let tip = (info.height, info.best_hash);
+            if last.as_ref() != Some(&tip) {
+                if last.is_some() {
+                    sightings.lock().unwrap_or_else(|e| e.into_inner()).push((tip.0, tip.1.clone(), Utc::now().timestamp_millis()));
+                    let _ = wake.send(());
+                }
+                last = Some(tip);
+            }
+        }
+        thread::sleep(every);
+    }
+}
+
+/// Writes the watcher's sightings onto the blocks now on record
+/// (`blocks.tip_seen_at_ms`); one whose block is not recorded yet waits for
+/// a later poll, for up to ten minutes.
+fn note_sightings(conn: &Connection, sightings: &Sightings) {
+    let now_ms = Utc::now().timestamp_millis();
+    let mut list = sightings.lock().unwrap_or_else(|e| e.into_inner());
+    list.retain(|(height, hash, at)| match db::set_tip_seen(conn, *height, hash, *at) {
+        Ok(true) => false,
+        Ok(false) => now_ms - at < 600_000,
+        Err(e) => {
+            warn!("could not note when block {height} arrived: {e:#}");
+            now_ms - at < 600_000
+        }
+    });
 }
 
 fn poll_once(conn: &Connection, rpc: &RpcClient, cfg: &Config) -> Result<()> {

@@ -6,6 +6,12 @@ Notable changes per release. Commit history has the details.
 
 - `richlist` takes `?limit=` (default 100, up to 10 000), so a client can
   read every funded address from the balance sweep in one request.
+- A tip watcher (`tip_watch_ms`, default 1000) asks the node for its tip
+  every second, notes when each new block arrived and wakes the indexer:
+  blocks carry `seen_at_ms` - the closest observable moment to when their
+  hash was found, while `timestamp` is when the pool built the template,
+  typically half a minute earlier - and a new block is on record within
+  about a second instead of up to `poll_interval_seconds`.
 - `stats` computes its archive figures (counts, recorded live UTXOs) once
   per indexed tip and at most every 30 s instead of on every request:
   every open page asks every 20 s, and counting the live UTXOs alone took

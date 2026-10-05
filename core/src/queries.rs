@@ -56,6 +56,11 @@ pub struct BlockSummary {
     pub tx_count_total: Option<i64>,
     /// v2 contract calls in this block (0 before the fork).
     pub contract_calls: i64,
+    /// When this permanode first saw the block as the node's tip (unix ms):
+    /// the closest observable moment to when its hash was found, while
+    /// `timestamp` is when the pool built the block's template. `None` for
+    /// blocks it did not see arrive (older ones, gap fills, catch-up).
+    pub seen_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -66,6 +71,9 @@ pub struct BlockDetail {
     pub state_root: String,
     pub tx_root: String,
     pub timestamp: i64,
+    /// When this permanode first saw the block as the node's tip (unix ms);
+    /// see `BlockSummary::seen_at_ms`.
+    pub seen_at_ms: Option<i64>,
     pub miner: String,
     pub nonce_hex: String,
     pub difficulty_target: String,
@@ -339,7 +347,7 @@ pub fn recent_blocks(conn: &Connection, limit: i64, before: Option<i64>) -> Resu
                 blocks.body_captured,
                 (SELECT COUNT(*) FROM transactions t WHERE t.block_id = blocks.id) AS tx_count,
                 (SELECT COUNT(*) FROM transactions t WHERE t.block_id = blocks.id AND t.contract_flags != 0) AS contract_calls,
-                blocks.body_source, blocks.tx_count_total
+                blocks.body_source, blocks.tx_count_total, blocks.tip_seen_at_ms
          FROM blocks
          WHERE blocks.height < ?2 AND {CANONICAL_BLOCK_FILTER}
          ORDER BY blocks.height DESC
@@ -360,6 +368,7 @@ pub fn recent_blocks(conn: &Connection, limit: i64, before: Option<i64>) -> Resu
             contract_calls: row.get(9)?,
             archived: row.get::<_, Option<String>>(10)?.as_deref() != Some(HEADER_ONLY_SOURCE),
             tx_count_total: row.get(11)?,
+            seen_at_ms: row.get(12)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -376,7 +385,7 @@ fn block_id_and_row(
                 blocks.difficulty_target, blocks.proof_class, blocks.reward_micronoid,
                 blocks.total_fees_micronoid, blocks.body_captured,
                 ({CANONICAL_BLOCK_FILTER}) AS is_canonical,
-                blocks.body_source, blocks.log_slots, blocks.tx_count_total
+                blocks.body_source, blocks.log_slots, blocks.tx_count_total, blocks.tip_seen_at_ms
          FROM blocks
          WHERE {where_clause}
          ORDER BY is_canonical DESC
@@ -396,6 +405,7 @@ fn block_id_and_row(
                     state_root: row.get(4)?,
                     tx_root: row.get(5)?,
                     timestamp: row.get(6)?,
+                    seen_at_ms: row.get(18)?,
                     miner: row.get(7)?,
                     nonce_hex: row.get(8)?,
                     difficulty_target: row.get(9)?,

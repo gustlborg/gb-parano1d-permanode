@@ -199,6 +199,10 @@ fn migrate_locked(conn: &Connection) -> Result<()> {
     // makes counting them, and leaving them out, cost nothing.
     add_column_if_missing(conn, "transactions", "source", "TEXT")?;
     add_column_if_missing(conn, "blocks", "tx_count_total", "INTEGER")?;
+    // When this permanode first saw the block as the node's tip (unix ms),
+    // noted by the tip watcher: the closest observable moment to when its
+    // hash was found. NULL for blocks it did not see arrive.
+    add_column_if_missing(conn, "blocks", "tip_seen_at_ms", "INTEGER")?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS tx_receipts (
              tx_id        INTEGER PRIMARY KEY REFERENCES transactions(id),
@@ -418,6 +422,17 @@ pub fn get_state(conn: &Connection, key: &str) -> Result<Option<String>> {
     } else {
         Ok(None)
     }
+}
+
+/// Notes when this permanode first saw a block as the node's tip (unix ms);
+/// kept once - a later sighting (a reorg back to it) changes nothing.
+/// Returns whether the block is on record yet.
+pub fn set_tip_seen(conn: &Connection, height: u64, hash: &str, at_ms: i64) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE blocks SET tip_seen_at_ms = COALESCE(tip_seen_at_ms, ?3) WHERE height = ?1 AND hash = ?2",
+        params![height as i64, hash, at_ms],
+    )?;
+    Ok(n > 0)
 }
 
 pub fn set_state(conn: &Connection, key: &str, value: &str) -> Result<()> {

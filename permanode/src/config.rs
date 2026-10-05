@@ -91,6 +91,14 @@ pub struct Config {
     #[serde(default = "default_header_backfill_per_second")]
     pub header_backfill_per_second: u64,
 
+    /// How often, in milliseconds, a light watcher asks the node for its tip
+    /// (0 disables it). It notes when each new block arrived - the API's
+    /// `seen_at_ms`, the closest observable moment to when its hash was
+    /// found - and wakes the indexer, so a new block is on record within
+    /// about this long instead of up to `poll_interval_seconds`.
+    #[serde(default = "default_tip_watch_ms")]
+    pub tip_watch_ms: u64,
+
     /// Address the JSON API listens on. Loopback by default;
     /// put a reverse proxy with TLS in front for a public instance rather
     /// than exposing this port directly.
@@ -130,6 +138,9 @@ fn default_peer_backfill_interval() -> u64 {
 }
 fn default_state_scan_max_per_second() -> u64 {
     500
+}
+fn default_tip_watch_ms() -> u64 {
+    1000
 }
 fn default_header_backfill_per_second() -> u64 {
     50
@@ -181,6 +192,7 @@ impl Default for Config {
             scan_slots_every_cycles: default_scan_slots_every_cycles(),
             state_scan_max_per_second: default_state_scan_max_per_second(),
             header_backfill_per_second: default_header_backfill_per_second(),
+            tip_watch_ms: default_tip_watch_ms(),
             listen: default_listen(),
             site_dir: None,
             donation_address: None,

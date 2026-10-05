@@ -80,6 +80,13 @@ state_scan_max_per_second = 500
 # default it copies 180,000 headers an hour.
 header_backfill_per_second = 50
 
+# How often, in milliseconds, a light watcher asks the node for its tip (0
+# disables it). It notes when each new block arrived (the API's seen_at_ms,
+# the closest observable moment to when its hash was found - the block's own
+# timestamp is when the pool built its template) and wakes the indexer, so a
+# new block is on record within about a second.
+tip_watch_ms = 1000
+
 # Where the JSON API listens. Keep this on loopback for a public instance
 # and put a reverse proxy with TLS in front of it.
 listen = "127.0.0.1:8420"
