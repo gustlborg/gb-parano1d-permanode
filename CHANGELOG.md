@@ -6,6 +6,10 @@ Notable changes per release. Commit history has the details.
 
 - `richlist` takes `?limit=` (default 100, up to 10 000), so a client can
   read every funded address from the balance sweep in one request.
+- `stats` computes its archive figures (counts, recorded live UTXOs) once
+  per indexed tip and at most every 30 s instead of on every request:
+  every open page asks every 20 s, and counting the live UTXOs alone took
+  most of a second on a small server.
 
 ## 0.3.0 - 2026-10-02
 

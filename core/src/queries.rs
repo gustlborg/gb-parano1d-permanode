@@ -251,7 +251,7 @@ pub struct TxBlockRef {
     pub canonical: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ChainStats {
     pub last_processed_height: Option<i64>,
     /// Canonical blocks of the recorded archive; header-only blocks below

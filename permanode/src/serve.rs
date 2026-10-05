@@ -67,6 +67,9 @@ struct AppState {
     /// node once per transaction (`getMempoolEntry`) and dropped when it
     /// leaves the mempool - the mempool view polls every second.
     mempool_contracts: Mutex<std::collections::HashMap<String, bool>>,
+    /// The archive figures of `/stats` with the indexed tip and the time
+    /// they were computed - see `cached_chain_stats`.
+    chain_stats_cache: Mutex<Option<(i64, i64, queries::ChainStats)>>,
 }
 
 struct MinersCacheEntry {
@@ -138,6 +141,7 @@ pub async fn run(cfg: &Config) -> Result<()> {
         period_cache: Mutex::new(None),
         miners_cache: Mutex::new(std::collections::HashMap::new()),
         mempool_contracts: Mutex::new(std::collections::HashMap::new()),
+        chain_stats_cache: Mutex::new(None),
     });
 
     let api = Router::new()
@@ -424,7 +428,7 @@ async fn get_stats(State(state): State<Arc<AppState>>) -> ApiResult<StatsRespons
     let (chain, avg_10m, avg_1h, avg_24h) = {
         let conn = state.db();
         (
-            queries::chain_stats(&conn)?,
+            cached_chain_stats(&state, &conn, now_unix)?,
             queries::avg_block_time_seconds(&conn, 600, now_unix)?,
             queries::avg_block_time_seconds(&conn, 3600, now_unix)?,
             queries::avg_block_time_seconds(&conn, 86400, now_unix)?,
@@ -492,6 +496,31 @@ async fn get_stats(State(state): State<Arc<AppState>>) -> ApiResult<StatsRespons
         db_bytes,
         protocol,
     }))
+}
+
+/// The archive figures are most of a `/stats` call's cost - counting the
+/// recorded live UTXOs alone takes the better part of a second on a small
+/// server - and only change when the indexer moves on. Every open page asks
+/// for them every 20 seconds (header strip, dashboard), so they are computed
+/// once per indexed tip and shared, and again after at most
+/// `CHAIN_STATS_MAX_AGE_SECONDS` (gap fills and same-height reorgs).
+const CHAIN_STATS_MAX_AGE_SECONDS: i64 = 30;
+
+fn cached_chain_stats(state: &AppState, conn: &Connection, now_unix: i64) -> anyhow::Result<queries::ChainStats> {
+    let tip = queries::indexed_tip(conn)?.unwrap_or(0);
+    let cached = {
+        let cache = state.chain_stats_cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache
+            .as_ref()
+            .filter(|(h, at, _)| *h == tip && now_unix - *at < CHAIN_STATS_MAX_AGE_SECONDS)
+            .map(|(_, _, s)| s.clone())
+    };
+    if let Some(stats) = cached {
+        return Ok(stats);
+    }
+    let stats = queries::chain_stats(conn)?;
+    *state.chain_stats_cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((tip, now_unix, stats.clone()));
+    Ok(stats)
 }
 
 /// Confirmations at which a block can no longer be reorganized away (the
