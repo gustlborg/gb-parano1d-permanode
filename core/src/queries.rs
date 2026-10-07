@@ -18,6 +18,12 @@ use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
+/// `CANONICAL_BLOCK_FILTER` for a block table aliased `b`.
+const CANONICAL_BLOCK_FILTER_B: &str = "
+    (SELECT s.status FROM block_status_log s
+     WHERE s.block_id = b.id
+     ORDER BY s.id DESC LIMIT 1) = 'canonical'
+";
 const CANONICAL_BLOCK_FILTER: &str = "
     (SELECT s.status FROM block_status_log s
      WHERE s.block_id = blocks.id
@@ -1057,6 +1063,60 @@ pub fn avg_block_time_seconds(conn: &Connection, window_seconds: i64, now_unix: 
         }
         _ => Ok(None),
     }
+}
+
+/// An address's balance changes per hour with movement, oldest first:
+/// `(hour start, change in µNOID)`. Received outputs count positive, spent
+/// inputs negative (change back to the address cancels out); an output
+/// spent inside a gap counts as spent when the live-state sweep noticed it
+/// was gone. Transactions imported from payment receipts are older than
+/// the archive and left out. A client adds the changes backwards from the
+/// address's live balance, which keeps the curve right at its end even
+/// where the archive misses something earlier.
+pub fn balance_changes_by_hour(conn: &Connection, address: &str) -> Result<Vec<(i64, i64)>> {
+    let mut by_hour: std::collections::BTreeMap<i64, i64> = std::collections::BTreeMap::new();
+    let recorded = recorded_filter_on("t");
+    let mut add = |sql: &str, sign: i64| -> Result<()> {
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map(params![address], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+        for row in rows {
+            let (hour, amount) = row?;
+            *by_hour.entry(hour).or_default() += sign * amount;
+        }
+        Ok(())
+    };
+    add(
+        &format!(
+            "SELECT b.timestamp / 3600 * 3600, SUM(o.amount_micronoid)
+             FROM tx_outputs o JOIN transactions t ON t.id = o.tx_id JOIN blocks b ON b.id = t.block_id
+             WHERE o.owner = ?1 AND {recorded} AND {CANONICAL_BLOCK_FILTER_B} GROUP BY 1"
+        ),
+        1,
+    )?;
+    add(
+        &format!(
+            "SELECT b.timestamp / 3600 * 3600, SUM(t.input_sum_micronoid)
+             FROM transactions t JOIN blocks b ON b.id = t.block_id
+             WHERE t.input_owner = ?1 AND {recorded} AND {CANONICAL_BLOCK_FILTER_B} GROUP BY 1"
+        ),
+        -1,
+    )?;
+    add(
+        &format!(
+            "SELECT CAST(strftime('%s', o.spent_in_gap_at) AS INTEGER) / 3600 * 3600, SUM(o.amount_micronoid)
+             FROM tx_outputs o JOIN transactions t ON t.id = o.tx_id JOIN blocks b ON b.id = t.block_id
+             WHERE o.owner = ?1 AND o.spent_in_gap = 1 AND o.spent_in_gap_at IS NOT NULL
+               AND {recorded} AND {CANONICAL_BLOCK_FILTER_B} GROUP BY 1"
+        ),
+        -1,
+    )?;
+    Ok(by_hour.into_iter().filter(|(_, d)| *d != 0).collect())
+}
+
+/// The first archived block's time (unix seconds): balance changes before
+/// it are not on record.
+pub fn recorded_from_timestamp(conn: &Connection) -> Result<Option<i64>> {
+    Ok(conn.query_row(&format!("SELECT MIN(timestamp) FROM blocks WHERE body_captured = 1 AND {ARCHIVED}"), [], |r| r.get(0))?)
 }
 
 #[derive(Debug, Serialize)]

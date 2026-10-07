@@ -4,6 +4,9 @@ Notable changes per release. Commit history has the details.
 
 ## Unreleased
 
+- `address/{a}/balance-history`: an address's balance changes per hour
+  with movement and where the archive begins - a client adds them backwards
+  from the live balance; computed once per indexed tip and address.
 - `richlist` takes `?limit=` (default 100, up to 10 000), so a client can
   read every funded address from the balance sweep in one request.
 - A tip watcher (`tip_watch_ms`, default 1000) asks the node for its tip

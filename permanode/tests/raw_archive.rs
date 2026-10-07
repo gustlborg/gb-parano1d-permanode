@@ -338,3 +338,31 @@ fn arrival_times_fill_gaps_from_a_sister_permanode_and_never_overwrite() {
     assert_eq!((seen(ids[0].0), seen(ids[1].0), seen(ids[2].0)), (Some(1_000), Some(1_001), Some(5_000)));
     assert_eq!(import::fill_seen_from_peers(&target, std::slice::from_ref(&peer)).unwrap(), 0);
 }
+
+#[test]
+fn balance_changes_per_hour_add_up_to_received_minus_sent() {
+    let dir = TempDir::new("balance");
+    let conn = db::open(&dir.path("p.sqlite3")).unwrap();
+    for b in BLOCKS {
+        let d = details(b);
+        indexer::store_block(&conn, &d, "details").unwrap();
+    }
+    // every owner that appears in the fixture blocks
+    let owners: Vec<String> = conn
+        .prepare("SELECT DISTINCT owner FROM tx_outputs UNION SELECT DISTINCT input_owner FROM transactions WHERE input_owner IS NOT NULL")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(!owners.is_empty());
+    for owner in owners {
+        let hourly = permanode_core::queries::balance_changes_by_hour(&conn, &owner).unwrap();
+        assert!(hourly.windows(2).all(|w| w[0].0 < w[1].0), "hours ascending");
+        assert!(hourly.iter().all(|(h, d)| h % 3600 == 0 && *d != 0));
+        let b = permanode_core::queries::address_balance(&conn, &owner).unwrap();
+        let net: i64 = b.total_received_micronoid.parse::<i64>().unwrap() - b.total_sent_micronoid.parse::<i64>().unwrap();
+        assert_eq!(hourly.iter().map(|(_, d)| d).sum::<i64>(), net, "{owner}");
+    }
+    assert!(permanode_core::queries::recorded_from_timestamp(&conn).unwrap().is_some());
+}

@@ -70,6 +70,9 @@ struct AppState {
     /// The archive figures of `/stats` with the indexed tip and the time
     /// they were computed - see `cached_chain_stats`.
     chain_stats_cache: Mutex<Option<(i64, i64, queries::ChainStats)>>,
+    /// Balance histories per address with the indexed tip they were made
+    /// at - see `get_address_balance_history`.
+    balance_cache: Mutex<std::collections::HashMap<String, (i64, Arc<serde_json::Value>)>>,
 }
 
 struct MinersCacheEntry {
@@ -142,6 +145,7 @@ pub async fn run(cfg: &Config) -> Result<()> {
         miners_cache: Mutex::new(std::collections::HashMap::new()),
         mempool_contracts: Mutex::new(std::collections::HashMap::new()),
         chain_stats_cache: Mutex::new(None),
+        balance_cache: Mutex::new(std::collections::HashMap::new()),
     });
 
     let api = Router::new()
@@ -152,6 +156,7 @@ pub async fn run(cfg: &Config) -> Result<()> {
         .route("/api/v1/tx/{txid}", get(get_tx))
         .route("/api/v1/address/{address}", get(get_address))
         .route("/api/v1/address/{address}/utxos", get(get_address_utxos))
+        .route("/api/v1/address/{address}/balance-history", get(get_address_balance_history))
         .route("/api/v1/gaps", get(get_gaps))
         .route("/api/v1/orphans", get(get_orphans))
         .route("/api/v1/richlist", get(get_richlist))
@@ -814,6 +819,48 @@ async fn get_address(
         blocks_mined,
     }))
 }
+
+/// An address's balance changes per hour with movement
+/// (`queries::balance_changes_by_hour`), `[[hour start, change µNOID], ...]`,
+/// plus where the archive begins. The client adds them backwards from the
+/// live balance it already has from the address page, so this needs no
+/// node call. Made once per indexed tip and address (a few hundred µs for
+/// an ordinary wallet, ~0.1 s for a pool's), kept for the next visitors.
+async fn get_address_balance_history(
+    State(state): State<Arc<AppState>>,
+    Path(address): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiErrorOr404> {
+    if !is_address(&address) {
+        return Err(ApiErrorOr404::NotFound);
+    }
+    let conn = state.db();
+    let tip = queries::indexed_tip(&conn)?.unwrap_or(0);
+    let cached = {
+        let cache = state.balance_cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.get(&address).filter(|(t, _)| *t == tip).map(|(_, v)| Arc::clone(v))
+    };
+    let body = match cached {
+        Some(v) => v,
+        None => {
+            let hourly: Vec<(i64, String)> =
+                queries::balance_changes_by_hour(&conn, &address)?.into_iter().map(|(h, d)| (h, d.to_string())).collect();
+            let v = Arc::new(serde_json::json!({
+                "address": address,
+                "tip": tip,
+                "recorded_from": queries::recorded_from_timestamp(&conn)?,
+                "hourly": hourly,
+            }));
+            let mut cache = state.balance_cache.lock().unwrap_or_else(|e| e.into_inner());
+            if cache.len() >= BALANCE_CACHE_MAX {
+                cache.clear();
+            }
+            cache.insert(address.clone(), (tip, Arc::clone(&v)));
+            v
+        }
+    };
+    Ok(Json((*body).clone()))
+}
+const BALANCE_CACHE_MAX: usize = 2_000;
 
 async fn get_address_utxos(
     State(state): State<Arc<AppState>>,
