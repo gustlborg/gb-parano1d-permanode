@@ -1,0 +1,115 @@
+# Example config for parano1d-permanode.
+# Copy to permanode.toml next to the binary, or point --config at it.
+# Any key left out falls back to the built-in default shown here.
+
+# JSON-RPC endpoint of your own Parano1d node. Must stay reachable only on
+# loopback/a private network - RPC has no authentication by default.
+rpc_url = "http://127.0.0.1:9601"
+
+# SQLite database file the indexer writes to.
+db_path = "permanode.sqlite3"
+
+# How often to poll the node for new blocks, in seconds. The node's body
+# retention window has been observed to be considerably tighter in
+# practice than its own documentation states, so keep this low.
+poll_interval_seconds = 5
+
+# How many recent blocks to re-check on every poll for reorgs. Must stay
+# above the protocol's maximum reorg depth (17 blocks at mainnet launch)
+# with a safety margin.
+reorg_check_depth = 30
+
+# Days of transaction detail to keep before pruning. 0 = keep forever.
+# Block headers are always kept regardless of this setting.
+retention_days = 0
+
+# How often (in poll cycles) to run the pruning pass.
+prune_every_cycles = 720
+
+# When getBlockDetails returns retained: null for a block whose body the
+# node still has (node v1.1 did so for every "marker" block of a
+# multi-block commit, ~2.2% of all heights), decode the raw block from
+# getBlock ourselves instead of recording a gap. The node's own crates are
+# linked in for the decode, so the fields match its RPC exactly.
+getblock_fallback = true
+
+# For every block getBlockDetails already served fine, also decode it via
+# getBlock and compare, as a continuous check that the fallback decoder
+# still matches the node's own output. Safe to turn off after it's been
+# quiet for a while.
+decoder_selfcheck = true
+
+# Keep every block's raw bytes as the node served them (getBlock),
+# compressed (about 0.4 KB per block today), next to the decoded tables.
+# The node prunes a body after a few minutes; with the bytes kept, the
+# archive can be read again later - by a newer version that understands
+# more, or after a decoder fix - and gaps filled from a peer are checked
+# byte for byte. Bytes are kept only once they prove to be the block on
+# record (its hash, its tx_root, its canonical encoding). One extra
+# getBlock call per block; retention_days prunes them with the rest.
+archive_raw_blocks = true
+
+# How often (in poll cycles) to refresh the live current-balance cache for
+# every address this permanode has ever recorded (paranoid_getSlotsByOwner,
+# one call per known address - powers the rich list).
+refresh_addresses_every_cycles = 120
+
+# How often (in poll cycles) to check the permanode's picture of the node's
+# Live State against the node and refresh every address's balance - this is
+# what makes the rich list complete. A run compares live UTXOs per state
+# segment (paranoid_getStateMap) with what the permanode knows and reads only
+# segments that differ slot by slot (paranoid_getSlot, 65,536 calls each);
+# normally none do. The first run after an upgrade reads every populated
+# segment once. Runs in its own background thread. 0 disables the sweep.
+scan_slots_every_cycles = 360
+
+# Upper bound for paranoid_getSlot calls per second while a segment is read
+# (0 = unthrottled). The default keeps a small node responsive; a segment then
+# takes about two minutes.
+state_scan_max_per_second = 500
+
+# The node keeps every block header since genesis, but bodies only for a few
+# minutes. In a background thread the permanode copies the headers below the
+# first block it recorded, from there down to genesis, as header-only blocks:
+# block pages and mining statistics then cover the whole chain, while
+# everything about the recorded history (counts, "history since", gaps,
+# balances, export) stays as it was. This is the upper bound for
+# paranoid_getBlockHeader calls per second (0 disables the backfill). It
+# pauses while the indexer is behind and resumes after a restart; at the
+# default it copies 180,000 headers an hour.
+header_backfill_per_second = 50
+
+# How often, in milliseconds, a light watcher asks the node for its tip (0
+# disables it). It notes when each new block arrived (the API's seen_at_ms,
+# the closest observable moment to when its hash was found - the block's own
+# timestamp is when the pool built its template) and wakes the indexer, so a
+# new block is on record within about a second.
+tip_watch_ms = 1000
+
+# Where the JSON API listens. Keep this on loopback for a public instance
+# and put a reverse proxy with TLS in front of it.
+listen = "127.0.0.1:8420"
+
+# A directory with a static frontend (index.html plus assets) to serve in
+# place of the built-in API index. Unknown paths get index.html so a
+# client-side router works. Unset = API only.
+# site_dir = "/var/lib/permanode/site"
+
+# Your donation address, returned by /api/v1/stats for a frontend to show.
+# Leave empty for none.
+donation_address = ""
+
+# Gap filling between your own permanodes. A permanode that was offline
+# longer than its node keeps block bodies has gaps; another one that ran
+# meanwhile has the bodies. `peer_listen` serves this permanode's bodies to
+# others (/peer/v1/body/<height>/<hash>, /peer/v1/raw/<height>/<hash>,
+# /peer/v1/status) - put it on a private network address only, e.g. a
+# WireGuard tunnel. `backfill_peers` are the other permanodes' peer
+# endpoints; every body taken over must rebuild the tx_root of the header
+# this permanode's own node gave it. Where the peer kept a block's raw
+# bytes, they are taken instead and decoded here, and with
+# archive_raw_blocks the raw bytes this permanode missed (it was offline)
+# are fetched from the peers as well.
+# peer_listen = "[fd00::1]:8421"
+backfill_peers = []
+peer_backfill_interval_seconds = 300

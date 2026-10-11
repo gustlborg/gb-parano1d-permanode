@@ -1,0 +1,285 @@
+# Changelog
+
+Notable changes per release.
+
+## 0.4.0 - 2026-10-11
+
+After the Parano1d v2 fork: v2 proof classes shared between permanodes,
+the economics figures on the v2 schedule, a cleaner resume after a pause,
+and a release archive with the license. Needs a node on v2.0.1 or later.
+
+- Stopping and starting: a height the node has no header for yet now
+  stops the indexing run until the next cycle instead of being stepped
+  over without a row or a gap. Blocks the node pruned during a pause are
+  recorded with their header as gaps, as before, and indexing goes on.
+- The repository holds the permanode only: the optional watchdog and
+  backup helpers (`contrib/`), the analysis of the node v1.1 RPC bug
+  (`docs/`) and the idea list are gone; the built-in API index page moved
+  to `permanode/assets/`. The release archive now also carries README and
+  LICENSE, and `SHA256SUMS` is written by the build script.
+- `address/{a}/balance-history`: an address's balance changes per hour
+  with movement and where the archive begins - a client adds them backwards
+  from the live balance; computed once per indexed tip and address.
+- `richlist` takes `?limit=` (default 100, up to 10 000), so a client can
+  read every funded address from the balance sweep in one request.
+- A tip watcher (`tip_watch_ms`, default 1000) asks the node for its tip
+  every second, notes when each new block arrived and wakes the indexer:
+  blocks carry `seen_at_ms` - the closest observable moment to when their
+  hash was found, while `timestamp` is when the pool built the template,
+  typically half a minute earlier - and a new block is on record within
+  about a second instead of up to `poll_interval_seconds`.
+  A new tip that brings blocks below it (a reorg, two blocks within one
+  second) gives them the same arrival time; a replaced block keeps its own.
+  Each permanode keeps its own observation; one that was not watching
+  (restart, outage) takes the time over from a sister permanode
+  (`/peer/v1/seen/{from}/{to}`, `seen_from` in `/peer/v1/status`), never
+  overwriting its own.
+- v2 proof classes from a sister permanode: a v2 node keeps the proof only
+  of the blocks it verified on their own, so one that took several blocks
+  in one go says `v2 / class unavailable` for the earlier ones. Such a
+  block takes the class over from a sister permanode whose node had one
+  (`/peer/v1/proof?heights=...`), never replacing a class of its own.
+- `stats` computes its archive figures (counts, recorded live UTXOs) once
+  per indexed tip and at most every 30 s instead of on every request:
+  every open page asks every 20 s, and counting the live UTXOs alone took
+  most of a second on a small server.
+- `economics.next_block_reward_micronoid` follows the v2 schedule: the
+  reward of the next height tier (it still gave the legacy reward of the
+  next state expansion after the fork).
+- Built against the node crates of Parano1d v2.0.3 (no change in
+  consensus, RPC or block format).
+
+## 0.3.0 - 2026-10-02
+
+Ready for the Parano1d v2 fork at block 210 537: v2 blocks, contract
+calls, the height-based reward schedule and development allocation; a raw
+block archive; header backfill since genesis; permanodes that fill each
+other's gaps; old blocks completed from payment receipts. Needs a node on
+v2.0.1 or later.
+
+
+- API: `block/height|hash` adds the header figures `log_slots`,
+  `active_slot_count` and `alloc_counter` - read from the node, which keeps
+  every header (so header-only blocks have them too), or from the block's
+  kept raw bytes for a block a reorg replaced; `null` where neither has
+  them. `mempool` adds per transaction `minimum_proof_class`,
+  `requires_b255_miner` and `contract` (a v2 contract call, asked of the
+  node once per pending transaction with `getMempoolEntry`).
+- **Raw block archive.** New `archive_raw_blocks` (on by default) keeps
+  every block's bytes exactly as the node served them (`getBlock`),
+  zlib-compressed in the new table `raw_blocks` - about 0.4 KB per block
+  today, one extra `getBlock` call per block - so the archive can be read
+  again after the node pruned the body: by a newer version, after a
+  decoder fix, or to hand the original on. Bytes are kept only once they
+  decode to the block's height and hash, rebuild its `tx_root` and are its
+  canonical encoding, and are checked again whenever read. Bytes missed at
+  ingest are fetched again while the node still serves the body (also the
+  blocks inside that window on the first start). `retention_days` prunes
+  them with the transactions. New subcommand `raw-block <HEIGHT> [--hash]
+  [--out FILE]`.
+- The getBlock decoder (fallback, contract flags, self-check) now also
+  requires the pages to rebuild the header's `tx_root` and the bytes to be
+  the block's canonical encoding.
+- Peers: `/peer/v1/raw/<height>/<hash>` serves the kept bytes,
+  `/peer/v1/status` adds `raw_from` and `raw_blocks`. Gaps are filled from
+  a peer's raw bytes where it kept them - decoded here, every field checked
+  against the own header, contract flags included - else from its recorded
+  body as before. With `archive_raw_blocks` the peers (and `import-bodies`)
+  also hand over the raw bytes this permanode missed.
+- **Permanodes fill each other's gaps.** With `peer_listen` a permanode
+  serves its recorded block bodies (`/peer/v1/body/<height>/<hash>`) and a
+  status (`/peer/v1/status`) on a private address; with `backfill_peers`
+  it offers its own open gaps to other permanodes every
+  `peer_backfill_interval_seconds` (300) and records what they return
+  (`body_source = peer`). One-off: `fill-from-peer --peer URL`. Off by
+  default. A peer listener that cannot bind yet (private network not up)
+  retries instead of stopping the API.
+- Bodies from another permanode, over the network or from its database
+  (`import-bodies`), must now also rebuild the header's `tx_root` from
+  their transactions in order, besides fitting the block hash and adding
+  up; block totals and transaction positions are checked too.
+- **Old blocks completed from payment receipts.** New subcommand
+  `import-receipts <FILE>...` reads wallet receipt journals
+  (`wallet.receipts`), JSON objects txid -> receipt hex and text files with
+  one receipt per line, and adds the transaction each receipt proves to its
+  header-only block below the recorded history. Every receipt is decoded
+  exactly (trailing data is refused - the node would ignore it), checked
+  offline, verified by the node (`paranoid_verifyReceipt`, same data
+  required) and against the header on record; one input owner, the txid it
+  is filed under. Receipts for archive blocks, gaps and heights without a
+  header yet are skipped and reported; running it again changes nothing.
+- A receipt's pages hold the whole transaction, input amounts and creation
+  ids included (the txid commits to them), so imported transactions are
+  complete except for the creation ids of their outputs, which the block
+  assigns. Stored with `transactions.source = 'receipt'`, the receipt in
+  the new table `tx_receipts`, the block's transaction count in
+  `blocks.tx_count_total`. `tx_outputs.creation_id` may now be NULL: the
+  first start rebuilds that table once (rows and rowids kept).
+- The recorded history does not change: recorded balances and totals, the
+  UTXO sweep's picture of the live state and the rich list, spent-in-gap
+  flags, the known-address refresh, `indexed_transactions`,
+  `transactions_24h`, `live_utxos`, the CSV export and pruning leave
+  imported transactions out explicitly (`db::RECORDED`); tests check every
+  one of these filters.
+- API: `tx/{txid}` carries `"source": "receipt"` for imported transactions
+  (outputs with `creation_id: null`); `block/height|hash` of a header-only
+  block lists its known transactions and `tx_count_total`, `blocks` carries
+  `tx_count_total`; address histories include them, marked, and
+  `address/{a}` adds `receipt_transactions`; `stats` adds
+  `receipt_transactions`.
+- **Header backfill.** The node keeps every block header since genesis;
+  a background thread now copies the headers from below the first
+  recorded block, down to genesis, as header-only blocks (`body_source =
+  'header'`: no transactions, reward or fees). Throttled by the new
+  `header_backfill_per_second` (default 50, 0 disables it), paused while
+  the indexer is behind, only for final heights, every header checked
+  against its child, resumable, logged sparsely.
+- Header-only blocks are not part of the recorded history: every query
+  about it excludes them explicitly - `indexed_blocks`,
+  `oldest_retained_timestamp`, gaps and their backfill, the reorg
+  re-check, balances and the UTXO sweep, the known-address refresh,
+  pruning and the CSV export are unchanged. New partial indexes keep
+  those queries as fast as before; a new index by miner serves the
+  mining figures.
+- API: `block/height/{h}` and `block/hash/{h}` serve header-only blocks
+  with `archived: false`, empty `transactions` and `archive_from_height`;
+  every block carries `miner_subsidy_micronoid`; `blocks` takes
+  `before={h}` to page down the chain (full pages of final blocks are
+  cached like final blocks); `address/{a}` adds `blocks_mined`; new
+  `miners?period=all|7d|24h[&limit=N]` ranks miners by blocks found with
+  their share; `stats` adds `archive_from_height`, `header_only_blocks`
+  and `headers_from_height`.
+- Write transactions take the write lock up front (`BEGIN IMMEDIATE`).
+  A transaction that read before it wrote failed at once with "database
+  is locked" whenever another connection (sweep, backfill) had committed
+  in between, costing the ingest loop a poll cycle; writers now wait for
+  each other.
+- Built against Parano1d **v2.0.1**, the mandatory release that supersedes
+  v2.0.0 (from the v2 fork on, a block's difficulty target follows its parent
+  header). Transaction and block formats are unchanged, so the decoder and
+  the stored history stay as they are. Run the permanode next to a v2.0.1
+  node before block 210,537.
+- Unknown paths under `/api/` answer with a JSON 404 instead of the
+  frontend's index page, so a client probing for an endpoint can tell.
+- **The UTXO sweep no longer reads the whole state on every run.** Since
+  late September 2026 the node spreads the live UTXOs over more than 70
+  state segments, and reading every slot of each (4.7 million `getSlot`
+  calls every 30 minutes) kept a small node busy most of the time. The
+  permanode now keeps its own picture of the live state - its recorded
+  unspent outputs plus the UTXOs it found in the node without a recorded
+  output (new table `state_slots`) - compares it per segment with
+  `getStateMap` at a height the indexer has fully processed, and reads only
+  segments that differ. A normal run is one node call; the first run after
+  the upgrade reads the segments holding UTXOs from before the recording
+  started once. Balances for the rich list come from that picture.
+- Segment reads are throttled (`state_scan_max_per_second`, default 500),
+  pause while the indexer is behind the node, and end the run instead of
+  skipping slots when the node stops answering - skipped slots used to get
+  their outputs flagged as spent in a gap. A freshly read segment takes
+  such flags back for outputs that are live after all, and once every
+  segment matches, addresses that no longer hold anything are set to zero.
+
+- **Parano1d v2 support** (fork at block 210 537). Requires node v2.0.0
+  before that height. The emission mirror follows the height-based v2
+  schedule (16 → 11.30 → … → 1 NOID per 1 051 200 blocks), the converted
+  development allocation (ends at 3 223 778, pays every 2 880 blocks from
+  213 416, the incomplete legacy day is never paid) and the 30 s block
+  time; a test holds it against the node's own code at every boundary.
+- `/api/v1/stats`, `/halving` and `/economics` carry `protocol` (active
+  version, activation height and estimate, target block time);
+  `/halving` and `/economics` add the `v2` reward schedule (tiers,
+  next reduction, progress, issued since activation), and the development
+  section follows the rules in force for the next block: payout rhythm
+  and `end_height` stay at the pre-v2 values until the fork, while
+  `v2_end_height` and `legacy_end_height` carry both ends throughout.
+- **Contract calls** are read from the raw block bytes of v2 blocks
+  (getBlockDetails does not report them): transactions carry
+  `contract: "call" | "close"`, block lists `contract_calls`, and the CSV
+  export a `contract` column.
+- The v2 proof class (Small/Large) lives only in the proof, which the node
+  drops after ~42 blocks: it is kept as first reported and never replaced
+  by `"v2 / class unavailable"`; the decoder self-check ignores it for v2.
+- The decoder links node crates v2.0.0.
+
+- **Reorg history is visible.** `/api/v1/orphans` lists the blocks a reorg
+  replaced together with what took their height; `stats.orphaned_blocks`
+  counts them; block responses carry `canonical` and `other_versions`, and
+  a transaction that survived a reorg lists its `other_occurrences`.
+  Replaced blocks can be opened by hash and report no confirmations.
+- **`export --dir DIR`** writes the recorded history as CSV (blocks,
+  transactions, inputs, outputs, addresses) with `tx_id` as the join key,
+  since the protocol `txid` is not unique across reorgs.
+- The economics response caches its 24h/7d/30d aggregates per tip
+  (340 ms cold, 20 ms warm; they scan every recorded block).
+
+## 0.2.0 - 2026-09-20
+
+The explorer frontend is no longer part of this repository: the
+permanode is the indexer and the JSON API, and the built-in page at `/`
+is an index of that API. A frontend of your own goes into `site_dir`
+(any static site; unknown paths fall back to `index.html`, scripts and
+styles are served `no-cache` with an ETag and fonts and images with a
+one-day lifetime, paths that would leave the directory are refused).
+
+- `import-bodies --from-db FILE` fills gaps from another permanode's
+  database or backup while this one keeps running; accepted only for
+  blocks whose hash the own node reported and whose transactions add up.
+  Outputs the sweep had marked as "spent in a gap" become ordinary spent
+  outputs once their spend is on record (from an import or a backfill,
+  canonical blocks only), and stale gap entries whose block has a body
+  are closed at start.
+- `/api/v1/tx/{txid}` gains `fee_breakdown`: base, per-input and
+  per-output fees, the state-growth burn at the parent block's pressure
+  multiplier, tip and miner share (`core/src/fees.rs` mirrors the
+  consensus fee model).
+- `/api/v1/halving`: live-state occupancy against the expansion
+  threshold, the 18 hard-finalized headers deciding the next block, a
+  sampled header history, the pressure multiplier and thresholds.
+- `/api/v1/economics`: issued (mirrored emission schedule) vs burned
+  (issued minus the node's supply, walked back through the recorded
+  blocks and estimated from the headers' mint counter before that), net
+  supply, annualized issuance, state pressure, the minimum burn until the
+  next expansion split into pressure bands, development allocation with
+  next payout and cumulative amounts per recipient, and recorded state
+  activity over 24 h / 7 d / 30 d.
+- `/api/v1/stats`: transactions and burned fees of the last 24 hours,
+  addresses with a balance, database size, emission and burn totals,
+  state capacity and slots until the next expansion; `blocks.log_slots`
+  is stored so subsidies stay right across expansions.
+- Header samples and the finalized window are cached per tip; the
+  economics response takes about 100 ms, the halving response 12 ms.
+
+## 0.1.16 - 2026-09-18
+
+Everything since the first release, consolidated. These versions also
+shipped an explorer frontend compiled into the binary; it has since
+moved to its own project and is not part of this repository.
+
+- **One binary.** Indexer and API run in a single process (`index` and
+  `serve` subcommands to run either alone); `listen` and the new
+  `donation_address` live in `permanode.toml`.
+- **Address data.** Net amount per transaction for the viewed address
+  (not the transaction's total output), the real counterparty instead of
+  the address's own change, confirmations (final from 18 on), bounded
+  pagination up to 200 per page, and a notice whenever the recorded
+  figures cannot be complete - with the live balance from the node
+  authoritative regardless.
+- **Complete live balances.** A sweep over the node's UTXO state
+  (`getStateMap` + `getSlot`) on start and every 30 minutes assigns every
+  UTXO to its owner, verifies its totals against the node, and flags
+  recorded outputs that were spent inside gaps so recorded balances can
+  never exceed live ones.
+- **Robustness.** Every block written in one SQLite transaction with
+  `synchronous=FULL`, serialized schema migrations, indexes for the
+  unspent-output queries, RPC timeouts, a fresh database starting at the
+  oldest body the node still serves, API input validation and bounded
+  pagination, ETag revalidation for static files.
+- **Operations.** README for operators (install, service, public
+  instance, updating), `contrib/watchdog/` (Telegram/journal) and
+  `contrib/backup/` (daily database copy), release tarball with the
+  example config.
+
+## 0.1.0 - 2026-09-17
+
+First release: indexer with the `getBlock` fallback decoder for the
+node's marker-block RPC bug, JSON API, rich list.

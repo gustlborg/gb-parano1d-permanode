@@ -1,0 +1,520 @@
+# parano1d-permanode
+
+A Parano1d node keeps full transaction bodies only for a short window
+(a few minutes) before pruning them. Headers stay forever, the actual
+transaction history does not. This program runs next to your own node,
+records every transaction permanently before the node discards it, and
+serves that history - together with live figures from the node - as a
+JSON API that a block explorer or any other tool can be built on.
+
+One binary, one config file, one SQLite database. Anyone running a
+Parano1d node can run it; it only talks to the node's local RPC. It
+ships with a plain index page of the API and can serve any static
+frontend you point it at (`site_dir`).
+
+## Requirements
+
+- A Parano1d node (v2.0.1 or later - required for the v2 fork at block
+  210 537), fully synced, with its JSON-RPC on
+  the default `127.0.0.1:9601`. Install it first following the official
+  guide: <https://docs.parano1d.org/operate/node>. The permanode must run
+  on the same machine (or reach the RPC over a private, authenticated
+  channel - the node's RPC has no authentication and must never be
+  exposed publicly).
+- Linux x86_64 for the release binary (glibc 2.34 or newer: Ubuntu 22.04+,
+  Debian 12+). Other platforms: build from source, see below.
+- Almost no resources of its own: about 20 MB of memory and roughly
+  10 MB of disk per day at today's transaction volume.
+
+## Install
+
+Replace `0.4.0` with the latest version from the
+[releases page](https://github.com/gustlborg/gb-parano1d-permanode/releases):
+
+```sh
+V=0.4.0
+curl -sSLO https://github.com/gustlborg/gb-parano1d-permanode/releases/download/v$V/parano1d-permanode-$V-linux-x86_64.tar.gz
+curl -sSLO https://github.com/gustlborg/gb-parano1d-permanode/releases/download/v$V/SHA256SUMS
+sha256sum --check SHA256SUMS          # must print: ... OK
+tar -xzf parano1d-permanode-$V-linux-x86_64.tar.gz
+sudo install -m 0755 parano1d-permanode /usr/local/bin/
+```
+
+Try it once in a directory of your choice:
+
+```sh
+mkdir -p ~/permanode && cd ~/permanode
+parano1d-permanode
+```
+
+The first start writes a commented `permanode.toml` and a
+`permanode.sqlite3` database into that directory, starts recording from
+the oldest block the node can still serve a body for (about 40 blocks
+back), sweeps every address's balance, and serves the API on
+<http://127.0.0.1:8420/>. Stop it with Ctrl+C and set it up as a service
+so it never stops again: history from before the first start is gone,
+the node itself no longer has it either.
+
+## Run as a service
+
+A dedicated system user, the data under `/var/lib/permanode`, and
+systemd keeping it alive:
+
+```sh
+sudo useradd --system --home-dir /var/lib/permanode --create-home --shell /usr/sbin/nologin permanode
+sudo install -d -o permanode -g permanode -m 0750 /var/lib/permanode
+cd /var/lib/permanode
+sudo -u permanode timeout 5 parano1d-permanode || true    # first run writes permanode.toml and the database here
+sudoedit -u permanode /var/lib/permanode/permanode.toml     # optional: listen, donation_address, retention_days ...
+```
+
+`/etc/systemd/system/parano1d-permanode.service`:
+
+```ini
+[Unit]
+Description=Parano1d permanode (indexer + API)
+Wants=network-online.target
+After=network-online.target parano1d.service
+
+[Service]
+Type=simple
+User=permanode
+Group=permanode
+WorkingDirectory=/var/lib/permanode
+ExecStart=/usr/local/bin/parano1d-permanode --config /var/lib/permanode/permanode.toml
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/permanode
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now parano1d-permanode
+sudo journalctl -u parano1d-permanode -f
+```
+
+The log shows every block as it is recorded, gaps, reorgs, and the sweep's
+check against the node ("exact match with the node at #…").
+
+Stop and start it whenever you like: it continues at the block after the
+last one it recorded. The node keeps transaction bodies only for its last
+42 blocks (about 21 minutes at the 30 s target), so after a longer pause
+the blocks in between are recorded with their header but without
+transactions - permanent gaps, listed under `/api/v1/gaps` and counted in
+`stats` - and indexing simply goes on from there.
+
+## Configuration
+
+`permanode.toml` (see `permanode/permanode.example.toml` for every key):
+
+- `rpc_url` — the node's RPC, default `http://127.0.0.1:9601`.
+- `db_path` — the SQLite database, default `permanode.sqlite3` in the
+  working directory.
+- `listen` — where the API listens, default `127.0.0.1:8420`. Keep it
+  on loopback for a public instance and put a TLS reverse proxy in front.
+- `site_dir` — a directory with a static frontend (`index.html` plus
+  assets) to serve in place of the built-in API index. Unknown paths get
+  `index.html`, so a client-side router works; scripts and styles are
+  sent with `no-cache` plus an ETag and fonts and images with a one-day
+  lifetime, so an updated frontend shows up immediately even behind a
+  CDN. Leave it unset to serve the API only.
+- `retention_days` — how long to keep transaction detail (0 = forever,
+  the default). Block headers are always kept.
+- `archive_raw_blocks` — keep every block's raw bytes next to the
+  decoded tables (default on, about 0.4 KB per block). See "Raw block
+  archive" below.
+- `poll_interval_seconds` — how often to check the node (default 5).
+  Keep this well below the node's body window.
+- `scan_slots_every_cycles` — how often the UTXO sweep runs, in polls
+  (default 360, about 30 minutes; 0 disables it).
+- `state_scan_max_per_second` — upper bound for `getSlot` calls while the
+  sweep reads a state segment (default 500; 0 = unthrottled).
+- `header_backfill_per_second` — upper bound for `getBlockHeader` calls
+  while the header backfill copies the headers from before the first
+  recorded block (default 50, about 180,000 headers an hour; 0 disables
+  it). See "Header backfill" below.
+- `donation_address` — returned by `/api/v1/stats` for a frontend to
+  show; leave empty for none.
+
+Subcommands: `parano1d-permanode index` runs only the indexer,
+`parano1d-permanode serve` only the API over an existing database.
+The default runs both in one process; if either half dies the process
+exits so systemd restarts both together.
+
+## Public instance
+
+Keep `listen` on loopback and publish it through a reverse proxy with TLS,
+e.g. Caddy (automatic Let's Encrypt certificates):
+
+```
+permanode.example.org {
+    reverse_proxy 127.0.0.1:8420
+}
+```
+
+Firewall everything except SSH, 80/443 and the node's P2P port 9600.
+The node's RPC port 9601 must stay on loopback. Consider a rate limit at
+the proxy or CDN for `/api/`; the API caps list sizes (200 blocks, 200
+transactions per address page) and validates every id, but a public
+endpoint still deserves one. If you put Cloudflare in front with Bot
+Fight Mode, note that it blocks default library user agents such as
+Python's; API clients then need a descriptive `User-Agent`.
+
+## Updating
+
+```sh
+# download and verify the new tarball as above, then:
+sudo systemctl stop parano1d-permanode
+sudo install -m 0755 parano1d-permanode /usr/local/bin/
+sudo systemctl start parano1d-permanode
+```
+
+Database migrations run automatically on start. Never delete the database
+during an update - it is the whole point. The first start of 0.3.0 rebuilds
+the `tx_outputs` table once (to allow unknown creation ids for outputs
+imported from receipts, see below): a few seconds for a few hundred thousand
+outputs, inside one transaction.
+
+## What you get
+
+- **Indexer**: polls the node, stores every canonical block's header and
+  all transactions (sender, inputs, outputs, amounts, fee, coinbase /
+  development-payout flags, the Merkle-path data for the protocol's
+  inclusion receipts) and logs chain reorganizations instead of
+  overwriting them.
+- **JSON API** under `/api/v1/`: `stats` (indexer state, chain and
+  network figures, emission and burn totals), `blocks`,
+  `block/height/{h}`, `block/hash/{h}`, `tx/{txid}` with the fee split
+  into miner share and consensus burn, `address/{a}` (recorded and live
+  balance, transactions, notices when the recorded figures cannot be
+  complete, blocks mined), `address/{a}/utxos`, `mempool`, `richlist` (top 100, `?limit=` up to 10 000),
+  `miners` (miners by blocks found, whole chain or the last 7 days /
+  24 hours), `gaps`,
+  `orphans` (blocks a reorg replaced, with what took their height),
+  `halving` (live-state occupancy against the expansion threshold, the
+  finalized trigger window, sampled header history) and `economics`
+  (issued vs burned over height, state pressure and burn tiers, minimum
+  burn to the next expansion, development allocation, recorded state
+  activity). Amounts are µNOID; totals that can exceed 2^53 are decimal
+  strings. The root page lists the endpoints.
+- **Frontend of your choice**: none is built in; `site_dir` serves any
+  static site over the API with sensible caching. Final data (blocks and
+  transactions 18 confirmations deep) is served with a one-hour cache
+  lifetime, everything else uncached.
+- **Live balances for every address**: the node's UTXO state is swept
+  periodically (`paranoid_getStateMap` + `paranoid_getSlot`), so the rich
+  list and address balances are complete and verified against the node's
+  own totals, not reconstructed from partial history.
+- **Old blocks completed from payment receipts**: `import-receipts` adds
+  the transactions that wallet payment receipts prove to the blocks below
+  the recorded history, each verified by the node and against the block
+  header (see below).
+
+## How it works
+
+- **Blocks and transactions** come from `getBlockDetails` every poll
+  (default 5 s), with the `getBlock` decoder as fallback (see below). A
+  block is written as one transaction; reorgs mark the old block orphaned
+  and store the replacement, nothing is overwritten. Blocks and
+  transactions are final at 18 confirmations (the protocol's maximum
+  reorg depth is 17); responses carry the confirmation count.
+- **Balances** come from two sources, shown side by side. *Recorded*
+  figures are computed from the transactions this permanode has stored,
+  so they only cover activity since its first start. *Live* figures come
+  straight from the node's current UTXO state and are always complete.
+  Whenever the recorded figures cannot be complete for an address (it
+  was active before the permanode started, or some of its outputs were
+  spent inside gaps), the address response says so; the live balance is
+  authoritative regardless.
+- **The UTXO sweep** keeps the permanode's picture of the node's live
+  UTXOs in step with the node: its recorded unspent outputs plus the UTXOs
+  it found in the node without a recorded output (created before it
+  started recording, or in a gap). On the first poll after start and then
+  every `scan_slots_every_cycles` polls (default 360, about 30 minutes) it
+  compares that picture per state segment with the node's `getStateMap`,
+  at a height it has fully processed, and reads only the segments that
+  differ slot by slot (`getSlot`, throttled by
+  `state_scan_max_per_second`, paused while the indexer is behind). A
+  normal run is a single node call; the first run on a new database, or
+  after a gap, reads the segments concerned once. Balance and UTXO count
+  per address come from that picture, and each run checks it against the
+  node and logs the result. The same pass reconciles the recorded
+  history: a recorded output that a freshly read segment no longer holds,
+  with no recorded transaction spending it, was spent in a block whose
+  body this permanode never had; it is flagged and dropped from the
+  recorded balance, and the address response says so (a later read that
+  finds it live takes the flag back). This is what makes the rich
+  list and the address balances complete for addresses that never appear
+  in the recorded history. Of the individual UTXOs only those without a
+  recorded output are kept (for the per-segment comparison);
+  `address/{a}/utxos` loads an address's UTXOs from the node on request.
+- **Reorgs** are recorded, not overwritten: a replaced block keeps its row
+  and gets an `orphaned` status entry, so it can still be opened by hash.
+  `/api/v1/orphans` lists them with the block that took their height,
+  `stats.orphaned_blocks` counts them, and a block or transaction with a
+  competing version says so.
+- **Gaps** are heights whose body the node had already pruned when the
+  indexer got to them (for example after an outage longer than the
+  node's serving window, or on a node that just synced from a snapshot).
+  They are listed under `/api/v1/gaps` and counted in `stats`; heights
+  still inside the serving window are retried automatically.
+  Older ones can be filled from another permanode, see below.
+
+## Header backfill
+
+The node prunes bodies after minutes but keeps every block header since
+genesis. So that block pages and mining statistics cover the whole chain,
+the permanode copies the headers from below its first recorded block,
+from there down to genesis, into its database as **header-only blocks**:
+height, hash, parent, time, miner, difficulty target, state size and the
+other header fields - no transactions, no reward (the coinbase value
+includes fees, which are unknown without the body), no fees.
+
+- It runs in a background thread next to the indexer, at most
+  `header_backfill_per_second` header calls (default 50), pauses while the
+  indexer is behind the node, and only copies heights deep enough to be
+  final. Each header must be the parent of the block above it, so an
+  answer that does not fit stops the run instead of being stored. After a
+  restart it goes on where it stopped; after an error it waits (one
+  minute, longer each time) instead of retrying at once.
+- It logs its start, a line every 10,000 headers and its completion.
+  `stats` reports `header_only_blocks`, `headers_from_height` (0 once
+  genesis is reached) and `archive_from_height`, the first recorded block.
+- Header-only blocks are not part of the recorded history. Everything
+  that describes that history leaves them out: `indexed_blocks`,
+  `oldest_retained_timestamp`, gaps, balances and the UTXO sweep, the
+  reorg re-check, pruning and the CSV export are exactly as they would be
+  without them.
+- In the API, `block/height/{h}` and `block/hash/{h}` return them with
+  `"archived": false`, `reward_micronoid` and `total_fees_micronoid` null,
+  and `archive_from_height`; `transactions` is empty unless payment
+  receipts were imported for the block (see below);
+  `miner_subsidy_micronoid` (what the consensus rules let the coinbase mint
+  before fees, known for every block) is set. `blocks?before={h}` pages
+  down the chain across the first recorded block. `address/{a}` carries
+  `blocks_mined` and `miners?period=all|7d|24h` ranks miners, both over
+  the header-only blocks too (genesis is nobody's block).
+- Space: about 1 KB per header including indexes, some 100 MB for the
+  first 108,000 blocks of the chain.
+
+## CSV export
+
+```
+parano1d-permanode -c permanode.toml export --dir export
+```
+
+Writes `blocks.csv`, `transactions.csv`, `inputs.csv`, `outputs.csv`,
+`addresses.csv` and a README into that directory. Join on `tx_id`, not on
+`txid`: a transaction that survived a reorg is recorded once per block it
+was in, so joining on the protocol id double-counts. `canonical = 1`
+selects the chain as it stands.
+
+## Raw block archive
+
+The node prunes a block's body a few minutes after it was mined; what
+the permanode decoded from it is all that is left. With
+`archive_raw_blocks` (on by default) it also keeps the block's bytes
+exactly as the node served them (`paranoid_getBlock`), zlib-compressed in
+the table `raw_blocks` - about 0.4 KB per block at today's block sizes,
+one extra `getBlock` call per block. With them the archive can be read
+again at any time: by a newer version that understands more of a block,
+after a decoder fix, or to hand the original bytes to someone else.
+
+Bytes are kept only once they prove to be the block on record: they must
+decode to its height and hash, their pages must rebuild the header's
+`tx_root`, and they must be the block's one canonical encoding (nothing
+appended, nothing encoded differently). They are checked again whenever
+they are read. Bytes the indexer could not keep at once are fetched again
+while the node still serves the body; the first start after an upgrade
+picks up the blocks still inside that window. Older blocks have no bytes.
+`retention_days` prunes them with the transactions. The proof is not part
+of the bytes (`getBlock` does not serve it).
+
+Print a block's kept bytes as hex, the way `getBlock` returns them, or
+write them to a file:
+
+```
+parano1d-permanode -c permanode.toml raw-block 168950
+parano1d-permanode -c permanode.toml raw-block 168950 --out 168950.bin
+```
+
+## Filling gaps from another permanode
+
+Any permanode that stayed online has the bodies yours missed. Copy its
+database (or one of its backups - same format), then:
+
+```
+parano1d-permanode -c permanode.toml import-bodies --from-db other-permanode.sqlite3
+```
+
+This can run while your permanode is running. Only gaps are touched, and
+a body is accepted only for a block whose hash your own node reported,
+whose transactions in order rebuild the `tx_root` of that header (so the
+list of transactions is complete and genuine) and add up (inputs,
+outputs, fees, coinbase). Imported blocks show `body_source = import` in
+the database and are logged as "recovered via import". Where the other
+database kept a block's raw bytes, those are taken instead and decoded
+here, and with `archive_raw_blocks` the bytes it kept for blocks you
+have no bytes of are copied over as well (checked the same way).
+
+If you run two or more permanodes, they can fill each other's gaps
+continuously over a private network (for example a WireGuard tunnel)
+instead:
+
+```toml
+# on permanode A
+peer_listen = "[fd00::1]:8421"
+backfill_peers = ["http://[fd00::2]:8421"]
+# on permanode B
+peer_listen = "[fd00::2]:8421"
+backfill_peers = ["http://[fd00::1]:8421"]
+```
+
+`peer_listen` serves this permanode's recorded bodies
+(`/peer/v1/body/<height>/<hash>`), its kept raw bytes
+(`/peer/v1/raw/<height>/<hash>`) and a short status (`/peer/v1/status`:
+tip, first archived block, open gaps, first block with raw bytes); keep it
+on the private network and let only the other permanodes reach it. Every
+`peer_backfill_interval_seconds` (300) the open gaps are offered to
+`backfill_peers`, checked exactly like an import and stored with
+`body_source = peer`; with `archive_raw_blocks` the peers are also asked
+for the raw bytes this permanode missed (blocks it has a body of, from the
+first block a peer kept bytes for, below the node's serving window). Once
+by hand: `parano1d-permanode -c permanode.toml fill-from-peer --peer http://[fd00::1]:8421`.
+Where a peer kept a block's raw bytes, they are taken and decoded here, so
+every field is checked against your own header. Otherwise the decoded
+contents of a body (amounts, owners) are taken as the other permanode
+recorded them - fill only from permanodes you run or trust.
+
+## Completing old blocks from payment receipts
+
+Below its first recorded block the permanode has only block headers. A
+Parano1d wallet keeps a payment receipt for the payments it made
+(`wallet.receipts` next to the wallet), and a receipt proves one
+transaction of its block. `import-receipts` adds those transactions to the
+header-only blocks:
+
+```
+parano1d-permanode -c permanode.toml import-receipts wallet.receipts [more files]
+```
+
+- Input: wallet receipt journals (`wallet.receipts`, read like the wallet
+  reads them, checksums included), JSON objects
+  `{"<txid>": "<receipt hex>"}` (the wallet's older format) and text files
+  with one receipt hex per line. Several files at once; a receipt listed
+  twice counts once. A receipt holds public chain data only.
+- Every receipt must be exactly one receipt (nothing after it - the node
+  would check only the first of two), its Merkle proof must verify, the
+  node must confirm it (`paranoid_verifyReceipt`: proof valid, block on
+  the canonical chain, the same data), it must match the header on record
+  at its height (`tx_root` and time), and all its inputs must have one
+  owner. Where a file files it under a txid, it must prove that txid.
+- Only header-only blocks are completed. Receipts for blocks of the
+  recorded history, for gaps (fill those with `import-bodies`) and for
+  heights whose header is not on record yet are skipped. The command
+  prints one line per receipt and the totals, exits with an error if a
+  receipt was rejected, and imports nothing twice when run again. It can
+  run while the permanode is running; update the running permanode to
+  this version first.
+
+A receipt proves the whole transaction - sender, inputs with their amounts
+and creation ids, outputs, fee, pages - its position in that canonical
+block and how many transactions the block has. It says nothing about the
+block's other transactions, its reward and fees, or what happened to the
+outputs later; the creation ids of its outputs are unknown (the block
+assigns them when it is applied) and stay null.
+
+- Stored with `transactions.source = 'receipt'`, the receipt itself in
+  `tx_receipts` (so it can be verified again), the block's transaction
+  count in `blocks.tx_count_total`.
+- In the API, `tx/{txid}` returns them with `"source": "receipt"`;
+  `block/height/{h}` lists the known transactions of a header-only block
+  with `tx_count_total`, which `blocks` carries too; address histories
+  include them, marked, and `address/{a}` counts them in
+  `receipt_transactions`; `stats.receipt_transactions` counts them all.
+- They are not part of the recorded history: the recorded balances and
+  totals, the UTXO sweep and the rich list, the known-address refresh,
+  `indexed_transactions`, `transactions_24h`, `live_utxos`, the CSV
+  export and pruning are exactly what they would be without them.
+
+## Building
+
+Rust (stable), a C compiler and libclang (`apt install clang`). The
+indexer links the node's own crates (`noid_chain`, `noid_tx`, git, pinned
+to the node's `v2.0.3` tag) for the block decoder described below; their
+storage dependency needs bindgen.
+
+```sh
+cargo build --release
+./target/release/parano1d-permanode --help
+```
+
+If bindgen fails with `'stdarg.h' file not found`, point it at your
+GCC's resource headers:
+`BINDGEN_EXTRA_CLANG_ARGS="-I/usr/lib/gcc/x86_64-linux-gnu/13/include" cargo build --release`
+(adjust the GCC version to what `ls /usr/lib/gcc/x86_64-linux-gnu/*/include/stdarg.h` shows).
+
+Layout: `core/` is the SQLite schema, queries and the mirrored consensus
+rules (emission schedule, fee model), `permanode/` the binary (indexer,
+node RPC client, block decoder, API server) with `permanode/assets/`, the
+built-in index page of the API.
+
+## Block decoder
+
+Node v1.1 returned no transactions from `getBlockDetails` /
+`getRecentTransactions` (`retained: null`) for every "marker" block of a
+multi-block commit, about 1 in 45 blocks, although it still held the
+body; v2.0.0 fixed that. The raw body is always served by
+`paranoid_getBlock`, so whenever details come back empty the indexer
+decodes the block itself, linking the node's own crates so the derived
+fields stay byte-identical to the node's RPC. The same decoder reads the
+contract-call bits of v2 blocks. This is on by default
+(`getblock_fallback`); a continuous self-check (`decoder_selfcheck`)
+decodes every normal block a second way and counts any disagreement, in
+case a future node version changes the wire format.
+
+## Monitoring
+
+An indexer that silently stops loses history the network will not hand
+out again, so keep an eye on it: `stats.last_processed_height` should
+follow the node's height (`paranoid_getChainInfo`) within a few blocks,
+and `stats.gaps` should not grow.
+
+## Backups and crash safety
+
+SQLite in WAL mode with `synchronous=FULL`: every commit is fsynced, and
+each block is written in one transaction, so a power cut leaves either the
+whole block or nothing. Back the database up regularly while it runs, e.g.
+`sqlite3 permanode.sqlite3 ".backup copy.sqlite3"`, and
+keep a copy off the machine: the database is the one thing that cannot be
+re-downloaded from the network.
+
+## Troubleshooting
+
+- `RPC call … failed to send`: the node is not running or `rpc_url` is
+  wrong. The indexer keeps retrying every poll.
+- Gaps right after installing: the node was still syncing, or synced from
+  a snapshot and only holds bodies from that point. Bodies inside the
+  node's window are retried automatically; older ones can be imported
+  from another permanode's database (`import-bodies`, see above).
+- `Address already in use`: something else listens on `listen`; change
+  the port or stop the other program.
+- `header backfill stopped, next attempt in N min`: the node did not
+  answer, or answered with a header that does not fit the chain on
+  record. The backfill tries again by itself; nothing it stored is
+  affected.
+- `import-receipts` skips a receipt with "no block header on record at
+  this height yet": the header backfill has not reached that height; run
+  the import again once it is done (`stats.headers_from_height` is 0).
+- Building from source fails in bindgen: see Building above.
+
+## License
+
+AGPL-3.0-or-later, see `LICENSE`.

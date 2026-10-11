@@ -1,0 +1,6 @@
+/target
+/dist/
+# a local instance: config, database, logs, CSV exports, key material
+/run/
+/export/
+/security/
